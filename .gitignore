@@ -1,0 +1,47 @@
+# ─── Python bytecode ────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+*.so
+
+# ─── Virtual environments ────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ─── Python packaging ────────────────────────────────────────────────────────
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+
+# ─── Generated data (re-create with: python AIModel/data_generator.py) ──────
+AIModel/data/*.csv
+
+# ─── Generated charts (re-create with: python AIModel/carbon_analysis.py) ───
+AIModel/analysis_output/
+
+# ─── Claude Code local settings ──────────────────────────────────────────────
+.claude/
+
+# ─── Environment / secrets ───────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ─── Jupyter ─────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ─── OS noise ────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── Editor state ────────────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~

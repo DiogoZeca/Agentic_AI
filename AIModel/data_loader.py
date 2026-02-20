@@ -1,0 +1,208 @@
+"""
+Data Loader — Flexible ingestion layer for AI infrastructure metrics.
+
+Handles any CSV that has a 'ds' datetime column and at least
+'totalEnergyConsumption'. Auto-detects available metrics and regressors
+so the analysis pipeline degrades gracefully when columns are missing
+(e.g., no trainingActive in a dataset that only has power + carbon data).
+
+Supported data sources:
+  - Synthetic (data_generator.py)
+  - Real carbon intensity from Electricity Maps API
+  - Real workload traces from Alibaba GPU cluster data
+  - Any custom CSV following the schema below
+
+Minimum required columns:
+  ds                       datetime   hourly timestamps
+  totalEnergyConsumption   float      kWh per hour
+
+Recommended optional columns (unlock more metrics / better accuracy):
+  carbonEmissions          float      kgCO2e per hour
+  inferenceRequests        float      requests per hour
+  carbonIntensityFactor    float      kgCO2/kWh (grid carbon intensity)
+  trainingActive           float      0/1 binary — training run in progress
+  sciPerInference          float      gCO2e per inference request
+
+Usage:
+    from data_loader import load_and_validate, build_pipeline_config
+
+    df = load_and_validate("data/my_data.csv")
+    config = build_pipeline_config(df)
+
+    # config.metrics        — list of metrics to analyse
+    # config.regressor_map  — {metric: [regressors]} for Prophet
+    # config.fit_metrics    — metrics to fit directly (SCI derived separately)
+    # config.has_sci        — whether SCI can be derived from components
+"""
+
+from __future__ import annotations
+
+import sys
+from dataclasses import dataclass, field
+from typing import Optional
+
+import pandas as pd
+
+
+# ── Column definitions ────────────────────────────────────────────────────────
+
+REQUIRED_COLUMNS: list[str] = ["ds", "totalEnergyConsumption"]
+
+# Metrics the pipeline can analyse; ordered by priority
+CANDIDATE_METRICS: list[str] = [
+    "totalEnergyConsumption",
+    "carbonEmissions",
+    "sciPerInference",   # derived — never fit directly
+]
+
+# Metrics the models fit directly (SCI is always derived from components)
+CANDIDATE_FIT_METRICS: list[str] = [
+    "totalEnergyConsumption",
+    "carbonEmissions",
+    "inferenceRequests",
+]
+
+# Possible regressors per metric — only used if column exists in data
+POSSIBLE_REGRESSORS: dict[str, list[str]] = {
+    "totalEnergyConsumption": ["trainingActive"],
+    "carbonEmissions": [],
+    "inferenceRequests": [],
+}
+
+# Columns needed for each SCI-supporting chart
+CHART_COLUMN_DEPS: dict[str, list[str]] = {
+    "power_overview":      ["inferencePowerDraw", "trainingPowerDraw", "totalInfrastructurePower"],
+    "training_spikes":     ["trainingActive", "trainingPowerDraw", "totalInfrastructurePower"],
+    "sci_by_hour":         ["sciPerInference"],
+    "load_vs_efficiency":  ["inferenceRequests", "energyPerInference"],
+    "intensity_vs_green":  ["carbonIntensityFactor", "greenConsumptionPercentage"],
+}
+
+
+# ── Pipeline config dataclass ─────────────────────────────────────────────────
+
+@dataclass
+class PipelineConfig:
+    """Holds auto-detected column availability for analysis scripts."""
+    metrics: list[str]
+    fit_metrics: list[str]
+    regressor_map: dict[str, list[str]]
+    has_sci: bool                          # can SCI be derived?
+    available_charts: dict[str, bool]      # which optional charts can be rendered
+    missing_recommended: list[str]         # columns that were absent
+
+
+# ── Core functions ────────────────────────────────────────────────────────────
+
+def load_and_validate(path: str) -> pd.DataFrame:
+    """Load CSV and enforce minimum schema.
+
+    Raises SystemExit with a clear message if required columns are missing.
+    Prints a schema report showing what was found.
+    """
+    try:
+        df = pd.read_csv(path, parse_dates=["ds"])
+    except FileNotFoundError:
+        sys.exit(
+            f"\n[data_loader] File not found: {path}\n"
+            "  Generate synthetic data first:  python data_generator.py\n"
+            "  Or point DATA_PATH to your CSV.\n"
+        )
+
+    # Check required columns
+    missing_required = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+    if missing_required:
+        sys.exit(
+            f"\n[data_loader] Missing required columns: {missing_required}\n"
+            f"  Found columns: {list(df.columns)}\n"
+            f"  Required: {REQUIRED_COLUMNS}\n"
+        )
+
+    # Ensure ds is datetime
+    if not pd.api.types.is_datetime64_any_dtype(df["ds"]):
+        df["ds"] = pd.to_datetime(df["ds"])
+
+    # Drop fully-NaN rows on key columns
+    before = len(df)
+    df = df.dropna(subset=["ds", "totalEnergyConsumption"])
+    dropped = before - len(df)
+    if dropped:
+        print(f"[data_loader] Dropped {dropped} rows with NaN in required columns.")
+
+    _print_schema_report(df)
+    return df
+
+
+def build_pipeline_config(df: pd.DataFrame) -> PipelineConfig:
+    """Build the full pipeline configuration from available columns."""
+    cols = set(df.columns)
+
+    # Which fit metrics are available
+    fit_metrics = [m for m in CANDIDATE_FIT_METRICS if m in cols]
+
+    # SCI can be derived only if both components exist
+    has_sci = ("carbonEmissions" in cols) and ("inferenceRequests" in cols)
+
+    # Final display metrics (SCI added if derivable)
+    metrics = [m for m in ["totalEnergyConsumption", "carbonEmissions"] if m in cols]
+    if has_sci:
+        metrics.append("sciPerInference")
+
+    # Regressor map — only include regressors that exist in data
+    regressor_map = {
+        metric: [r for r in regs if r in cols]
+        for metric, regs in POSSIBLE_REGRESSORS.items()
+        if metric in fit_metrics
+    }
+
+    # Which optional charts can be rendered
+    available_charts = {
+        name: all(c in cols for c in deps)
+        for name, deps in CHART_COLUMN_DEPS.items()
+    }
+
+    # Recommended columns that are absent
+    recommended = [
+        "carbonEmissions", "inferenceRequests", "carbonIntensityFactor",
+        "trainingActive", "sciPerInference",
+    ]
+    missing_recommended = [c for c in recommended if c not in cols]
+
+    return PipelineConfig(
+        metrics=metrics,
+        fit_metrics=fit_metrics,
+        regressor_map=regressor_map,
+        has_sci=has_sci,
+        available_charts=available_charts,
+        missing_recommended=missing_recommended,
+    )
+
+
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+def _print_schema_report(df: pd.DataFrame) -> None:
+    """Print a clear report of what columns were found and what's missing."""
+    cols = set(df.columns)
+    all_known = (
+        REQUIRED_COLUMNS
+        + CANDIDATE_FIT_METRICS
+        + ["sciPerInference", "carbonIntensityFactor",
+           "trainingActive", "trainingPowerDraw", "trainingGpuUtil",
+           "inferencePowerDraw", "energyPerInference", "avgBatchSize",
+           "gpuUtilInference", "totalGpuPower", "cpuAndMemoryPower",
+           "pue", "totalInfrastructurePower",
+           "greenConsumptionPercentage", "operationalEmissions",
+           "embodiedEmissions", "carbonEmissions"]
+    )
+
+    found     = [c for c in all_known if c in cols]
+    missing   = [c for c in all_known if c not in cols]
+    extra     = [c for c in cols if c not in all_known]
+
+    print(f"\n[data_loader] Schema report — {len(df)} rows")
+    print(f"  Date range:  {df['ds'].min().date()} → {df['ds'].max().date()}")
+    print(f"  Found ({len(found)}):   {', '.join(found)}")
+    if missing:
+        print(f"  Missing ({len(missing)}): {', '.join(missing)}")
+    if extra:
+        print(f"  Extra ({len(extra)}):  {', '.join(extra)}")
