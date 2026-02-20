@@ -66,14 +66,22 @@ CANDIDATE_METRICS: list[str] = [
 CANDIDATE_FIT_METRICS: list[str] = [
     "consumption",
     "carbonEmissions",
+    "carbonIntensityFactor",
+    "greenConsumptionPercentage",
+    "cpuUtilization",
     "functionalUnit",
+    "cost",
 ]
 
 # Possible regressors per metric — only used if column exists in data
 POSSIBLE_REGRESSORS: dict[str, list[str]] = {
-    "consumption":      ["functionalUnit"],
-    "carbonEmissions":  [],
-    "functionalUnit":   [],
+    "consumption":                ["functionalUnit"],
+    "carbonEmissions":            [],
+    "carbonIntensityFactor":      [],
+    "greenConsumptionPercentage": [],
+    "cpuUtilization":             [],
+    "functionalUnit":             [],
+    "cost":                       [],
 }
 
 # Columns needed for each optional chart

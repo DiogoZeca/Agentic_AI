@@ -42,6 +42,7 @@ from data_loader import load_and_validate, build_pipeline_config, PipelineConfig
 OUTPUT_DIR = "analysis_output"
 DATA_PATH = os.environ.get("DATA_PATH", "data/sample_energy_data.csv")
 FORECAST_PERIODS = 168   # 7 days × 24 hours
+
 DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 # ── Consistent colour palette ──────────────────────────────────────────────────

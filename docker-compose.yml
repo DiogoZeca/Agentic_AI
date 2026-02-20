@@ -1,0 +1,88 @@
+# Energy & Carbon Forecasting — Docker Compose
+#
+# Two modes:
+#
+#   Analysis pipeline  (generate data + all forecast charts):
+#     docker compose --profile analysis up --build
+#
+#   Forecasting API  (long-running REST service):
+#     docker compose up --build
+#
+# Host-visible output:
+#   AIModel/data/                — generated CSV (bind-mounted)
+#   AIModel/analysis_output/     — PNG charts   (bind-mounted)
+#
+# Named volumes:
+#   hf-cache  — HuggingFace model weights (~925 MB, downloaded once, reused)
+
+services:
+
+  # ── Analysis pipeline ────────────────────────────────────────────────────────
+  # Run with:  docker compose --profile analysis up --build
+  # Execution order: generate → (analyse + ensemble in parallel)
+
+  generate:
+    build:
+      context: ./AIModel
+      dockerfile: Dockerfile.analysis
+    container_name: energy-generate
+    command: python data_generator.py
+    volumes:
+      - ./AIModel/data:/app/data
+    profiles: [analysis]
+
+  analyse:
+    build:
+      context: ./AIModel
+      dockerfile: Dockerfile.analysis
+    container_name: energy-analyse
+    command: python carbon_analysis.py
+    volumes:
+      - ./AIModel/data:/app/data
+      - ./AIModel/analysis_output:/app/analysis_output
+    depends_on:
+      generate:
+        condition: service_completed_successfully
+    profiles: [analysis]
+
+  ensemble:
+    build:
+      context: ./AIModel
+      dockerfile: Dockerfile.analysis
+    container_name: energy-ensemble
+    command: python ensemble_analysis.py
+    volumes:
+      - ./AIModel/data:/app/data
+      - ./AIModel/analysis_output:/app/analysis_output
+      - hf-cache:/root/.cache/huggingface
+    depends_on:
+      generate:
+        condition: service_completed_successfully
+    profiles: [analysis]
+
+  # ── Forecasting API ──────────────────────────────────────────────────────────
+  # Run with:  docker compose up --build
+  # Fits 7 Prophet models on startup (~2–3 min). Ready when you see:
+  #   INFO  Service ready — 8760 rows, models: [...]
+
+  api:
+    build:
+      context: ./AIModel
+      dockerfile: Dockerfile
+    container_name: energy-forecasting
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./AIModel/data:/app/data
+    environment:
+      DATA_PATH: data/sample_energy_data.csv
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s   # 7 Prophet models × ~15s each on startup
+
+volumes:
+  hf-cache:   # Persists HuggingFace model weights (~925 MB, downloaded once)
