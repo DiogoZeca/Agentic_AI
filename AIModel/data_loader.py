@@ -1,27 +1,34 @@
 """
-Data Loader — Flexible ingestion layer for AI infrastructure metrics.
+Data Loader — Flexible ingestion layer for web service energy & carbon metrics.
 
-Handles any CSV that has a 'ds' datetime column and at least
-'totalEnergyConsumption'. Auto-detects available metrics and regressors
-so the analysis pipeline degrades gracefully when columns are missing
-(e.g., no trainingActive in a dataset that only has power + carbon data).
+Handles any CSV that has a 'ds' datetime column and at least 'consumption'.
+Auto-detects available metrics and regressors so the analysis pipeline degrades
+gracefully when columns are missing.
+
+Aligned with the Green Software Foundation's SCI (Software Carbon Intensity)
+framework. Forecast targets are `consumption` (energy) and `carbonEmissions`,
+with `softwareCarbonIntensity` derived as SCI = carbonEmissions / functionalUnit.
+
+Note on `functionalUnit` regressor: Prophet needs future regressor values when
+forecasting. carbon_analysis.py passes `future_df=df` (historical), so future
+rows receive `functionalUnit=0` (fillna(0) applied in prophet_model.py). This is
+acceptable for the initial implementation — treat forecasts as unconditional
+extrapolations.
 
 Supported data sources:
   - Synthetic (data_generator.py)
   - Real carbon intensity from Electricity Maps API
-  - Real workload traces from Alibaba GPU cluster data
   - Any custom CSV following the schema below
 
 Minimum required columns:
-  ds                       datetime   hourly timestamps
-  totalEnergyConsumption   float      kWh per hour
+  ds            datetime   hourly timestamps
+  consumption   float      kWh per hour
 
 Recommended optional columns (unlock more metrics / better accuracy):
   carbonEmissions          float      kgCO2e per hour
-  inferenceRequests        float      requests per hour
+  functionalUnit           float      requests per hour
   carbonIntensityFactor    float      kgCO2/kWh (grid carbon intensity)
-  trainingActive           float      0/1 binary — training run in progress
-  sciPerInference          float      gCO2e per inference request
+  softwareCarbonIntensity  float      kgCO2e per request (derived SCI)
 
 Usage:
     from data_loader import load_and_validate, build_pipeline_config
@@ -46,36 +53,35 @@ import pandas as pd
 
 # ── Column definitions ────────────────────────────────────────────────────────
 
-REQUIRED_COLUMNS: list[str] = ["ds", "totalEnergyConsumption"]
+REQUIRED_COLUMNS: list[str] = ["ds", "consumption"]
 
 # Metrics the pipeline can analyse; ordered by priority
 CANDIDATE_METRICS: list[str] = [
-    "totalEnergyConsumption",
+    "consumption",
     "carbonEmissions",
-    "sciPerInference",   # derived — never fit directly
+    "softwareCarbonIntensity",   # derived — never fit directly
 ]
 
 # Metrics the models fit directly (SCI is always derived from components)
 CANDIDATE_FIT_METRICS: list[str] = [
-    "totalEnergyConsumption",
+    "consumption",
     "carbonEmissions",
-    "inferenceRequests",
+    "functionalUnit",
 ]
 
 # Possible regressors per metric — only used if column exists in data
 POSSIBLE_REGRESSORS: dict[str, list[str]] = {
-    "totalEnergyConsumption": ["trainingActive"],
-    "carbonEmissions": [],
-    "inferenceRequests": [],
+    "consumption":      ["functionalUnit"],
+    "carbonEmissions":  [],
+    "functionalUnit":   [],
 }
 
-# Columns needed for each SCI-supporting chart
+# Columns needed for each optional chart
 CHART_COLUMN_DEPS: dict[str, list[str]] = {
-    "power_overview":      ["inferencePowerDraw", "trainingPowerDraw", "totalInfrastructurePower"],
-    "training_spikes":     ["trainingActive", "trainingPowerDraw", "totalInfrastructurePower"],
-    "sci_by_hour":         ["sciPerInference"],
-    "load_vs_efficiency":  ["inferenceRequests", "energyPerInference"],
-    "intensity_vs_green":  ["carbonIntensityFactor", "greenConsumptionPercentage"],
+    "service_profile":   ["consumption", "functionalUnit"],
+    "decomposition":     ["consumption"],
+    "sci_by_hour":       ["softwareCarbonIntensity"],
+    "intensity_vs_green": ["carbonIntensityFactor", "greenConsumptionPercentage"],
 }
 
 
@@ -124,7 +130,7 @@ def load_and_validate(path: str) -> pd.DataFrame:
 
     # Drop fully-NaN rows on key columns
     before = len(df)
-    df = df.dropna(subset=["ds", "totalEnergyConsumption"])
+    df = df.dropna(subset=["ds", "consumption"])
     dropped = before - len(df)
     if dropped:
         print(f"[data_loader] Dropped {dropped} rows with NaN in required columns.")
@@ -141,12 +147,12 @@ def build_pipeline_config(df: pd.DataFrame) -> PipelineConfig:
     fit_metrics = [m for m in CANDIDATE_FIT_METRICS if m in cols]
 
     # SCI can be derived only if both components exist
-    has_sci = ("carbonEmissions" in cols) and ("inferenceRequests" in cols)
+    has_sci = ("carbonEmissions" in cols) and ("functionalUnit" in cols)
 
     # Final display metrics (SCI added if derivable)
-    metrics = [m for m in ["totalEnergyConsumption", "carbonEmissions"] if m in cols]
+    metrics = [m for m in ["consumption", "carbonEmissions"] if m in cols]
     if has_sci:
-        metrics.append("sciPerInference")
+        metrics.append("softwareCarbonIntensity")
 
     # Regressor map — only include regressors that exist in data
     regressor_map = {
@@ -163,8 +169,8 @@ def build_pipeline_config(df: pd.DataFrame) -> PipelineConfig:
 
     # Recommended columns that are absent
     recommended = [
-        "carbonEmissions", "inferenceRequests", "carbonIntensityFactor",
-        "trainingActive", "sciPerInference",
+        "carbonEmissions", "functionalUnit", "carbonIntensityFactor",
+        "softwareCarbonIntensity",
     ]
     missing_recommended = [c for c in recommended if c not in cols]
 
@@ -183,21 +189,24 @@ def build_pipeline_config(df: pd.DataFrame) -> PipelineConfig:
 def _print_schema_report(df: pd.DataFrame) -> None:
     """Print a clear report of what columns were found and what's missing."""
     cols = set(df.columns)
-    all_known = (
-        REQUIRED_COLUMNS
-        + CANDIDATE_FIT_METRICS
-        + ["sciPerInference", "carbonIntensityFactor",
-           "trainingActive", "trainingPowerDraw", "trainingGpuUtil",
-           "inferencePowerDraw", "energyPerInference", "avgBatchSize",
-           "gpuUtilInference", "totalGpuPower", "cpuAndMemoryPower",
-           "pue", "totalInfrastructurePower",
-           "greenConsumptionPercentage", "operationalEmissions",
-           "embodiedEmissions", "carbonEmissions"]
-    )
+    all_known = [
+        # Required
+        "ds", "consumption",
+        # Fit metrics
+        "carbonEmissions", "functionalUnit",
+        # Derived
+        "softwareCarbonIntensity",
+        # Supporting columns
+        "timeWindow", "totalConsumption", "measurementSource",
+        "cost", "totalCost",
+        "operationalEmissions", "embodiedEmissions",
+        "carbonIntensityFactor", "greenConsumptionPercentage",
+        "cpuUtilization",
+    ]
 
-    found     = [c for c in all_known if c in cols]
-    missing   = [c for c in all_known if c not in cols]
-    extra     = [c for c in cols if c not in all_known]
+    found   = [c for c in all_known if c in cols]
+    missing = [c for c in all_known if c not in cols]
+    extra   = [c for c in cols if c not in all_known]
 
     print(f"\n[data_loader] Schema report — {len(df)} rows")
     print(f"  Date range:  {df['ds'].min().date()} → {df['ds'].max().date()}")

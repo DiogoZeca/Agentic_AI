@@ -99,10 +99,10 @@ def run_evaluation(df: pd.DataFrame, config: PipelineConfig) -> dict:
         all_results[metric] = {"ensemble": ens, "results": res, "residual_stats": stats}
 
     # Derive SCI if both components were evaluated
-    if config.has_sci and "carbonEmissions" in all_results and "inferenceRequests" in all_results:
-        print("\n  Deriving SCI from carbonEmissions / inferenceRequests …")
-        all_results["sciPerInference"] = _derive_sci_ensemble(df, all_results)
-        sci_res = all_results["sciPerInference"]["results"]
+    if config.has_sci and "carbonEmissions" in all_results and "functionalUnit" in all_results:
+        print("\n  Deriving SCI from carbonEmissions / functionalUnit …")
+        all_results["softwareCarbonIntensity"] = _derive_sci_ensemble(df, all_results)
+        sci_res = all_results["softwareCarbonIntensity"]["results"]
         print(f"  {'Model':<12} {'sMAPE':>8} {'MAPE':>8} {'RMSE':>10}")
         print(f"  {'-'*42}")
         for name in ["prophet", "timesfm", "ensemble"]:
@@ -113,25 +113,28 @@ def run_evaluation(df: pd.DataFrame, config: PipelineConfig) -> dict:
 
 
 def _derive_sci_ensemble(df: pd.DataFrame, all_results: dict) -> dict:
-    """Derive SCI three-way comparison from component model predictions."""
+    """Derive SCI three-way comparison from component model predictions.
+
+    SCI = carbonEmissions / functionalUnit  (kgCO2e/req — no ×1000)
+    """
     ens_c = all_results["carbonEmissions"]["ensemble"]
-    ens_r = all_results["inferenceRequests"]["ensemble"]
+    ens_r = all_results["functionalUnit"]["ensemble"]
 
     n          = len(df)
     train_size = int(n * 0.8)
     test_size  = n - train_size
 
-    if "sciPerInference" in df.columns:
-        sci_actuals = df.iloc[train_size:]["sciPerInference"].values
+    if "softwareCarbonIntensity" in df.columns:
+        sci_actuals = df.iloc[train_size:]["softwareCarbonIntensity"].values
     else:
-        s = df["carbonEmissions"] / df["inferenceRequests"].clip(lower=1) * 1000
+        s = df["carbonEmissions"] / df["functionalUnit"].clip(lower=1)
         sci_actuals = s.iloc[train_size:].values
 
     sci_results = {}
     for name, attr in [("prophet", "_test_prophet"), ("timesfm", "_test_timesfm"), ("ensemble", "_test_ensemble")]:
         c_preds = getattr(ens_c, attr)
         r_preds = np.maximum(getattr(ens_r, attr), 1)
-        sci_preds = c_preds / r_preds * 1000
+        sci_preds = c_preds / r_preds   # kgCO2e/req
 
         mae   = np.mean(np.abs(sci_preds - sci_actuals))
         mse   = np.mean((sci_preds - sci_actuals) ** 2)
@@ -255,10 +258,10 @@ def _chart_model_accuracy(all_results: dict, config: PipelineConfig):
         ax.text(bar_x, best_val + 2.5, "★", ha="center", fontsize=12, color="gold")
 
     label_map = {
-        "totalEnergyConsumption": "Energy\n(kWh)",
-        "carbonEmissions":        "Carbon\n(kgCO2e)",
-        "sciPerInference":        "SCI\n(gCO2e/req)",
-        "inferenceRequests":      "Requests",
+        "consumption":              "Energy\n(kWh/h)",
+        "carbonEmissions":          "Carbon\n(kgCO2e/h)",
+        "softwareCarbonIntensity":  "SCI\n(kgCO2e/req)",
+        "functionalUnit":           "Requests\n(req/h)",
     }
     short_labels = [label_map.get(m, m[:12]) for m in display_metrics]
 

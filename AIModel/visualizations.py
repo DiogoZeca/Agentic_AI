@@ -258,6 +258,6 @@ if __name__ == "__main__":
     print("Plotting metric comparison...")
     fig3 = plot_metric_comparison(
         df,
-        ["consumption", "carbonEmissions", "greenConsumptionPercentage"]
+        ["consumption", "carbonEmissions", "softwareCarbonIntensity"]
     )
     plt.show()
