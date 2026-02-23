@@ -13,6 +13,8 @@ Endpoints:
     GET /forecast/sci?horizon=24             — SCI (derived, kgCO2e/req)
     GET /forecast/{metric}?horizon=24        — single metric forecast
     GET /optimal-window?horizon_days=7       — best low-carbon scheduling windows
+    GET /anomalies?metric=consumption        — point anomalies vs Prophet bounds
+    GET /investigation-leads                 — ranked recurring anomaly patterns
 
 Available metrics for /forecast/{metric}:
     consumption, carbonEmissions, carbonIntensityFactor,
@@ -23,6 +25,7 @@ import logging
 import warnings
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import Literal
 
 # Suppress noisy loggers before prophet imports
 logging.getLogger("prophet").setLevel(logging.WARNING)
@@ -39,6 +42,7 @@ from pydantic import BaseModel
 from data_generator import generate_energy_carbon_data
 from data_loader import load_and_validate, build_pipeline_config
 from prophet_model import EnergyProphet
+from anomaly_detector import detect_point_anomalies, find_recurring_patterns, build_investigation_leads
 
 log = logging.getLogger("api")
 
@@ -108,11 +112,12 @@ async def lifespan(app: FastAPI):
         models[metric] = m
 
     _state.update({
-        "df":        df,
-        "models":    models,
-        "config":    config,
-        "fitted_at": datetime.utcnow().isoformat() + "Z",
-        "data_rows": len(df),
+        "df":                 df,
+        "models":             models,
+        "config":             config,
+        "insample_forecasts": {},   # lazy-populated on first /anomalies request
+        "fitted_at":          datetime.utcnow().isoformat() + "Z",
+        "data_rows":          len(df),
     })
     log.info("Service ready — %d rows, models: %s", len(df), list(models.keys()))
 
@@ -173,6 +178,56 @@ class HealthResponse(BaseModel):
     fitted_at:    str
     data_rows:    int
     models_ready: list[str]
+
+
+class AnomalyPoint(BaseModel):
+    ds:                   str
+    actual:               float
+    expected:             float
+    upper_bound:          float
+    lower_bound:          float
+    excess_pct:           float
+    direction:            str    # "excess" | "deficit"
+    hour_of_day:          int
+    is_weekend:           bool
+    carbon_intensity:     float
+    excess_carbon_kgco2e: float
+    excess_cost_eur:      float
+
+
+class AnomalyResponse(BaseModel):
+    metric:          str
+    unit:            str
+    direction:       str
+    lookback_days:   int
+    total_anomalies: int
+    generated_at:    str
+    anomalies:       list[AnomalyPoint]
+
+
+class InvestigationLeadPoint(BaseModel):
+    rank:                        int
+    metric:                      str
+    unit:                        str
+    pattern_summary:             str
+    occurrences:                 int
+    frequency_pct:               float
+    avg_excess_pct:              float
+    total_excess_carbon_kgco2e:  float
+    total_excess_cost_eur:       float
+    optimal_window_start_hour:   int
+    optimal_window_end_hour:     int
+    estimated_carbon_saving_pct: float
+    estimated_cost_saving_pct:   float
+    carbon_context:              str
+    example_timestamps:          list[str]
+
+
+class InvestigationLeadsResponse(BaseModel):
+    lookback_days: int
+    top_n:         int
+    generated_at:  str
+    leads:         list[InvestigationLeadPoint]
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────────
@@ -292,6 +347,76 @@ def _build_sci_response(horizon: int) -> ForecastResponse:
         horizon_hours=horizon,
         generated_at=datetime.utcnow().isoformat() + "Z",
         predictions=predictions,
+    )
+
+
+def _get_insample_forecast(metric: str) -> "pd.DataFrame":
+    """Return in-sample Prophet predictions for `metric`, lazy-cached.
+
+    Calls model.predict(periods=0, future_df=df) which returns fitted yhat /
+    yhat_lower / yhat_upper for every historical timestamp. Results are cached
+    in _state["insample_forecasts"] — computed once per metric on first call.
+    """
+    state = _require_state()
+    if metric not in state["models"]:
+        available = list(state["models"].keys())
+        raise HTTPException(
+            status_code=404,
+            detail=f"No model for '{metric}'. Available: {available}",
+        )
+
+    cache = state["insample_forecasts"]
+    if metric not in cache:
+        model: EnergyProphet = state["models"][metric]
+        df = state["df"]
+        # periods=0 → make_future_dataframe returns only the training timestamps.
+        # Passing future_df=df supplies historical regressor values (e.g., functionalUnit).
+        insample = model.predict(periods=0, future_df=df)
+        cache[metric] = insample[["ds", "yhat", "yhat_lower", "yhat_upper"]].copy()
+        log.info(
+            "In-sample forecast cached for '%s' (%d rows)", metric, len(cache[metric])
+        )
+
+    return cache[metric]
+
+
+def _anomaly_to_point(a) -> AnomalyPoint:
+    """Convert an Anomaly dataclass to its Pydantic response model."""
+    direction = "excess" if a.excess_pct >= 0 else "deficit"
+    return AnomalyPoint(
+        ds=                   a.ds.isoformat(),
+        actual=               round(a.actual,               6),
+        expected=             round(a.expected,             6),
+        upper_bound=          round(a.upper_bound,          6),
+        lower_bound=          round(a.lower_bound,          6),
+        excess_pct=           round(a.excess_pct,           2),
+        direction=            direction,
+        hour_of_day=          a.hour_of_day,
+        is_weekend=           a.is_weekend,
+        carbon_intensity=     round(a.carbon_intensity,     4),
+        excess_carbon_kgco2e= round(a.excess_carbon_kgco2e, 6),
+        excess_cost_eur=      round(a.excess_cost_eur,       6),
+    )
+
+
+def _lead_to_point(lead) -> InvestigationLeadPoint:
+    """Convert an InvestigationLead dataclass to its Pydantic response model."""
+    return InvestigationLeadPoint(
+        rank=                        lead.rank,
+        metric=                      lead.metric,
+        unit=                        UNIT_MAP.get(lead.metric, ""),
+        pattern_summary=             lead.pattern_summary,
+        occurrences=                 lead.occurrences,
+        frequency_pct=               round(lead.frequency_pct,               1),
+        avg_excess_pct=              round(lead.avg_excess_pct,              2),
+        total_excess_carbon_kgco2e=  round(lead.total_excess_carbon_kgco2e,  6),
+        total_excess_cost_eur=       round(lead.total_excess_cost_eur,        4),
+        optimal_window_start_hour=   lead.optimal_window_start_hour,
+        optimal_window_end_hour=     lead.optimal_window_end_hour,
+        estimated_carbon_saving_pct= round(lead.estimated_carbon_saving_pct, 1),
+        estimated_cost_saving_pct=   round(lead.estimated_cost_saving_pct,   1),
+        carbon_context=              lead.carbon_context,
+        example_timestamps=          lead.example_timestamps,
     )
 
 
@@ -421,4 +546,111 @@ def optimal_window(
         window_hours=window_hours,
         generated_at=datetime.utcnow().isoformat() + "Z",
         windows=windows,
+    )
+
+
+@app.get("/anomalies", response_model=AnomalyResponse, tags=["Anomaly Detection"])
+def anomalies_endpoint(
+    metric:       str = Query(..., description="Metric to analyse, e.g. 'consumption' or 'carbonEmissions'"),
+    lookback_days: int = Query(30, ge=1, le=365, description="Days of historical data to scan"),
+    direction: Literal["excess", "deficit", "both"] = Query(
+        "excess", description="'excess' → actual > yhat_upper; 'deficit' → actual < yhat_lower; 'both'"
+    ),
+):
+    """
+    Detect point anomalies for a metric over the past N days.
+
+    Compares actual historical values against the Prophet in-sample 95% confidence
+    interval. An anomaly occurs when actual > yhat_upper (excess) or
+    actual < yhat_lower (deficit).
+
+    In-sample forecasts are lazy-computed on the first call per metric and cached
+    for subsequent requests — no re-fitting required.
+
+    Example: GET /anomalies?metric=consumption&lookback_days=30&direction=excess
+    """
+    state = _require_state()
+    df = state["df"].copy()
+    df["ds"] = pd.to_datetime(df["ds"])
+
+    # Validate metric before the expensive in-sample forecast call
+    if metric not in state["models"]:
+        available = list(state["models"].keys())
+        raise HTTPException(
+            status_code=404,
+            detail=f"No model for '{metric}'. Available: {available}",
+        )
+
+    # Restrict to the lookback window (most-recent N days of history)
+    cutoff = df["ds"].max() - pd.Timedelta(days=lookback_days)
+    df_window = df[df["ds"] > cutoff].copy()
+
+    # Retrieve (or lazily compute) in-sample forecast, then filter to window
+    df_forecast = _get_insample_forecast(metric).copy()
+    df_forecast["ds"] = pd.to_datetime(df_forecast["ds"])
+    df_forecast_window = df_forecast[df_forecast["ds"] > cutoff]
+
+    anomalies = detect_point_anomalies(df_window, df_forecast_window, metric, direction=direction)
+
+    return AnomalyResponse(
+        metric=         metric,
+        unit=           UNIT_MAP.get(metric, ""),
+        direction=      direction,
+        lookback_days=  lookback_days,
+        total_anomalies=len(anomalies),
+        generated_at=   datetime.utcnow().isoformat() + "Z",
+        anomalies=      [_anomaly_to_point(a) for a in anomalies],
+    )
+
+
+@app.get("/investigation-leads", response_model=InvestigationLeadsResponse, tags=["Anomaly Detection"])
+def investigation_leads_endpoint(
+    lookback_days:   int = Query(30, ge=1, le=365, description="Days of historical data to scan"),
+    top_n:           int = Query(5,  ge=1, le=20,  description="Maximum leads to return"),
+    min_occurrences: int = Query(3,  ge=1,          description="Minimum occurrences to form a recurring pattern"),
+):
+    """
+    Identify the top recurring energy/carbon anomaly patterns and surface actionable leads.
+
+    Scans `consumption` and `carbonEmissions` excess anomalies, groups them into
+    recurring patterns (same hour-of-day × weekday/weekend), and ranks by total
+    excess carbon impact. Each lead includes:
+
+    - The optimal low-carbon 4-hour window to reschedule the workload
+    - Estimated carbon saving (negative = saving) vs current anomaly window
+    - Estimated cost saving including any peak/off-peak tariff conflict
+
+    Carbon and cost impacts may point in opposite directions — both are surfaced so
+    the analyst can make an informed trade-off.
+
+    Example: GET /investigation-leads?lookback_days=30&top_n=5
+    """
+    state = _require_state()
+    df = state["df"].copy()
+    df["ds"] = pd.to_datetime(df["ds"])
+
+    cutoff = df["ds"].max() - pd.Timedelta(days=lookback_days)
+    df_window = df[df["ds"] > cutoff].copy()
+
+    # Collect excess anomalies across the two primary carbon-relevant metrics
+    all_anomalies = []
+    for metric in ["consumption", "carbonEmissions"]:
+        if metric not in state["models"]:
+            continue
+        df_forecast = _get_insample_forecast(metric).copy()
+        df_forecast["ds"] = pd.to_datetime(df_forecast["ds"])
+        df_forecast_window = df_forecast[df_forecast["ds"] > cutoff]
+        metric_anomalies = detect_point_anomalies(
+            df_window, df_forecast_window, metric, direction="excess"
+        )
+        all_anomalies.extend(metric_anomalies)
+
+    patterns = find_recurring_patterns(all_anomalies, df_window, min_occurrences=min_occurrences)
+    leads    = build_investigation_leads(patterns, df_window, top_n=top_n)
+
+    return InvestigationLeadsResponse(
+        lookback_days=lookback_days,
+        top_n=        top_n,
+        generated_at= datetime.utcnow().isoformat() + "Z",
+        leads=        [_lead_to_point(lead) for lead in leads],
     )

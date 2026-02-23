@@ -1,6 +1,9 @@
 # Energy & Carbon Forecasting — Docker Compose
 #
-# Two modes:
+# Three modes:
+#
+#   Test suite  (data contract + chained forecasting + API contract + anomaly detection):
+#     docker compose --profile test run --rm test
 #
 #   Analysis pipeline  (generate data + all forecast charts):
 #     docker compose --profile analysis up --build
@@ -16,6 +19,19 @@
 #   hf-cache  — HuggingFace model weights (~925 MB, downloaded once, reused)
 
 services:
+
+  # ── Test suite ────────────────────────────────────────────────────────────────
+  # Run with:  docker compose --profile test run --rm test
+  # Runs 4 test groups: data contract, chained forecasting, API contract, anomaly detection.
+  # Uses a 30-day (720-row) dataset for fast Prophet fitting (~60-90s total).
+  # Exit code 0 = all tests passed.
+
+  test:
+    build:
+      context: ./AIModel
+      dockerfile: Dockerfile.test
+    container_name: energy-test
+    profiles: [test]
 
   # ── Analysis pipeline ────────────────────────────────────────────────────────
   # Run with:  docker compose --profile analysis up --build

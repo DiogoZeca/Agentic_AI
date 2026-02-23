@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir -r requirements-service.txt
 RUN python -c "import cmdstanpy; cmdstanpy.install_cmdstan(progress=False)"
 
 # Copy application code
-COPY api.py data_generator.py data_loader.py prophet_model.py ./
+COPY api.py data_generator.py data_loader.py prophet_model.py anomaly_detector.py ./
 
 # Data directory — mount a volume here to persist / pre-load CSV
 RUN mkdir -p data

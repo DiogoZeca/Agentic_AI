@@ -32,7 +32,7 @@ The system does not need to know what the service is. It finds the anomaly. The 
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  STEP 1 — Learn the baseline                                     │
+│  STEP 1 — Learn the baseline                       ✅ COMPLETE   │
 │  Prophet fits 7 models on historical metrics.                    │
 │  Learns: daily pattern, weekly cycle, annual trend, load         │
 │  relationships. This is the "expected" behaviour fingerprint.    │
@@ -40,7 +40,7 @@ The system does not need to know what the service is. It finds the anomaly. The 
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  STEP 2 — Forecast the next window                               │
+│  STEP 2 — Forecast the next window                 ✅ COMPLETE   │
 │  7-day forecasts for all 7 metrics + SCI.                        │
 │  Includes calibrated uncertainty intervals (yhat_lower/upper).   │
 │  Identifies the optimal low-carbon scheduling window per day.    │
@@ -48,16 +48,17 @@ The system does not need to know what the service is. It finds the anomaly. The 
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  STEP 3 — Detect anomalies (Next — Agent Layer)                  │
+│  STEP 3 — Detect anomalies                         ✅ COMPLETE   │
 │  Compare actual consumption against the forecast baseline.       │
 │  Flag windows where actual > yhat_upper (unexpected excess).     │
 │  Characterise: when, how much above baseline, how often it       │
 │  recurs, where it sits on the carbon/cost curve.                 │
+│  Exposed via GET /anomalies + GET /investigation-leads.          │
 └────────────────────────────┬────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  STEP 4 — Generate insights (Next — Agent Layer)                 │
+│  STEP 4 — Generate insights            ← Next — Agent Layer      │
 │  Claude reasons over the anomalies and optimal windows.          │
 │  Produces structured investigation leads with estimated          │
 │  savings. No scheduling actions. No prior knowledge of jobs.     │
@@ -78,16 +79,20 @@ Layer 2 — Forecasting Service  ✅ COMPLETE
   prophet_model.py         EnergyProphet (baseline + seasonality + regressors)
   timesfm_model.py         EnergyTimesFM (zero-shot foundation model)
   ensemble_model.py        Residual learning ensemble (Prophet + TimesFM)
-  api.py                   FastAPI REST service — 7 Prophet models, 5 endpoints
+  api.py                   FastAPI REST service — 7 Prophet models, 7 endpoints
 
 Layer 3 — Analysis Pipeline  ✅ COMPLETE
   carbon_analysis.py       8-chart Prophet analysis pipeline
   ensemble_analysis.py     3-way model comparison (Prophet / TimesFM / Ensemble)
 
-Layer 4 — Agent Layer  ← NEXT
-  anomaly_detector.py      Actual vs forecast gap detection (to be built)
+Layer 4 — Anomaly Detection  ✅ COMPLETE
+  anomaly_detector.py      3-stage engine: point anomalies → recurring patterns → investigation leads
+  api.py /anomalies        GET: detect excess/deficit anomalies for any metric
+  api.py /investigation-leads  GET: ranked recurring patterns with carbon/cost savings
+
+Layer 5 — Agent Layer  ← NEXT
   insight_agent.py         Claude-powered insight generation (to be built)
-  mcp_server.py            MCP tools wrapping the forecast API (to be built)
+  mcp_server.py            MCP tools wrapping the forecast + anomaly API (to be built)
 ```
 
 ---
@@ -290,9 +295,21 @@ FastAPI service running in Docker. Fits 7 Prophet models at startup. Chained for
 | `GET /forecast/sci?horizon=N` | ✅ | SCI with propagated uncertainty |
 | `GET /optimal-window?horizon_days=N` | ✅ | Best low-carbon window per day |
 
-### Stage 2 — Anomaly Detection Layer
+### Stage 2 — Anomaly Detection Layer ✅ COMPLETE
 
-Compare Prophet forecast baseline against actual historical data. Flag windows where actual consumption exceeds `yhat_upper` with statistical significance. Characterise by frequency, magnitude, and position on the carbon/cost curve.
+Compare Prophet forecast baseline against actual historical data. Flag windows where actual consumption exceeds `yhat_upper`. Characterise by frequency, magnitude, and position on the carbon/cost curve.
+
+| Endpoint | Status | Description |
+|----------|--------|-------------|
+| `GET /anomalies?metric=X&lookback_days=N` | ✅ | Point anomalies vs Prophet confidence interval |
+| `GET /investigation-leads?top_n=N` | ✅ | Ranked recurring patterns with carbon/cost savings |
+
+**Implementation:** `anomaly_detector.py` — pure analysis engine (no Prophet/FastAPI imports). Three-stage pipeline:
+1. `detect_point_anomalies()` — flags individual timestamps where actual > yhat_upper (or < yhat_lower)
+2. `find_recurring_patterns()` — groups anomalies by `(hour_of_day, day_type)`, computes frequency and carbon impact
+3. `build_investigation_leads()` — ranks patterns by total excess carbon, adds optimal window + savings estimate
+
+**Test coverage:** 182 tests across 4 groups (data, forecasting, API, anomaly engine).
 
 ### Stage 3 — Agent Insight Generator
 
@@ -317,7 +334,8 @@ End-to-end demonstration: Docker stack up → synthetic data → analysis charts
 ```
 Agentic_AI/
 ├── AIModel/
-│   ├── api.py                    REST forecasting service (FastAPI, 7 Prophet models)
+│   ├── api.py                    REST service (FastAPI, 7 Prophet models, 7 endpoints)
+│   ├── anomaly_detector.py       Anomaly engine (point anomalies → patterns → leads)
 │   ├── data_generator.py         Synthetic telemetry generator (8,760 rows × 15 cols)
 │   ├── data_loader.py            Schema validation + PipelineConfig
 │   ├── prophet_model.py          EnergyProphet wrapper (fit/predict/evaluate)
@@ -326,11 +344,19 @@ Agentic_AI/
 │   ├── carbon_analysis.py        8-chart Prophet analysis pipeline
 │   ├── ensemble_analysis.py      3-way model comparison (2 charts + accuracy table)
 │   ├── visualizations.py         Reusable Matplotlib plotting utilities
+│   ├── tests/
+│   │   ├── conftest.py           30-day test dataset + DATA_PATH env setup
+│   │   ├── test_data.py          Data contract (schema, ranges, SCI identity)
+│   │   ├── test_forecasting.py   Chained forecasting validation
+│   │   ├── test_api.py           API contract (7 endpoints, response shapes)
+│   │   └── test_anomaly.py       Anomaly engine (point anomalies, patterns, leads)
 │   ├── Dockerfile                Service image (Prophet + FastAPI, lightweight)
+│   ├── Dockerfile.test           Test image (service deps + pytest + httpx)
 │   ├── Dockerfile.analysis       Analysis image (full stack + TimesFM + matplotlib)
 │   ├── requirements.txt          Full deps (analysis + TimesFM)
-│   └── requirements-service.txt  Lightweight deps (service only)
-├── docker-compose.yml            Two modes: analysis profile + API service
+│   ├── requirements-service.txt  Lightweight deps (service only)
+│   └── requirements-test.txt     Test deps (pytest + httpx)
+├── docker-compose.yml            Three modes: test + analysis profile + API service
 ├── docs/
 │   ├── RESUME.md                 This file — full project reference
 │   ├── AgenticAI.md              Research notes: agentic AI, multi-agent patterns, carbon tools
@@ -341,6 +367,35 @@ Agentic_AI/
 ---
 
 ## What Each File Does
+
+### `anomaly_detector.py` — Anomaly Detection Engine
+
+Pure analysis module — no Prophet, no FastAPI. Takes DataFrames, returns typed dataclasses. The API layer owns all model interaction and passes the in-sample forecast in.
+
+**Three-stage pipeline:**
+
+```
+detect_point_anomalies(df_actual, df_forecast, metric, direction)
+  └─ merges actual vs Prophet confidence interval on timestamp
+  └─ flags: excess (actual > yhat_upper) or deficit (actual < yhat_lower)
+  └─ enriches with: carbon intensity, excess_carbon_kgco2e, excess_cost_eur
+
+find_recurring_patterns(anomalies, df_actual, min_occurrences=3)
+  └─ groups by (metric, hour_of_day, day_type)
+  └─ computes: frequency_pct = occurrences / possible slots in history
+  └─ labels: "high-carbon" / "low-carbon" vs median grid intensity
+  └─ sorts by total_excess_carbon descending
+
+build_investigation_leads(patterns, df_actual, top_n=5)
+  └─ finds optimal low-carbon 4h window (24h sliding search with wrap-around)
+  └─ estimates carbon saving: (CI_optimal - CI_pattern) / CI_pattern × 100
+  └─ estimates cost saving: peak → off-peak rate shift
+  └─ negative saving = improvement; positive = tradeoff (surfaced explicitly)
+```
+
+**Graceful degradation:** if `carbonIntensityFactor` or `cost` columns are absent (real customer data), all carbon/cost fields default to `0.0`. Shape detection still works.
+
+---
 
 ### `data_generator.py` — Synthetic Telemetry
 
@@ -419,11 +474,23 @@ Runs all three models per metric, produces:
 - `07_forecast_comparison.png` — actual vs Prophet/TimesFM/Ensemble on test week
 - `08_model_accuracy.png` — sMAPE grouped bars per metric, ★ winner highlighted
 
-### `api.py` — Forecasting REST Service
+### `api.py` — Forecasting + Anomaly Detection REST Service
 
 FastAPI service. Fits 7 Prophet models at startup (~2–3 min). All models persist in-process; single worker by design (model state must not be shared across forks).
 
 Chained forecasting implemented in `_build_regressor_future_df()` and `_run_forecast()` — no zero-fill for future regressors.
+
+In-sample forecasts for anomaly detection are lazy-computed on first request per metric and cached in `_state["insample_forecasts"]`.
+
+| Endpoint | Tag | Description |
+|----------|-----|-------------|
+| `GET /health` | System | Model readiness + 7 model names |
+| `GET /forecast/all` | Forecast | All 7 metrics + SCI in one response |
+| `GET /forecast/sci` | Forecast | SCI with propagated uncertainty |
+| `GET /forecast/{metric}` | Forecast | Single metric forecast |
+| `GET /optimal-window` | Scheduling | Best low-carbon window per day |
+| `GET /anomalies` | Anomaly Detection | Point anomalies vs Prophet confidence interval |
+| `GET /investigation-leads` | Anomaly Detection | Ranked recurring patterns with carbon/cost savings |
 
 ---
 

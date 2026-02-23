@@ -15,7 +15,27 @@ No Python. No pip. No virtual environments.
 
 ---
 
-## Two Modes
+## Three Modes
+
+### Mode 0 — Test Suite
+
+Validates data contracts, chained forecasting correctness, API behaviour, and anomaly detection.
+Uses a 30-day dataset for fast model fitting (~60–90s total, 182 tests).
+
+```bash
+docker compose --profile test run --rm test
+```
+
+Run a single test file:
+
+```bash
+docker compose --profile test run --rm test pytest tests/test_data.py -v
+docker compose --profile test run --rm test pytest tests/test_forecasting.py -v
+docker compose --profile test run --rm test pytest tests/test_api.py -v
+docker compose --profile test run --rm test pytest tests/test_anomaly.py -v
+```
+
+---
 
 ### Mode 1 — Analysis Pipeline
 
@@ -79,6 +99,8 @@ Interactive docs (Swagger UI): **http://localhost:8000/docs**
 | GET | `/forecast/{metric}?horizon=24` | Single metric forecast |
 | GET | `/forecast/sci?horizon=24` | SCI — derived, kgCO2e/req |
 | GET | `/optimal-window?horizon_days=7` | Best low-carbon scheduling windows |
+| GET | `/anomalies?metric=consumption` | Point anomalies vs Prophet confidence interval |
+| GET | `/investigation-leads` | Ranked recurring patterns with carbon/cost savings |
 
 **Available metrics for `/forecast/{metric}`:**
 
@@ -110,6 +132,12 @@ curl "http://localhost:8000/forecast/sci?horizon=6"
 
 # Best scheduling window for the next 3 days (4-hour blocks)
 curl "http://localhost:8000/optimal-window?horizon_days=3&window_hours=4"
+
+# Point anomalies — consumption over the last 30 days (excess only)
+curl "http://localhost:8000/anomalies?metric=consumption&lookback_days=30&direction=excess"
+
+# Top 5 investigation leads — recurring anomaly patterns with carbon/cost savings
+curl "http://localhost:8000/investigation-leads?lookback_days=30&top_n=5"
 ```
 
 ### Example Response — `/optimal-window`
@@ -150,7 +178,8 @@ docker compose --profile analysis down     # clean up after analysis
 ```
 Agentic_AI/
 ├── AIModel/
-│   ├── api.py                    ← Forecasting REST service (FastAPI)
+│   ├── api.py                    ← REST service (7 endpoints: forecast + anomaly detection)
+│   ├── anomaly_detector.py       ← Anomaly engine (point anomalies → patterns → leads)
 │   ├── data_generator.py         ← Synthetic data (8,760 rows, 15 columns)
 │   ├── data_loader.py            ← Schema validation + pipeline config
 │   ├── prophet_model.py          ← Prophet wrapper (EnergyProphet)
@@ -159,13 +188,21 @@ Agentic_AI/
 │   ├── carbon_analysis.py        ← 8-chart Prophet analysis pipeline
 │   ├── ensemble_analysis.py      ← Three-way model comparison
 │   ├── visualizations.py         ← Reusable Matplotlib functions
+│   ├── tests/
+│   │   ├── conftest.py           ← 30-day test dataset setup
+│   │   ├── test_data.py          ← Data contract (schema, ranges, SCI identity)
+│   │   ├── test_forecasting.py   ← Chained forecasting validation
+│   │   ├── test_api.py           ← API contract (7 endpoints, 182 tests total)
+│   │   └── test_anomaly.py       ← Anomaly engine (point anomalies, patterns, leads)
 │   ├── Dockerfile                ← Service image (Prophet + FastAPI, lightweight)
+│   ├── Dockerfile.test           ← Test image (service deps + pytest + httpx)
 │   ├── Dockerfile.analysis       ← Analysis image (full stack + TimesFM)
 │   ├── requirements.txt          ← Full deps (analysis + TimesFM)
 │   ├── requirements-service.txt  ← Lightweight deps (service only)
+│   ├── requirements-test.txt     ← Test deps (pytest + httpx)
 │   └── data/                     ← Generated CSV (gitignored, bind-mounted)
 │       └── sample_energy_data.csv
-├── docker-compose.yml            ← Two modes: analysis profile + API service
+├── docker-compose.yml            ← Three modes: test + analysis profile + API service
 ├── docs/                         ← Research papers and reference images
 └── START.md                      ← This file
 ```
