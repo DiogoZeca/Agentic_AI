@@ -535,7 +535,7 @@ def optimal_window(
         windows.append(SchedulingWindow(
             date=str(day),
             start_hour=best_start,
-            end_hour=best_start + window_hours,
+            end_hour=(best_start + window_hours) % 24,   # wrap midnight; matches anomaly_detector convention
             avg_predicted_carbon=round(best_avg, 6),
             vs_daily_mean_pct=vs_mean,
             unit="kgCO2e/h",

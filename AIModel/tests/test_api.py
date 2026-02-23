@@ -221,7 +221,9 @@ class TestOptimalWindowEndpoint:
     def test_window_hours_correct(self, client):
         r = client.get("/optimal-window?horizon_days=2&window_hours=4")
         for w in r.json()["windows"]:
-            duration = w["end_hour"] - w["start_hour"]
+            # end_hour uses % 24 (0–23), matching anomaly_detector convention.
+            # Use modular arithmetic to handle midnight-crossing windows correctly.
+            duration = (w["end_hour"] - w["start_hour"]) % 24
             assert duration == 4, (
                 f"Window duration should be 4h, got {duration}h "
                 f"(start={w['start_hour']}, end={w['end_hour']})"
