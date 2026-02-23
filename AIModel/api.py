@@ -183,8 +183,52 @@ def _require_state() -> dict:
     return _state
 
 
+def _build_regressor_future_df(horizon: int, regressors: list[str]) -> pd.DataFrame:
+    """
+    Build a future_df that includes forecasted regressor values for the next
+    `horizon` hours, implementing chained forecasting.
+
+    Each regressor is forecast independently using its own Prophet model, then
+    those predictions are appended to the historical data and passed as `future_df`
+    to the primary model. This replaces the zero-fill fallback with realistic,
+    seasonality-aware regressor values.
+
+    Example: consumption needs future functionalUnit values.
+      Without this → future functionalUnit = 0 (service assumed idle).
+      With this    → future functionalUnit follows its daily/weekly pattern.
+    """
+    state = _require_state()
+    df = state["df"]
+
+    # Start with historical regressor values (actual, known timestamps)
+    hist_cols = ["ds"] + [r for r in regressors if r in df.columns]
+    combined = df[hist_cols].copy()
+    combined["ds"] = pd.to_datetime(combined["ds"])
+
+    # Forecast each regressor and append its future predictions
+    for reg in regressors:
+        if reg not in state["models"]:
+            log.warning(
+                "No model for regressor '%s' — future values will be zero-filled.", reg
+            )
+            continue
+        reg_fc = _run_forecast(reg, horizon)
+        future_rows = pd.DataFrame({
+            "ds": pd.to_datetime(reg_fc["ds"]),
+            reg:  reg_fc["yhat"].values,
+        })
+        combined = pd.concat([combined, future_rows], ignore_index=True)
+
+    return combined
+
+
 def _run_forecast(metric: str, horizon: int) -> pd.DataFrame:
-    """Return the future `horizon` rows from Prophet for `metric`."""
+    """Return the future `horizon` rows from Prophet for `metric`.
+
+    For metrics with regressors (e.g. consumption → functionalUnit), uses
+    chained forecasting: the regressor's own model is run first to produce
+    realistic future values, which are then passed into the primary model.
+    """
     state = _require_state()
     if metric not in state["models"]:
         available = list(state["models"].keys())
@@ -193,7 +237,15 @@ def _run_forecast(metric: str, horizon: int) -> pd.DataFrame:
             detail=f"No model for '{metric}'. Available: {available}",
         )
     model: EnergyProphet = state["models"][metric]
-    forecast = model.predict(periods=horizon, future_df=state["df"])
+    regressors = state["config"].regressor_map.get(metric, [])
+
+    if regressors:
+        # Chained forecasting: forecast regressors first, inject as future_df
+        future_df = _build_regressor_future_df(horizon, regressors)
+    else:
+        future_df = state["df"]
+
+    forecast = model.predict(periods=horizon, future_df=future_df)
     return forecast.tail(horizon).reset_index(drop=True)
 
 
