@@ -252,6 +252,7 @@ ANOMALY_POINT_FIELDS = [
     "ds", "actual", "expected", "upper_bound", "lower_bound",
     "excess_pct", "direction", "hour_of_day", "is_weekend",
     "carbon_intensity", "excess_carbon_kgco2e", "excess_cost_eur",
+    "timesfm_flagged", "confidence",
 ]
 
 ANOMALY_RESPONSE_FIELDS = [
@@ -371,6 +372,16 @@ class TestAnomaliesEndpoint:
         r2 = client.get("/anomalies?metric=carbonEmissions&lookback_days=14")
         assert r1.status_code == 200
         assert r2.status_code == 200
+
+    def test_anomaly_dual_model_fields_present(self, client):
+        """Both new dual-model fields must always be present regardless of TimesFM availability."""
+        r = client.get("/anomalies?metric=consumption&lookback_days=30")
+        assert r.status_code == 200
+        for a in r.json()["anomalies"]:
+            assert "timesfm_flagged" in a
+            assert "confidence" in a
+            assert isinstance(a["timesfm_flagged"], bool)
+            assert a["confidence"] in {"high", "prophet-only", "timesfm-only"}
 
 
 # ── /investigation-leads ──────────────────────────────────────────────────────

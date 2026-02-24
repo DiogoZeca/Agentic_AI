@@ -90,6 +90,7 @@ services:
       - "8000:8000"
     volumes:
       - ./AIModel/data:/app/data
+      - hf-cache:/root/.cache/huggingface
     environment:
       DATA_PATH: data/sample_energy_data.csv
     restart: unless-stopped

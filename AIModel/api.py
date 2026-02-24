@@ -44,6 +44,13 @@ from data_loader import load_and_validate, build_pipeline_config
 from prophet_model import EnergyProphet
 from anomaly_detector import detect_point_anomalies, find_recurring_patterns, build_investigation_leads
 
+try:
+    from timesfm_model import EnergyTimesFM
+    _TIMESFM_AVAILABLE = True
+except ImportError:
+    _TIMESFM_AVAILABLE = False
+    # Prophet-only mode; timesfm_flagged=False, confidence="prophet-only" on all anomalies
+
 log = logging.getLogger("api")
 
 # ── Config ──────────────────────────────────────────────────────────────────────
@@ -111,13 +118,28 @@ async def lifespan(app: FastAPI):
         m.fit(df, metric)
         models[metric] = m
 
+    # 3. Store TimesFM context for each metric (no model weights loaded yet — lazy)
+    timesfm_models: dict = {}
+    if _TIMESFM_AVAILABLE:
+        for metric in FIT_METRICS:
+            if metric in df.columns:
+                tfm = EnergyTimesFM()
+                tfm.fit(df, metric)   # stores history only; no model load yet
+                timesfm_models[metric] = tfm
+        log.info(
+            "TimesFM context stored for %d metrics (weights lazy-loaded on first /anomalies)",
+            len(timesfm_models),
+        )
+
     _state.update({
-        "df":                 df,
-        "models":             models,
-        "config":             config,
-        "insample_forecasts": {},   # lazy-populated on first /anomalies request
-        "fitted_at":          datetime.utcnow().isoformat() + "Z",
-        "data_rows":          len(df),
+        "df":                         df,
+        "models":                     models,
+        "config":                     config,
+        "insample_forecasts":         {},   # lazy-populated on first /anomalies request
+        "timesfm_models":             timesfm_models,
+        "timesfm_insample_forecasts": {},   # lazy-populated on first /anomalies call per metric
+        "fitted_at":                  datetime.utcnow().isoformat() + "Z",
+        "data_rows":                  len(df),
     })
     log.info("Service ready — %d rows, models: %s", len(df), list(models.keys()))
 
@@ -193,6 +215,8 @@ class AnomalyPoint(BaseModel):
     carbon_intensity:     float
     excess_carbon_kgco2e: float
     excess_cost_eur:      float
+    timesfm_flagged:      bool   # True if TimesFM also flags this timestamp as anomalous
+    confidence:           str    # "high" | "prophet-only" | "timesfm-only"
 
 
 class AnomalyResponse(BaseModel):
@@ -380,7 +404,79 @@ def _get_insample_forecast(metric: str) -> "pd.DataFrame":
     return cache[metric]
 
 
-def _anomaly_to_point(a) -> AnomalyPoint:
+def _compute_timesfm_rolling_insample(metric: str) -> "pd.DataFrame":
+    """Generate genuine out-of-sample TimesFM predictions via rolling CV.
+
+    Uses forward-chaining cross-validation (step=24h, min_context=168h) to
+    produce TimesFM predictions for each historical point without data leakage.
+    Covers history[168:] — the first 168 hours have insufficient prior context.
+
+    Returns an empty DataFrame (correct columns) if TimesFM is not available
+    or the metric has no stored context.
+    """
+    _empty = pd.DataFrame(columns=["ds", "yhat", "yhat_lower", "yhat_upper"])
+    state = _require_state()
+    if metric not in state.get("timesfm_models", {}):
+        return _empty
+
+    tfm = state["timesfm_models"][metric]
+    log.info("Computing TimesFM rolling CV for '%s' (first call — may take ~60s)…", metric)
+
+    tfm._ensure_model()
+
+    history        = tfm._history         # numpy array, shape (n,)
+    history_dates  = tfm._history_dates   # pd.Series of datetimes
+    step           = 24
+    min_context    = 168
+    context_window = tfm.context_len      # 512
+
+    n    = len(history)
+    rows = []
+
+    for pos in range(min_context, n, step):
+        ctx_start = max(0, pos - context_window)
+        ctx       = history[ctx_start:pos]
+
+        horizon = min(step, n - pos)
+        if horizon <= 0:
+            break
+
+        point, quantile = tfm._model.forecast([ctx], freq=[0])
+
+        for i in range(horizon):
+            rows.append({
+                "ds":         history_dates.iloc[pos + i],
+                "yhat":       float(point[0, i]),
+                "yhat_lower": float(quantile[0, i, 0]),   # 10th percentile
+                "yhat_upper": float(quantile[0, i, 8]),   # 90th percentile
+            })
+
+    if not rows:
+        return _empty
+
+    result = pd.DataFrame(rows)
+    log.info("TimesFM rolling CV complete for '%s' (%d rows)", metric, len(result))
+    return result
+
+
+def _get_timesfm_insample_forecast(metric: str) -> "pd.DataFrame":
+    """Return TimesFM rolling-CV in-sample predictions for `metric`, lazy-cached.
+
+    Mirrors _get_insample_forecast() — computes once per metric on first call,
+    then returns the cached result on subsequent calls.
+    """
+    state = _require_state()
+    cache = state["timesfm_insample_forecasts"]
+    if metric not in cache:
+        cache[metric] = _compute_timesfm_rolling_insample(metric)
+        log.info(
+            "TimesFM in-sample forecast cached for '%s' (%d rows)",
+            metric, len(cache[metric]),
+        )
+    return cache[metric]
+
+
+def _anomaly_to_point(a, timesfm_flagged: bool = False, confidence: str = "prophet-only") -> "AnomalyPoint":
     """Convert an Anomaly dataclass to its Pydantic response model."""
     direction = "excess" if a.excess_pct >= 0 else "deficit"
     return AnomalyPoint(
@@ -396,6 +492,8 @@ def _anomaly_to_point(a) -> AnomalyPoint:
         carbon_intensity=     round(a.carbon_intensity,     4),
         excess_carbon_kgco2e= round(a.excess_carbon_kgco2e, 6),
         excess_cost_eur=      round(a.excess_cost_eur,       6),
+        timesfm_flagged=      timesfm_flagged,
+        confidence=           confidence,
     )
 
 
@@ -592,6 +690,43 @@ def anomalies_endpoint(
 
     anomalies = detect_point_anomalies(df_window, df_forecast_window, metric, direction=direction)
 
+    # --- Dual-model confidence scoring ---
+    if _TIMESFM_AVAILABLE and metric in state.get("timesfm_models", {}):
+        tfm_fc = _get_timesfm_insample_forecast(metric).copy()
+        tfm_fc["ds"] = pd.to_datetime(tfm_fc["ds"])
+        tfm_fc_window = tfm_fc[tfm_fc["ds"] > cutoff].copy()
+
+        # Join TimesFM bounds with actual values to determine TimesFM-flagged timestamps
+        actual_vals = df_window[["ds", metric]].copy()
+        merged = pd.merge(tfm_fc_window, actual_vals, on="ds", how="inner")
+
+        if not merged.empty:
+            if direction == "excess":
+                flagged_mask = merged[metric] > merged["yhat_upper"]
+            elif direction == "deficit":
+                flagged_mask = merged[metric] < merged["yhat_lower"]
+            else:  # "both"
+                flagged_mask = (
+                    (merged[metric] > merged["yhat_upper"]) |
+                    (merged[metric] < merged["yhat_lower"])
+                )
+            # Normalise to hourly floor to match anomaly timestamps robustly
+            tfm_flagged_ts = set(merged.loc[flagged_mask, "ds"].dt.floor("h"))
+        else:
+            tfm_flagged_ts = set()
+
+        points = []
+        for a in anomalies:
+            a_ts     = pd.Timestamp(a.ds).floor("h")
+            is_tfm   = a_ts in tfm_flagged_ts
+            conf     = "high" if is_tfm else "prophet-only"
+            points.append(_anomaly_to_point(a, timesfm_flagged=is_tfm, confidence=conf))
+
+        # Sort: "high" confidence first, then "prophet-only"
+        points.sort(key=lambda p: (0 if p.confidence == "high" else 1))
+    else:
+        points = [_anomaly_to_point(a) for a in anomalies]
+
     return AnomalyResponse(
         metric=         metric,
         unit=           UNIT_MAP.get(metric, ""),
@@ -599,7 +734,7 @@ def anomalies_endpoint(
         lookback_days=  lookback_days,
         total_anomalies=len(anomalies),
         generated_at=   datetime.utcnow().isoformat() + "Z",
-        anomalies=      [_anomaly_to_point(a) for a in anomalies],
+        anomalies=      points,
     )
 
 
@@ -622,6 +757,9 @@ def investigation_leads_endpoint(
 
     Carbon and cost impacts may point in opposite directions — both are surfaced so
     the analyst can make an informed trade-off.
+
+    Note: `/anomalies` shows `confidence: "high"` for anomalies flagged by both
+    Prophet and TimesFM (consensus), giving independent second-opinion validation.
 
     Example: GET /investigation-leads?lookback_days=30&top_n=5
     """
