@@ -8,10 +8,11 @@ Usage (Docker):
     docker compose up --build
 
 Endpoints:
+    POST /data                               — ingest new measurements (EVIDEN push)
     GET /health                              — model status and readiness
-    GET /forecast/all?horizon=24             — all metrics in one response
-    GET /forecast/sci?horizon=24             — SCI (derived, kgCO2e/req)
-    GET /forecast/{metric}?horizon=24        — single metric forecast
+    GET /forecast/all?horizon=1             — all metrics in one response (default 60 min)
+    GET /forecast/sci?horizon=1             — SCI (derived, kgCO2e/req)
+    GET /forecast/{metric}?horizon=1        — single metric forecast
     GET /optimal-window?horizon_days=7       — best low-carbon scheduling windows
     GET /anomalies?metric=consumption        — point anomalies vs Prophet bounds
     GET /investigation-leads                 — ranked recurring anomaly patterns
@@ -25,7 +26,7 @@ import logging
 import warnings
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Optional
 
 # Suppress noisy loggers before prophet imports
 logging.getLogger("prophet").setLevel(logging.WARNING)
@@ -36,8 +37,8 @@ _cmdstan.propagate = False
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from data_generator import generate_energy_carbon_data
 from data_loader import load_and_validate, build_pipeline_config
@@ -254,12 +255,83 @@ class InvestigationLeadsResponse(BaseModel):
     leads:         list[InvestigationLeadPoint]
 
 
+class DataRow(BaseModel):
+    """A single measurement row pushed by an external system (e.g. EVIDEN).
+
+    Only `ds` and `consumption` are required — the pipeline degrades gracefully
+    when optional columns are absent, matching data_loader.py's minimum schema.
+    """
+    ds:                       str            = Field(..., description="ISO 8601 timestamp, e.g. '2025-01-01T14:00:00'")
+    consumption:              float          = Field(..., ge=0, description="Energy consumption (kWh/h)")
+    carbonEmissions:          Optional[float] = Field(None, ge=0)
+    carbonIntensityFactor:    Optional[float] = Field(None, ge=0)
+    functionalUnit:           Optional[float] = Field(None, ge=0)
+    cost:                     Optional[float] = Field(None, ge=0)
+    greenConsumptionPercentage: Optional[float] = Field(None, ge=0, le=100)
+    cpuUtilization:           Optional[float] = Field(None, ge=0, le=1)
+    operationalEmissions:     Optional[float] = Field(None, ge=0)
+    embodiedEmissions:        Optional[float] = Field(None, ge=0)
+    totalConsumption:         Optional[float] = Field(None, ge=0)
+    totalCost:                Optional[float] = Field(None, ge=0)
+    softwareCarbonIntensity:  Optional[float] = Field(None, ge=0)
+    timeWindow:               Optional[int]   = Field(None, ge=0)
+    measurementSource:        Optional[str]   = None
+
+
+class DataIngestionRequest(BaseModel):
+    rows: list[DataRow] = Field(..., min_length=1, description="One or more measurement rows")
+
+
+class DataIngestionResponse(BaseModel):
+    rows_accepted:  int
+    total_rows:     int
+    models_status:  str  # "refit_scheduled"
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────────
 
 def _require_state() -> dict:
     if not _state:
         raise HTTPException(status_code=503, detail="Models not ready yet.")
     return _state
+
+
+def _refit_models_in_background(df: pd.DataFrame) -> None:
+    """Refit all Prophet models on the updated dataset.
+
+    Called via FastAPI BackgroundTasks after POST /data so the endpoint
+    returns 202 immediately while the 2-3 minute refit runs asynchronously.
+    Old models continue serving forecasts until the refit completes, at which
+    point they are atomically replaced.
+    """
+    config = build_pipeline_config(df)
+    new_models: dict[str, EnergyProphet] = {}
+
+    for metric in FIT_METRICS:
+        if metric not in df.columns:
+            continue
+        regs = config.regressor_map.get(metric, [])
+        m = EnergyProphet(regressors=regs)
+        try:
+            m.fit(df, metric)
+            new_models[metric] = m
+            log.info("Background refit OK: '%s'", metric)
+        except Exception:
+            log.exception("Background refit failed for '%s' — keeping old model", metric)
+            old = _state.get("models", {}).get(metric)
+            if old is not None:
+                new_models[metric] = old
+
+    # Guard: service might have shut down between task creation and execution
+    if not _state:
+        return
+
+    # Atomically swap in new models and flush all stale caches
+    _state["models"] = new_models
+    _state["config"] = config
+    _state["insample_forecasts"] = {}
+    _state["timesfm_insample_forecasts"] = {}
+    log.info("Background refit complete — %d Prophet models updated", len(new_models))
 
 
 def _build_regressor_future_df(horizon: int, regressors: list[str]) -> pd.DataFrame:
@@ -536,7 +608,7 @@ def health():
 
 @app.get("/forecast/all", response_model=dict[str, ForecastResponse], tags=["Forecast"])
 def forecast_all(
-    horizon: int = Query(24, ge=1, le=168, description="Hours ahead to forecast"),
+    horizon: int = Query(1, ge=1, le=168, description="Hours ahead to forecast (default 1 = next 60 min)"),
 ):
     """
     Fetch forecasts for every available metric in one request.
@@ -560,7 +632,7 @@ def forecast_all(
 
 @app.get("/forecast/sci", response_model=ForecastResponse, tags=["Forecast"])
 def forecast_sci(
-    horizon: int = Query(24, ge=1, le=168, description="Hours ahead to forecast"),
+    horizon: int = Query(1, ge=1, le=168, description="Hours ahead to forecast (default 1 = next 60 min)"),
 ):
     """
     Forecast Software Carbon Intensity (kgCO2e/req) for the next N hours.
@@ -578,7 +650,7 @@ def forecast_sci(
 @app.get("/forecast/{metric}", response_model=ForecastResponse, tags=["Forecast"])
 def forecast_metric(
     metric: str,
-    horizon: int = Query(24, ge=1, le=168, description="Hours ahead to forecast"),
+    horizon: int = Query(1, ge=1, le=168, description="Hours ahead to forecast (default 1 = next 60 min)"),
 ):
     """
     Forecast any directly-fit metric for the next N hours.
@@ -647,6 +719,64 @@ def optimal_window(
     )
 
 
+@app.post("/data", response_model=DataIngestionResponse, status_code=202, tags=["Data"])
+def ingest_data(
+    payload: DataIngestionRequest,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Ingest new measurement rows from an external system (e.g. EVIDEN).
+
+    EVIDEN pushes measurements every 30-60 minutes. This endpoint receives
+    them, appends them to the live in-memory dataset, and immediately returns
+    202 Accepted. Prophet models are refit asynchronously — forecasts remain
+    available throughout using the previous models, which are atomically
+    replaced when the background refit completes (~2-3 min).
+
+    TimesFM context windows are updated synchronously (instant — no weights
+    reloaded). In-sample caches are flushed so anomaly detection reflects the
+    latest data on the next call.
+
+    Minimum required fields per row: `ds` (ISO 8601) and `consumption` (kWh/h).
+    All other schema fields are optional; missing columns are handled by
+    data_loader's graceful degradation logic.
+    """
+    state = _require_state()
+
+    # Build a DataFrame from the incoming rows, preserving only non-None fields
+    records = [row.model_dump(exclude_none=True) for row in payload.rows]
+    new_df = pd.DataFrame(records)
+    new_df["ds"] = pd.to_datetime(new_df["ds"])
+
+    # Merge into the live dataset, keeping chronological order
+    updated_df = (
+        pd.concat([state["df"], new_df], ignore_index=True)
+        .sort_values("ds")
+        .reset_index(drop=True)
+    )
+    state["df"] = updated_df
+    state["data_rows"] = len(updated_df)
+
+    # Update TimesFM history contexts (instant — only stores numpy array)
+    if _TIMESFM_AVAILABLE:
+        for metric, tfm in state.get("timesfm_models", {}).items():
+            if metric in updated_df.columns:
+                tfm.fit(updated_df, metric)
+        state["timesfm_insample_forecasts"] = {}
+
+    # Flush Prophet in-sample cache (stale after new data)
+    state["insample_forecasts"] = {}
+
+    # Refit Prophet models asynchronously — old models keep serving until done
+    background_tasks.add_task(_refit_models_in_background, updated_df.copy())
+
+    return DataIngestionResponse(
+        rows_accepted=len(payload.rows),
+        total_rows=len(updated_df),
+        models_status="refit_scheduled",
+    )
+
+
 @app.get("/anomalies", response_model=AnomalyResponse, tags=["Anomaly Detection"])
 def anomalies_endpoint(
     metric:       str = Query(..., description="Metric to analyse, e.g. 'consumption' or 'carbonEmissions'"),
@@ -696,34 +826,35 @@ def anomalies_endpoint(
         tfm_fc["ds"] = pd.to_datetime(tfm_fc["ds"])
         tfm_fc_window = tfm_fc[tfm_fc["ds"] > cutoff].copy()
 
-        # Join TimesFM bounds with actual values to determine TimesFM-flagged timestamps
-        actual_vals = df_window[["ds", metric]].copy()
-        merged = pd.merge(tfm_fc_window, actual_vals, on="ds", how="inner")
+        # Run the same anomaly detector against TimesFM bounds instead of Prophet bounds.
+        # This produces a fully independent set of flagged timestamps.
+        tfm_anomalies: list = (
+            detect_point_anomalies(df_window, tfm_fc_window, metric, direction=direction)
+            if not tfm_fc_window.empty else []
+        )
 
-        if not merged.empty:
-            if direction == "excess":
-                flagged_mask = merged[metric] > merged["yhat_upper"]
-            elif direction == "deficit":
-                flagged_mask = merged[metric] < merged["yhat_lower"]
-            else:  # "both"
-                flagged_mask = (
-                    (merged[metric] > merged["yhat_upper"]) |
-                    (merged[metric] < merged["yhat_lower"])
-                )
-            # Normalise to hourly floor to match anomaly timestamps robustly
-            tfm_flagged_ts = set(merged.loc[flagged_mask, "ds"].dt.floor("h"))
-        else:
-            tfm_flagged_ts = set()
+        # Build lookup sets (floor to hour to handle any sub-second rounding in joins)
+        tfm_flagged_ts     = {pd.Timestamp(a.ds).floor("h") for a in tfm_anomalies}
+        prophet_flagged_ts = {pd.Timestamp(a.ds).floor("h") for a in anomalies}
 
-        points = []
+        points: list[AnomalyPoint] = []
+
+        # Prophet anomalies: "high" if TimesFM also flags the same hour, else "prophet-only"
         for a in anomalies:
-            a_ts     = pd.Timestamp(a.ds).floor("h")
-            is_tfm   = a_ts in tfm_flagged_ts
-            conf     = "high" if is_tfm else "prophet-only"
+            a_ts   = pd.Timestamp(a.ds).floor("h")
+            is_tfm = a_ts in tfm_flagged_ts
+            conf   = "high" if is_tfm else "prophet-only"
             points.append(_anomaly_to_point(a, timesfm_flagged=is_tfm, confidence=conf))
 
-        # Sort: "high" confidence first, then "prophet-only"
-        points.sort(key=lambda p: (0 if p.confidence == "high" else 1))
+        # TimesFM-only anomalies: Prophet's baseline was not breached but TimesFM signals
+        # something unexpected — a weaker but independent signal worth surfacing.
+        for a in tfm_anomalies:
+            if pd.Timestamp(a.ds).floor("h") not in prophet_flagged_ts:
+                points.append(_anomaly_to_point(a, timesfm_flagged=True, confidence="timesfm-only"))
+
+        # Sort: "high" (consensus) → "prophet-only" → "timesfm-only", then by time
+        _conf_rank = {"high": 0, "prophet-only": 1, "timesfm-only": 2}
+        points.sort(key=lambda p: (_conf_rank[p.confidence], p.ds))
     else:
         points = [_anomaly_to_point(a) for a in anomalies]
 
@@ -732,7 +863,7 @@ def anomalies_endpoint(
         unit=           UNIT_MAP.get(metric, ""),
         direction=      direction,
         lookback_days=  lookback_days,
-        total_anomalies=len(anomalies),
+        total_anomalies=len(points),   # includes TimesFM-only anomalies when available
         generated_at=   datetime.utcnow().isoformat() + "Z",
         anomalies=      points,
     )

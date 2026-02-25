@@ -482,3 +482,97 @@ class TestInvestigationLeadsEndpoint:
         r = client.get("/investigation-leads?min_occurrences=9999")
         assert r.status_code == 200
         assert r.json()["leads"] == []
+
+
+# ── POST /data ─────────────────────────────────────────────────────────────────
+# These tests use the shared session-scoped client and run LAST so that the
+# rows they append don't affect the 720-row assertions in TestHealthEndpoint.
+
+MINIMAL_ROW = {"ds": "2026-01-01T00:00:00", "consumption": 0.15}
+FULL_ROW = {
+    "ds":                       "2026-01-01T01:00:00",
+    "consumption":              0.18,
+    "carbonEmissions":          0.072,
+    "carbonIntensityFactor":    0.40,
+    "functionalUnit":           450.0,
+    "cost":                     0.036,
+    "greenConsumptionPercentage": 30.0,
+    "cpuUtilization":           0.40,
+    "operationalEmissions":     0.070,
+    "embodiedEmissions":        0.002,
+}
+
+
+class TestDataIngestion:
+
+    def test_ingest_single_row_returns_202(self, client):
+        r = client.post("/data", json={"rows": [MINIMAL_ROW]})
+        assert r.status_code == 202
+
+    def test_ingest_response_fields_present(self, client):
+        r = client.post("/data", json={"rows": [MINIMAL_ROW]})
+        data = r.json()
+        for field in ("rows_accepted", "total_rows", "models_status"):
+            assert field in data, f"Missing field '{field}' in DataIngestionResponse"
+
+    def test_ingest_rows_accepted_count(self, client):
+        r = client.post("/data", json={"rows": [MINIMAL_ROW]})
+        assert r.json()["rows_accepted"] == 1
+
+    def test_ingest_multiple_rows(self, client):
+        rows = [
+            {"ds": "2026-02-01T00:00:00", "consumption": 0.10},
+            {"ds": "2026-02-01T01:00:00", "consumption": 0.12},
+            {"ds": "2026-02-01T02:00:00", "consumption": 0.11},
+        ]
+        r = client.post("/data", json={"rows": rows})
+        assert r.status_code == 202
+        assert r.json()["rows_accepted"] == 3
+
+    def test_ingest_increases_data_rows(self, client):
+        """Each accepted row increments the dataset size reported by /health."""
+        initial = client.get("/health").json()["data_rows"]
+        r = client.post("/data", json={"rows": [{"ds": "2026-03-01T00:00:00", "consumption": 0.20}]})
+        assert r.status_code == 202
+        updated = client.get("/health").json()["data_rows"]
+        assert updated == initial + 1
+
+    def test_ingest_total_rows_increments_sequentially(self, client):
+        """Consecutive POSTs each add exactly the declared number of rows."""
+        before = client.post("/data", json={"rows": [{"ds": "2026-04-01T00:00:00", "consumption": 0.15}]}).json()["total_rows"]
+        after  = client.post("/data", json={"rows": [{"ds": "2026-04-01T01:00:00", "consumption": 0.16}]}).json()["total_rows"]
+        assert after == before + 1
+
+    def test_ingest_full_schema_row(self, client):
+        """All optional fields are accepted without error."""
+        r = client.post("/data", json={"rows": [FULL_ROW]})
+        assert r.status_code == 202
+
+    def test_models_status_is_refit_scheduled(self, client):
+        r = client.post("/data", json={"rows": [MINIMAL_ROW]})
+        assert r.json()["models_status"] == "refit_scheduled"
+
+    def test_missing_consumption_returns_422(self, client):
+        r = client.post("/data", json={"rows": [{"ds": "2026-05-01T00:00:00"}]})
+        assert r.status_code == 422
+
+    def test_missing_ds_returns_422(self, client):
+        r = client.post("/data", json={"rows": [{"consumption": 0.15}]})
+        assert r.status_code == 422
+
+    def test_empty_rows_list_returns_422(self, client):
+        """min_length=1 on the rows field — empty list must be rejected."""
+        r = client.post("/data", json={"rows": []})
+        assert r.status_code == 422
+
+    def test_negative_consumption_returns_422(self, client):
+        """consumption must be >= 0 (physical energy cannot be negative)."""
+        r = client.post("/data", json={"rows": [{"ds": "2026-05-01T01:00:00", "consumption": -1.0}]})
+        assert r.status_code == 422
+
+    def test_forecasts_still_work_after_ingest(self, client):
+        """Prophet models (possibly still refitting) must serve forecasts immediately."""
+        client.post("/data", json={"rows": [MINIMAL_ROW]})
+        r = client.get("/forecast/consumption?horizon=1")
+        assert r.status_code == 200
+        assert len(r.json()["predictions"]) == 1

@@ -2,610 +2,174 @@
 
 ---
 
-## Project Context
+## Who is EVIDEN
 
-This is a **Proof of Concept** built for **EVIDEN** (formerly Atos, €5B revenue, 47 countries), one of Europe's largest IT infrastructure and HPC providers. EVIDEN holds positions #1, #2, and #6 on the Green500 list of the world's most energy-efficient supercomputers, builds AI infrastructure (BullSequana servers), and sells sustainability and decarbonisation services to enterprise clients.
-
-**What EVIDEN asked for:** A system that identifies energy inefficiencies in infrastructure and quantifies the carbon and cost impact — automatically, without needing to know in advance what is running on that infrastructure.
-
-**Why this matters to them:** They manage infrastructure at scale. Inefficiencies that are invisible to operations teams (background workloads running at peak carbon hours, services consuming more energy than their load pattern justifies) represent both unnecessary cost and carbon liability. An AI system that surfaces these automatically — as investigation leads — would be deployable on any client's telemetry data without a lengthy onboarding process.
+EVIDEN (formerly Atos) is one of Europe's largest IT infrastructure providers — €5B revenue, 47 countries, positions #1 #2 and #6 on the Green500 list of most energy-efficient supercomputers. They build AI infrastructure (BullSequana servers) and sell sustainability services to enterprise clients.
 
 ---
 
-## What This System Proves
+## What EVIDEN Actually Said
 
-**The research gap:** Every existing carbon-aware scheduling system (GREEN, CASPER, EXIGENCE) operates reactively — they respond to current carbon intensity. None forecast where inefficiencies will occur before they happen.
+> *"Our idea is to enable anyone to send forecasts to the observability framework about any of the existing metrics (performance & eco-efficiency). Then we can enable scheduling policies based on the future state of the nodes instead of what is happening right now."*
 
-**This system is predictive.** It learns what "normal" looks like for a service (the expected energy and carbon pattern given its load profile), then identifies where and when actual behaviour deviates from that expectation. Those deviations are investigation leads.
+**What this tells us:**
+- They have an existing observability framework — we do not know which one
+- They want forecasts pushed into it — we do not know the format
+- The metrics are performance + eco-efficiency — we do not know which ones exactly
+- They want scheduling based on predicted future state, not current state
+- "Nodes" is their unit — we do not know their infrastructure setup
 
-**The core value proposition:**
+**What we still need to ask them:**
+1. What is the observability framework?
+2. What metrics do they already collect (names, units, frequency)?
+3. How should forecasts be sent in — what format, what protocol?
+4. At what granularity — per node, per service, per namespace?
 
-> *"There is a service in this infrastructure consuming 40% more energy than expected every weekday at 15:00. This occurs during the highest-carbon window of the day. Estimated impact if the underlying workload were shifted to the overnight low-carbon window: −29% carbon, −22% cost per occurrence. Investigate what triggers at 15:00."*
-
-The system does not need to know what the service is. It finds the anomaly. The operations team identifies the cause. This works on any infrastructure with hourly telemetry.
-
-**Dual-objective:** Unlike all existing approaches, this system optimises for **both carbon and cost simultaneously**. In most grids these align (overnight is cheaper AND greener), but when they diverge the system surfaces the tradeoff explicitly rather than hiding it.
+Until those questions are answered, the integration layer cannot be built.
 
 ---
 
-## How It Works — The Core Loop
+## What is Built and Working
+
+A forecasting pipeline for energy and carbon metrics — 183 tests passing.
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  STEP 1 — Learn the baseline                       ✅ COMPLETE   │
-│  Prophet fits 7 models on historical metrics.                    │
-│  Learns: daily pattern, weekly cycle, annual trend, load         │
-│  relationships. This is the "expected" behaviour fingerprint.    │
-└────────────────────────────┬────────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  STEP 2 — Forecast the next window                 ✅ COMPLETE   │
-│  7-day forecasts for all 7 metrics + SCI.                        │
-│  Includes calibrated uncertainty intervals (yhat_lower/upper).   │
-│  Identifies the optimal low-carbon scheduling window per day.    │
-└────────────────────────────┬────────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  STEP 3 — Detect anomalies                         ✅ COMPLETE   │
-│  Compare actual consumption against the forecast baseline.       │
-│  Flag windows where actual > yhat_upper (unexpected excess).     │
-│  Characterise: when, how much above baseline, how often it       │
-│  recurs, where it sits on the carbon/cost curve.                 │
-│  Exposed via GET /anomalies + GET /investigation-leads.          │
-└────────────────────────────┬────────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  STEP 4 — Generate insights            ← Next — Agent Layer      │
-│  Claude reasons over the anomalies and optimal windows.          │
-│  Produces structured investigation leads with estimated          │
-│  savings. No scheduling actions. No prior knowledge of jobs.     │
-│  Output: "Investigate X at time T — estimated saving Y%."        │
-└─────────────────────────────────────────────────────────────────┘
+data_generator.py     →  synthetic data (replaces real data for now)
+data_loader.py        →  reads CSV, validates schema, auto-detects columns
+prophet_model.py      →  fits Prophet models per metric
+timesfm_model.py      →  zero-shot forecasting (no training needed)
+ensemble_model.py     →  Prophet + TimesFM residual learning ensemble
+api.py                →  REST API exposing forecasts + anomaly detection
+anomaly_detector.py   →  3-stage anomaly engine
+carbon_analysis.py    →  8-chart analysis pipeline
+ensemble_analysis.py  →  3-way model comparison
 ```
+
+The API runs in Docker. It fits 7 Prophet models at startup and exposes 7 endpoints.
 
 ---
 
-## Architecture Overview
+## Current Architecture
 
 ```
 Layer 1 — Data
-  data_generator.py        Synthetic telemetry (8,760 rows × 15 cols, SCI schema)
-  data_loader.py           Schema validation + pipeline config (graceful degradation)
+  data_generator.py        Synthetic telemetry (8,760 rows × 15 cols)
+  data_loader.py           Schema validation, graceful degradation on missing cols
 
-Layer 2 — Forecasting Service  ✅ COMPLETE
-  prophet_model.py         EnergyProphet (baseline + seasonality + regressors)
-  timesfm_model.py         EnergyTimesFM (zero-shot foundation model)
-  ensemble_model.py        Residual learning ensemble (Prophet + TimesFM)
-  api.py                   FastAPI REST service — 7 Prophet models, 7 endpoints
+Layer 2 — Forecasting
+  prophet_model.py         EnergyProphet: multiplicative seasonality + regressors
+  timesfm_model.py         EnergyTimesFM: zero-shot, no training
+  ensemble_model.py        Prophet baseline + TimesFM residual correction
 
-Layer 3 — Analysis Pipeline  ✅ COMPLETE
-  carbon_analysis.py       8-chart Prophet analysis pipeline
-  ensemble_analysis.py     3-way model comparison (Prophet / TimesFM / Ensemble)
+Layer 3 — REST API + Analysis
+  api.py                   FastAPI: 7 Prophet models, 7 endpoints
+  carbon_analysis.py       8 PNG charts
+  ensemble_analysis.py     Model comparison charts + accuracy table
 
-Layer 4 — Anomaly Detection  ✅ COMPLETE
-  anomaly_detector.py      3-stage engine: point anomalies → recurring patterns → investigation leads
-  api.py /anomalies        GET: detect excess/deficit anomalies for any metric
-  api.py /investigation-leads  GET: ranked recurring patterns with carbon/cost savings
-
-Layer 5 — Agent Layer  ← NEXT
-  insight_agent.py         Claude-powered insight generation (to be built)
-  mcp_server.py            MCP tools wrapping the forecast + anomaly API (to be built)
+Layer 4 — Anomaly Detection
+  anomaly_detector.py      point anomalies → recurring patterns → investigation leads
+  api.py /anomalies        dual-model confidence scoring (Prophet + TimesFM)
+  api.py /investigation-leads  ranked patterns with carbon/cost savings
 ```
+
+**What is NOT built:** any connection to EVIDEN's infrastructure. The system currently reads a local CSV and outputs JSON. Nothing talks to any external system.
 
 ---
 
-## Forecasting Layer
+## API Endpoints
 
-### Three Complementary Models
-
-#### Prophet — The Baseline (interpretable)
-
-Meta's statistical decomposition model. Breaks the time series into components:
-
-```
-forecast = trend × daily_cycle × weekly_cycle × yearly_cycle
-```
-
-- **Trend** — Is baseline energy drifting up or down over months?
-- **Daily cycle** — Which hours draw most power?
-- **Weekly cycle** — Weekday vs weekend load difference
-- **Regressor** — `functionalUnit` (req/h) as an external covariate for energy: more requests → higher CPU → more kWh
-
-Prophet is **fast, interpretable, and explainable**. Its forecast defines what "normal" looks like — deviations from it are anomalies.
-
-#### TimesFM — The Deep Pattern Finder (accurate on carbon)
-
-Google's 200M-parameter foundation model pre-trained on billions of real-world time series. **Zero-shot** — no training needed.
-
-Captures nonlinear patterns, especially the `consumption × carbonIntensityFactor` interaction that Prophet's decomposition misses. Wins on carbon forecast accuracy (7.3% sMAPE vs Prophet's 13.9%).
-
-Weakness: black box, adds noise on well-structured signals.
-
-#### Ensemble — Residual Learning
-
-Two-stage pipeline, not a simple average:
-
-```
-Step 1  Prophet predicts energy              →  0.112 kWh/h
-Step 2  Actual value                         →  0.149 kWh/h  (burst!)
-Step 3  Residual = actual − prophet          →  +0.037
-Step 4  TimesFM learns residual patterns     →  predicts +0.033 next hour
-Step 5  Final = Prophet + α × TimesFM        →  0.145 ✓
-```
-
-- **Adaptive α** — grid-searched on last 10% of training data (minimises MAE). α=0 means Prophet only.
-- **Correction clamping** — TimesFM residual clipped to ±50% of Prophet's forecast.
-- **Per-metric regressors** — `functionalUnit` regressor only on `consumption` (direct causal link). Omitted for `carbonEmissions` (indirect path through grid intensity).
-
-### Chained Forecasting
-
-Prophet needs future regressor values for every forecast horizon. The naive fallback is `0`, meaning "the service has zero traffic in the future" — which collapses energy forecasts to idle baseline, invalidating every business-hours prediction.
-
-**Fix:** `functionalUnit` has its own Prophet model with strong daily/weekly seasonality. When `consumption` needs a 24-hour forecast, the pipeline first runs the `functionalUnit` model, then injects those predictions as future regressor values.
-
-```
-GET /forecast/consumption?horizon=24
-  │
-  ├─ regressors = ["functionalUnit"]            non-empty → chained path
-  │
-  ├─ _build_regressor_future_df(24, ["functionalUnit"])
-  │    ├─ historical df["functionalUnit"]        real values, 8,760 rows
-  │    └─ _run_forecast("functionalUnit", 24)    no regressors → simple path, no recursion
-  │         returns realistic business-hours curve (not zeros)
-  │
-  └─ consumption model.predict(future_df = historical + predicted functionalUnit)
-       historical rows → actual functionalUnit   ✓
-       future rows     → predicted functionalUnit ✓  (was zero before)
-       result: energy forecast reflects morning ramp-up, midday peak, overnight trough
-```
-
-No circular recursion: `functionalUnit` has no regressors, so it always takes the simple path.
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Service readiness, model list |
+| `GET /forecast/all?horizon=N` | All 7 metrics + SCI |
+| `GET /forecast/{metric}?horizon=N` | Single metric forecast |
+| `GET /forecast/sci?horizon=N` | SCI with propagated uncertainty |
+| `GET /optimal-window?horizon_days=N` | Lowest-carbon scheduling window per day |
+| `GET /anomalies?metric=X&lookback_days=N` | Point anomalies vs Prophet confidence interval |
+| `GET /investigation-leads?top_n=N` | Ranked recurring anomaly patterns |
 
 ---
 
-## SCI Framework
+## Data Schema (15 columns)
 
-All metrics align with the Green Software Foundation's **Software Carbon Intensity** specification (ISO/IEC 21031:2024):
+| Column | Unit | Description |
+|--------|------|-------------|
+| `ds` | datetime | Hourly timestamp |
+| `consumption` | kWh/h | Energy drawn — **primary forecast target** |
+| `carbonEmissions` | kgCO2e/h | Operational + embodied — **secondary target** |
+| `carbonIntensityFactor` | kgCO2/kWh | Grid carbon intensity |
+| `greenConsumptionPercentage` | % | Renewable energy fraction |
+| `functionalUnit` | req/h | Request rate — SCI denominator + Prophet regressor |
+| `cpuUtilization` | fraction | CPU load [0.05, 0.95] |
+| `cost` | EUR/h | Electricity cost |
+| `softwareCarbonIntensity` | kgCO2e/req | SCI — always derived, never fit directly |
+| `operationalEmissions` | kgCO2e/h | `consumption × carbonIntensityFactor` |
+| `embodiedEmissions` | kgCO2e/h | Hardware amortisation (constant 0.002) |
+| `timeWindow` | s | Measurement window (constant 3600) |
+| `measurementSource` | str | "RAPL" or "TDP" |
+| `totalConsumption` | kWh | Cumulative |
+| `totalCost` | EUR | Cumulative |
+
+**Minimum required for the pipeline:** `ds` + `consumption`. Everything else is optional — the pipeline detects what is present and degrades gracefully.
+
+---
+
+## SCI Formula
 
 ```
 SCI = (E × I + M) / R
-
-  E  consumption           kWh/h         energy drawn by the service
-  I  carbonIntensityFactor kgCO2/kWh     real-time grid carbon intensity
-  M  embodiedEmissions     kgCO2e/h      hardware amortisation (constant 0.002)
-  R  functionalUnit        req/h         functional unit — SCI denominator
+  E = consumption (kWh/h)
+  I = carbonIntensityFactor (kgCO2/kWh)
+  M = embodiedEmissions (0.002 kgCO2e/h)
+  R = functionalUnit (req/h)
 ```
 
-`softwareCarbonIntensity` is always **derived** from component forecasts, never fit directly:
-
-```python
-SCI_forecast = carbon_forecast / max(requests_forecast, 1)
-```
-
-Fitting SCI as a ratio causes numerical instability at low request rates (near-zero denominator). Deriving it from components propagates uncertainty correctly:
-
-```
-yhat_lower = carbon_lower / max(request_upper, 1)   # best-case SCI
-yhat_upper = carbon_upper / max(request_lower, 1)   # worst-case SCI
-```
+SCI is always **derived** from component forecasts, never fit directly — fitting a ratio causes instability at low request rates.
 
 ---
 
-## Agent Layer — Design (Next Step)
+## Model Results (80/20 train/test, 1 year hourly data)
 
-### What the Agent Detects
+### Energy — `consumption`
+| Model | sMAPE | MAPE |
+|-------|-------|------|
+| **Prophet** | **5.0%** | **5.2%** |
+| TimesFM | 6.4% | 6.1% |
+| Ensemble | 5.0% | 5.2% |
 
-The forecasting service already defines what "normal" looks like (the Prophet baseline with calibrated uncertainty bands). The agent layer compares actual telemetry against this baseline and flags:
+Prophet wins. Energy follows clean daily/weekly seasonality + load regressor.
 
-- **Excess consumption anomalies** — actual > `yhat_upper` at a specific hour. Something is consuming more than the load pattern justifies.
-- **Recurring patterns** — the same excess appearing at the same time window across multiple days/weeks. Suggests a scheduled background workload.
-- **Carbon-cost window misalignment** — recurring compute bursts that correlate with high `carbonIntensityFactor` or high `cost` periods. The work is happening at the most expensive and dirtiest time.
+### Carbon — `carbonEmissions`
+| Model | sMAPE | MAPE |
+|-------|-------|------|
+| Prophet | 13.9% | 15.1% |
+| **TimesFM** | **7.3%** | **7.0%** |
+| Ensemble | 13.0% | 14.0% |
 
-### What the Agent Does Not Need to Know
-
-- What specific service or job is causing the anomaly
-- What the job's deadline is
-- Whether the job is deferrable
-- Anything about the infrastructure topology
-
-The agent identifies the signal. The operations team identifies the cause. This is intentional — it makes the system deployable on any client's data without prior configuration.
-
-### Output Format — Investigation Leads
-
-```json
-{
-  "anomaly_id": "weekday-15h-cpu-burst",
-  "detected_pattern": "CPU utilization 38% above baseline every weekday 15:00–16:00",
-  "correlation": "Does not follow request rate pattern (traffic peaks at 13:00)",
-  "hypothesis": "Scheduled background workload independent of user demand",
-  "current_window_carbon": 0.047,
-  "current_window_cost": 0.18,
-  "optimal_window": "02:00–05:00",
-  "optimal_window_carbon": 0.031,
-  "estimated_carbon_saving_pct": 34,
-  "estimated_cost_saving_pct": 22,
-  "recommendation": "Investigate what service or job triggers at 15:00 on weekdays"
-}
-```
-
-### Target Architecture — 4 Specialized Agents
-
-Based on the AgenticAI.md research and the Supervisor+DAG pattern:
-
-```
-Supervisor Agent
-  │
-  ├── Monitor Agent
-  │     Reads telemetry, identifies candidate anomalies,
-  │     computes actual vs forecast gaps per metric
-  │
-  ├── Forecast Agent
-  │     Calls MCP tools (/forecast/all, /optimal-window),
-  │     interprets carbon/cost outlook, identifies green windows
-  │
-  ├── Carbon Agent
-  │     Computes dual-objective scores (carbon saving % + cost saving %),
-  │     applies policy rules, flags cost/carbon tradeoffs
-  │
-  └── Scheduler Agent
-        Generates ranked investigation leads,
-        produces structured output + human-readable summary
-        (future: patches K8s CronJob schedules)
-```
-
-MCP protocol is the integration layer between the forecast REST API and the agent tools — each endpoint becomes a semantically-described tool that Claude calls natively.
-
-### Trust Curve for Production
-
-```
-PoC     → Observe and report (no actions, no prior job knowledge)
-           Agent identifies anomalies and investigation leads
-           EVIDEN team validates manually
-
-Phase 2 → Semi-automatic (human approval via Slack)
-           For clients with known workloads: "We detected X at 15:00.
-           Is this the Y job? Should we suggest deferral? [Yes] [No]"
-
-Phase 3 → Automatic for low-risk patterns
-           Confirmed recurring patterns → automatic deferral suggestions
-           High-impact jobs → still require human approval
-           Full audit log for every action
-
-Phase 4 → K8s integration
-           Agent patches CronJob schedules, writes carbon annotations,
-           KEDA ScaledObject reads forecast signals
-```
+TimesFM wins. Carbon = `consumption × carbonIntensityFactor` — a nonlinear product that Prophet's decomposition cannot capture cleanly.
 
 ---
 
-## PoC Roadmap
-
-### Stage 1 — Forecasting Service ✅ COMPLETE
-
-FastAPI service running in Docker. Fits 7 Prophet models at startup. Chained forecasting for regressors.
-
-| Endpoint | Status | Description |
-|----------|--------|-------------|
-| `GET /health` | ✅ | Model readiness + 7 model names |
-| `GET /forecast/all?horizon=N` | ✅ | All 7 metrics + SCI in one response |
-| `GET /forecast/{metric}?horizon=N` | ✅ | Single metric forecast |
-| `GET /forecast/sci?horizon=N` | ✅ | SCI with propagated uncertainty |
-| `GET /optimal-window?horizon_days=N` | ✅ | Best low-carbon window per day |
-
-### Stage 2 — Anomaly Detection Layer ✅ COMPLETE
-
-Compare Prophet forecast baseline against actual historical data. Flag windows where actual consumption exceeds `yhat_upper`. Characterise by frequency, magnitude, and position on the carbon/cost curve.
-
-| Endpoint | Status | Description |
-|----------|--------|-------------|
-| `GET /anomalies?metric=X&lookback_days=N` | ✅ | Point anomalies vs Prophet confidence interval |
-| `GET /investigation-leads?top_n=N` | ✅ | Ranked recurring patterns with carbon/cost savings |
-
-**Implementation:** `anomaly_detector.py` — pure analysis engine (no Prophet/FastAPI imports). Three-stage pipeline:
-1. `detect_point_anomalies()` — flags individual timestamps where actual > yhat_upper (or < yhat_lower)
-2. `find_recurring_patterns()` — groups anomalies by `(hour_of_day, day_type)`, computes frequency and carbon impact
-3. `build_investigation_leads()` — ranks patterns by total excess carbon, adds optimal window + savings estimate
-
-**Test coverage:** 182 tests across 4 groups (data, forecasting, API, anomaly engine).
-
-### Stage 3 — Agent Insight Generator
-
-Claude agent consuming anomaly reports + optimal window data via MCP tools. Produces structured investigation leads. No job registry required — the system works on raw telemetry.
-
-### Stage 4 — PoC Demo Package
-
-End-to-end demonstration: Docker stack up → synthetic data → analysis charts → agent runs → insight report. Story: "Give us your infrastructure telemetry. This system identifies your energy inefficiencies automatically."
-
-### Post-PoC (Production Path)
-
-- Real data connector: Prometheus/Kepler → same 15-column schema
-- Workload registry: for clients who want automated scheduling suggestions
-- K8s CronJob patching: agent acts, not just recommends
-- KEDA ScaledObject: scales workloads based on carbon forecast signals
-- Feedback loop: actual vs forecast savings measurement over time
-
----
-
-## Project Structure
-
-```
-Agentic_AI/
-├── AIModel/
-│   ├── api.py                    REST service (FastAPI, 7 Prophet models, 7 endpoints)
-│   ├── anomaly_detector.py       Anomaly engine (point anomalies → patterns → leads)
-│   ├── data_generator.py         Synthetic telemetry generator (8,760 rows × 15 cols)
-│   ├── data_loader.py            Schema validation + PipelineConfig
-│   ├── prophet_model.py          EnergyProphet wrapper (fit/predict/evaluate)
-│   ├── timesfm_model.py          EnergyTimesFM wrapper (zero-shot)
-│   ├── ensemble_model.py         Prophet + TimesFM residual ensemble
-│   ├── carbon_analysis.py        8-chart Prophet analysis pipeline
-│   ├── ensemble_analysis.py      3-way model comparison (2 charts + accuracy table)
-│   ├── visualizations.py         Reusable Matplotlib plotting utilities
-│   ├── tests/
-│   │   ├── conftest.py           30-day test dataset + DATA_PATH env setup
-│   │   ├── test_data.py          Data contract (schema, ranges, SCI identity)
-│   │   ├── test_forecasting.py   Chained forecasting validation
-│   │   ├── test_api.py           API contract (7 endpoints, response shapes)
-│   │   └── test_anomaly.py       Anomaly engine (point anomalies, patterns, leads)
-│   ├── Dockerfile                Service image (Prophet + FastAPI, lightweight)
-│   ├── Dockerfile.test           Test image (service deps + pytest + httpx)
-│   ├── Dockerfile.analysis       Analysis image (full stack + TimesFM + matplotlib)
-│   ├── requirements.txt          Full deps (analysis + TimesFM)
-│   ├── requirements-service.txt  Lightweight deps (service only)
-│   └── requirements-test.txt     Test deps (pytest + httpx)
-├── docker-compose.yml            Three modes: test + analysis profile + API service
-├── docs/
-│   ├── RESUME.md                 This file — full project reference
-│   ├── AgenticAI.md              Research notes: agentic AI, multi-agent patterns, carbon tools
-│   └── [research PDFs]           GREEN, CASPER, EXIGENCE, TimesFM, Mixture-of-Agents, etc.
-└── START.md                      Docker-first quick start guide
-```
-
----
-
-## What Each File Does
-
-### `anomaly_detector.py` — Anomaly Detection Engine
-
-Pure analysis module — no Prophet, no FastAPI. Takes DataFrames, returns typed dataclasses. The API layer owns all model interaction and passes the in-sample forecast in.
-
-**Three-stage pipeline:**
-
-```
-detect_point_anomalies(df_actual, df_forecast, metric, direction)
-  └─ merges actual vs Prophet confidence interval on timestamp
-  └─ flags: excess (actual > yhat_upper) or deficit (actual < yhat_lower)
-  └─ enriches with: carbon intensity, excess_carbon_kgco2e, excess_cost_eur
-
-find_recurring_patterns(anomalies, df_actual, min_occurrences=3)
-  └─ groups by (metric, hour_of_day, day_type)
-  └─ computes: frequency_pct = occurrences / possible slots in history
-  └─ labels: "high-carbon" / "low-carbon" vs median grid intensity
-  └─ sorts by total_excess_carbon descending
-
-build_investigation_leads(patterns, df_actual, top_n=5)
-  └─ finds optimal low-carbon 4h window (24h sliding search with wrap-around)
-  └─ estimates carbon saving: (CI_optimal - CI_pattern) / CI_pattern × 100
-  └─ estimates cost saving: peak → off-peak rate shift
-  └─ negative saving = improvement; positive = tradeoff (surfaced explicitly)
-```
-
-**Graceful degradation:** if `carbonIntensityFactor` or `cost` columns are absent (real customer data), all carbon/cost fields default to `0.0`. Shape detection still works.
-
----
-
-### `data_generator.py` — Synthetic Telemetry
-
-Generates 1 year of hourly data (8,760 rows) simulating a CPU/memory-based web service. All computation vectorised with NumPy (no Python loops).
-
-| Signal | Generation logic | Range |
-|--------|-----------------|-------|
-| `functionalUnit` | Business-hours curve (50→500 req/h), weekend ×0.4, +15% annual trend, ±8% noise | 5–600 req/h |
-| `cpuUtilization` | `0.10 + 0.75 × (load^0.8)`, clipped [0.05, 0.95] | 0.14–0.85 |
-| `consumption` | `(20 + 130 × cpuUtil) × PUE_1.3 / 1000` kWh/h | 0.049–0.170 kWh/h |
-| `carbonIntensityFactor` | 0.4 base − midday solar dip (Gaussian σ=2 at noon) − summer offset, ±0.015 noise | 0.30–0.50 kgCO2/kWh |
-| `greenConsumptionPercentage` | Gaussian peak at 13:00, summer boost | 20–70% |
-| `carbonEmissions` | `consumption × carbonIntensityFactor + 0.002` | ~0.016–0.086 kgCO2e/h |
-| `cost` | `consumption × 0.12 × peak_factor` (peak 1.5× during 09:00–18:00) | ~0.006–0.030 EUR/h |
-| `softwareCarbonIntensity` | `carbonEmissions / max(functionalUnit, 1)` | ~0.00002–0.0018 kgCO2e/req |
-| `measurementSource` | "RAPL" if cpuUtil > 0.6, else "TDP" | categorical |
-
-### `data_loader.py` — Schema Validation + Config
-
-- `load_and_validate(path)` — enforces `["ds", "consumption"]` as minimum, prints schema report, returns DataFrame
-- `build_pipeline_config(df)` — auto-detects available columns, returns `PipelineConfig`:
-  - `fit_metrics`: all 7 directly-fit metrics present in data: `consumption`, `carbonEmissions`, `carbonIntensityFactor`, `greenConsumptionPercentage`, `cpuUtilization`, `functionalUnit`, `cost`
-  - `regressor_map`: `{"consumption": ["functionalUnit"], ...}` — only `consumption` uses a regressor
-  - `has_sci`: True when both `carbonEmissions` and `functionalUnit` present
-  - `available_charts`: chart name → bool (graceful degradation when columns missing)
-
-### `prophet_model.py` — EnergyProphet
-
-Multiplicative seasonality — energy patterns *scale* with load (doubling requests roughly doubles power).
-
-```python
-EnergyProphet(
-    seasonality_mode="multiplicative",
-    changepoint_prior_scale=0.05,
-    regressors=["functionalUnit"],
-)
-```
-
-`predict(periods, freq, future_df)`: merges `future_df` on `ds` timestamp to fill regressor values. Any unmatched future timestamps fill with `0` — avoid this by using chained forecasting in the service layer.
-
-### `timesfm_model.py` — EnergyTimesFM
-
-Google TimesFM 200M parameters (PyTorch). Lazy-loads from HuggingFace (~925 MB, cached in `hf-cache` Docker volume after first run).
-
-- `fit()` — stores history (zero-shot, no training)
-- `predict()` — uses last 512 hours as context, forecasts in 128-hour chunks, returns 10th/90th percentile uncertainty
-- `forecast_batch()` — efficient multi-metric inference in one model call
-
-### `ensemble_model.py` — EnsembleForecaster
-
-1. Prophet fits baseline → compute residuals
-2. TimesFM learns residual patterns
-3. α learned via grid-search on last 10% of training (minimises MAE)
-4. `ensemble = prophet + α × clamp(timesfm_residual, ±50%)`
-
-`get_residual_stats()` — diagnostic: high `autocorr_lag1` means TimesFM corrections are most useful.
-
-### `carbon_analysis.py` — Prophet Analysis Pipeline
-
-Fits Prophet on all metrics, derives SCI, generates 8 charts:
-
-| # | Chart | What it reveals for anomaly investigation |
-|---|-------|------------------------------------------|
-| 01 | `01_service_profile.png` | Energy + request load shape — confirms daily pattern baseline |
-| 02 | `02_energy_forecast.png` | 7-day energy forecast with CI — defines normal bounds |
-| 03 | `03_energy_decomposition.png` | Trend / weekly / daily / yearly breakdown |
-| 04 | `04_daily_pattern.png` | Mean energy by hour — hourly baseline fingerprint |
-| 05 | `05_weekly_pattern.png` | Weekday vs weekend delta — weekly baseline fingerprint |
-| 06 | `06_carbon_intensity.png` | Grid intensity + green % + optimal window |
-| 07 | `07_sci_by_hour.png` | SCI (kgCO2e/req) by hour — efficiency profile |
-| 08 | `08_carbon_forecast.png` | 7-day carbon forecast — carbon outlook |
-
-### `ensemble_analysis.py` — Model Comparison
-
-Runs all three models per metric, produces:
-- `07_forecast_comparison.png` — actual vs Prophet/TimesFM/Ensemble on test week
-- `08_model_accuracy.png` — sMAPE grouped bars per metric, ★ winner highlighted
-
-### `api.py` — Forecasting + Anomaly Detection REST Service
-
-FastAPI service. Fits 7 Prophet models at startup (~2–3 min). All models persist in-process; single worker by design (model state must not be shared across forks).
-
-Chained forecasting implemented in `_build_regressor_future_df()` and `_run_forecast()` — no zero-fill for future regressors.
-
-In-sample forecasts for anomaly detection are lazy-computed on first request per metric and cached in `_state["insample_forecasts"]`.
-
-| Endpoint | Tag | Description |
-|----------|-----|-------------|
-| `GET /health` | System | Model readiness + 7 model names |
-| `GET /forecast/all` | Forecast | All 7 metrics + SCI in one response |
-| `GET /forecast/sci` | Forecast | SCI with propagated uncertainty |
-| `GET /forecast/{metric}` | Forecast | Single metric forecast |
-| `GET /optimal-window` | Scheduling | Best low-carbon window per day |
-| `GET /anomalies` | Anomaly Detection | Point anomalies vs Prophet confidence interval |
-| `GET /investigation-leads` | Anomaly Detection | Ranked recurring patterns with carbon/cost savings |
-
----
-
-## Data Schema
-
-```
-Column                      Unit          Description
-─────────────────────────────────────────────────────────────────────
-ds                          datetime      Hourly timestamp (Prophet required)
-
-── Service Load ──
-functionalUnit              req/h         Request rate — SCI denominator + Prophet regressor
-cpuUtilization              fraction      CPU load [0.05, 0.95]
-timeWindow                  s             Measurement window (constant 3600)
-measurementSource           str           "RAPL" (hw counter) or "TDP" (estimate)
-
-── Energy ──
-consumption                 kWh/h         Energy drawn  ← PRIMARY FORECAST TARGET
-totalConsumption            kWh           Cumulative energy
-cost                        EUR/h         Electricity cost (peak/off-peak pricing)
-totalCost                   EUR           Cumulative electricity cost
-
-── Carbon (SCI components) ──
-carbonIntensityFactor       kgCO2/kWh     Real-time grid carbon intensity
-greenConsumptionPercentage  %             Renewable energy fraction
-operationalEmissions        kgCO2e/h      consumption × carbonIntensityFactor
-embodiedEmissions           kgCO2e/h      Hardware amortisation (constant 0.002)
-carbonEmissions             kgCO2e/h      Operational + embodied ← SECONDARY FORECAST TARGET
-
-── SCI (derived) ──
-softwareCarbonIntensity     kgCO2e/req    SCI = carbonEmissions / functionalUnit ← NEVER FIT DIRECTLY
-```
-
-**Minimum required for the pipeline:** `ds` + `consumption`.
-All other columns are optional — the pipeline auto-detects and degrades gracefully.
-
----
-
-## Docker Usage
-
-Everything runs in Docker. No local Python required.
+## Docker Commands
 
 ```bash
-# Analysis pipeline — generate data + 10 charts
-docker compose --profile analysis up --build
+# Run tests
+docker compose --profile test run --rm test
 
-# Forecasting API — starts on http://localhost:8000
+# Start the REST API
 docker compose up --build
 
-# API is ready when logs show:
-# INFO  Service ready — 8760 rows, models: ['consumption', 'carbonEmissions', ...]
+# Run analysis pipeline (generates charts)
+docker compose --profile analysis up --build
 ```
 
-Charts appear in `AIModel/analysis_output/` on the host (bind-mounted).
-Data is persisted in `AIModel/data/` (bind-mounted).
-TimesFM model weights cached in `hf-cache` Docker named volume (~925 MB, downloaded once).
-
-Full instructions → `START.md`
-
 ---
 
-## Model Results
+## Design Decisions
 
-Evaluation on 1 year of hourly synthetic data (80/20 train/test split):
-
-### Energy Consumption — `consumption` (with `functionalUnit` regressor)
-
-| Model | sMAPE | MAPE | RMSE |
-|-------|-------|------|------|
-| **Prophet** | **5.0%** | **5.2%** | **0.0052** |
-| TimesFM | 6.4% | 6.1% | 0.0078 |
-| Ensemble | 5.0% | 5.2% | 0.0052 |
-
-Prophet dominates. Energy follows clean daily/weekly patterns; `functionalUnit` regressor explains load scaling precisely. Chained forecasting ensures future regressor values are realistic.
-
-### Carbon Emissions — `carbonEmissions` (no regressor)
-
-| Model | sMAPE | MAPE | RMSE |
-|-------|-------|------|------|
-| Prophet | 13.9% | 15.1% | 0.0061 |
-| **TimesFM** | **7.3%** | **7.0%** | **0.0036** |
-| Ensemble | 13.0% | 14.0% | 0.0058 |
-
-TimesFM dominates. Carbon = `consumption × carbonIntensityFactor` — a nonlinear product that Prophet's decomposition cannot capture cleanly.
-
-### Software Carbon Intensity — `softwareCarbonIntensity` (derived)
-
-| Model | sMAPE | MAPE | RMSE |
-|-------|-------|------|------|
-| Prophet | 31.6% | 189.5% | 0.00458 |
-| **TimesFM** | **15.2%** | **17.0%** | **0.00011** |
-| Ensemble | 30.8% | 194.8% | 0.00458 |
-
-MAPE inflated by near-zero denominators at off-peak. **sMAPE is the reliable metric.** TimesFM wins 2×.
-
-### Signal Selection by Use Case
-
-| Use case | Best model | Reason |
-|----------|-----------|--------|
-| Anomaly baseline (expected energy) | Prophet | Interpretable seasonality + regressor |
-| Carbon forecast for anomaly scoring | TimesFM | Nonlinear grid intensity interactions |
-| SCI hourly efficiency profile | TimesFM | Best ratio estimation via components |
-| When does TimesFM help most? | `get_residual_stats()` | High `autocorr_lag1` → corrections useful |
-
----
-
-## Design Principles
-
-1. **Forecast targets are absolute, not ratios** — SCI is always derived post-forecast to avoid ratio instability at low denominators
-2. **Model selection is per-metric** — Prophet for energy (structured seasonality), TimesFM for carbon and SCI (nonlinear interactions)
-3. **Graceful degradation** — missing columns cause charts/metrics to skip, not crash; minimum schema is `ds` + `consumption`
-4. **Fair evaluation** — identical 80/20 train/test splits across all three models; no data leakage
-5. **Interpretability preserved** — Prophet decomposition charts are the primary anomaly investigation input; the baseline must be explainable to operations teams
-6. **Adaptive residual weighting** — α=0 means "trust Prophet only"; the system learns when TimesFM corrections are beneficial per metric
-7. **Measurement source tracking** — `measurementSource` distinguishes RAPL hardware counters from TDP estimates; data quality signals matter for anomaly confidence
-8. **Chained forecasting for regressors** — when metric A uses metric B as a regressor, B is always forecast first; zero-filling future regressors produces idle-state predictions during business hours, invalidating all peak-hour forecasts
-9. **Dual-objective optimisation** — every insight includes both carbon saving and cost saving; when they conflict the tradeoff is surfaced explicitly, never hidden
-10. **No prior knowledge required** — the anomaly detection layer works from raw telemetry alone; no workload catalogue, no job schedules, no infrastructure topology needed for the PoC
+- **Python 3.11 only** — TimesFM does not support 3.12+
+- **Multiplicative seasonality** — energy patterns scale with load
+- **Chained forecasting** — `functionalUnit` is forecast first, then injected into `consumption` model. Without this, future regressor values default to 0 (service appears idle during business hours)
+- **SCI never fit directly** — always derived from carbon and request rate forecasts
+- **Graceful degradation** — missing columns skip charts and metrics, not crash
+- **Dual-model anomaly confidence** — "high" = both Prophet AND TimesFM flag the same timestamp; "prophet-only" = weaker signal, could be baseline drift

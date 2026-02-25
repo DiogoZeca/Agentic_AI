@@ -172,17 +172,24 @@ def detect_point_anomalies(
     if merged.empty:
         return []
 
-    # Optional enrichment columns — default to 0.0 if absent
-    has_ci   = "carbonIntensityFactor" in df_actual.columns
-    has_cost = "cost" in df_actual.columns
-    has_cons = "consumption" in df_actual.columns
+    # Merge optional enrichment columns directly into the aligned DataFrame.
+    # This guarantees timestamp alignment regardless of sub-millisecond precision
+    # or timezone differences in real data — a per-row Series.get() lookup silently
+    # returns 0.0 on any mismatch, corrupting carbon/cost impact figures.
+    _enrich_cols = [
+        c for c in ("carbonIntensityFactor", "cost", "consumption")
+        if c in df_actual.columns and c != metric  # skip if already present as the target
+    ]
+    if _enrich_cols:
+        _enrich = df_actual[["ds"] + _enrich_cols].copy()
+        _enrich["ds"] = pd.to_datetime(_enrich["ds"])
+        merged = merged.merge(_enrich, on="ds", how="left")
+        merged[_enrich_cols] = merged[_enrich_cols].fillna(0.0)
 
-    if has_ci:
-        ci_series = df_actual.set_index(pd.to_datetime(df_actual["ds"]))["carbonIntensityFactor"]
-    if has_cost:
-        cost_series = df_actual.set_index(pd.to_datetime(df_actual["ds"]))["cost"]
-    if has_cons:
-        cons_series = df_actual.set_index(pd.to_datetime(df_actual["ds"]))["consumption"]
+    # has_* flags reflect what ended up in the merged DataFrame
+    has_ci   = "carbonIntensityFactor" in merged.columns
+    has_cost = "cost" in merged.columns
+    has_cons = "consumption" in merged.columns  # True when metric=="consumption" too
 
     # Determine anomaly mask
     actual_col = merged[metric].values
@@ -214,18 +221,15 @@ def detect_point_anomalies(
         denom      = abs(expected) if abs(expected) > 1e-10 else 1e-10
         excess_pct = (actual_val - expected) / denom * 100.0
 
-        # Carbon intensity at this timestamp
-        ci = float(ci_series.get(ts, 0.0)) if has_ci else 0.0
+        # Read enrichment values via positional access — O(1) and immune to
+        # Timestamp precision issues since alignment was done at merge time.
+        ci     = float(merged["carbonIntensityFactor"].iat[idx]) if has_ci   else 0.0
+        cost_h = float(merged["cost"].iat[idx])                   if has_cost else 0.0
 
-        # Cost per hour at this timestamp
-        cost_h = float(cost_series.get(ts, 0.0)) if has_cost else 0.0
-
-        # Excess carbon: only meaningful for energy and emission metrics
         exc_carbon = _compute_excess_carbon(metric, excess_abs, ci)
 
-        # Excess cost: approximate from cost/consumption rate at this timestamp
         if has_cost and has_cons:
-            cons_h = float(cons_series.get(ts, 0.0))
+            cons_h   = float(merged["consumption"].iat[idx])
             exc_cost = _compute_excess_cost(metric, excess_abs, cost_h, cons_h)
         else:
             exc_cost = 0.0

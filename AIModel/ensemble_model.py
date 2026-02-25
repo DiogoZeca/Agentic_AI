@@ -95,7 +95,7 @@ class EnsembleForecaster:
 
     @property
     def _residual_col(self) -> str:
-        return f"{self.target_column}_residual"
+        return self._residual_col_name(self.target_column)
 
     def predict(self, periods: int, freq: str = "h", future_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
         """

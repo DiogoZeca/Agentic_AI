@@ -55,13 +55,6 @@ import pandas as pd
 
 REQUIRED_COLUMNS: list[str] = ["ds", "consumption"]
 
-# Metrics the pipeline can analyse; ordered by priority
-CANDIDATE_METRICS: list[str] = [
-    "consumption",
-    "carbonEmissions",
-    "softwareCarbonIntensity",   # derived — never fit directly
-]
-
 # Metrics the models fit directly (SCI is always derived from components)
 CANDIDATE_FIT_METRICS: list[str] = [
     "consumption",

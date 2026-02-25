@@ -211,9 +211,13 @@ class EnergyTimesFM:
 
     def forecast_batch(
         self, df: pd.DataFrame, columns: list, periods: int
-    ) -> Dict[str, np.ndarray]:
+    ) -> Dict[str, Dict[str, np.ndarray]]:
         """
-        Forecast multiple metrics in a single efficient batch.
+        Forecast multiple metrics in a single efficient batch call.
+
+        All metrics are sent to the GPU in one forward pass, which is
+        significantly faster than calling predict() per metric when forecasting
+        many columns at once (e.g. all EVIDEN metrics every 30-60 minutes).
 
         Args:
             df: Input DataFrame
@@ -221,7 +225,9 @@ class EnergyTimesFM:
             periods: Number of periods to forecast per metric
 
         Returns:
-            Dict mapping column name → predicted values array
+            Dict mapping column name → {"yhat", "yhat_lower", "yhat_upper"}.
+            yhat_lower / yhat_upper are the 10th / 90th percentile bounds
+            (same quantile indices as predict(), indices 0 and 8).
         """
         self._ensure_model()
 
@@ -231,10 +237,15 @@ class EnergyTimesFM:
         ]
         freq = [0] * len(columns)
 
-        point, _ = self._model.forecast(inputs, freq=freq)
+        # quantile shape: (n_series, horizon, 10) — index 0=10th pct, 8=90th pct
+        point, quantile = self._model.forecast(inputs, freq=freq)
 
         return {
-            col: point[i, :periods]
+            col: {
+                "yhat":       point[i, :periods],
+                "yhat_lower": quantile[i, :periods, 0],
+                "yhat_upper": quantile[i, :periods, 8],
+            }
             for i, col in enumerate(columns)
         }
 
