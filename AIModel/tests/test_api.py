@@ -256,7 +256,7 @@ ANOMALY_POINT_FIELDS = [
 ]
 
 ANOMALY_RESPONSE_FIELDS = [
-    "metric", "unit", "direction", "lookback_days", "total_anomalies",
+    "node", "metric", "unit", "direction", "lookback_days", "total_anomalies",
     "generated_at", "anomalies",
 ]
 
@@ -576,3 +576,95 @@ class TestDataIngestion:
         r = client.get("/forecast/consumption?horizon=1")
         assert r.status_code == 200
         assert len(r.json()["predictions"]) == 1
+
+
+# ── ds format ─────────────────────────────────────────────────────────────────
+
+class TestDsTimestampFormat:
+
+    def test_forecast_ds_is_iso8601(self, client):
+        """ds timestamps must use T separator and Z suffix."""
+        r = client.get("/forecast/consumption?horizon=1")
+        assert r.status_code == 200
+        for p in r.json()["predictions"]:
+            assert "T" in p["ds"] and p["ds"].endswith("Z"), f"Bad ds format: {p['ds']}"
+
+    def test_forecast_sci_ds_is_iso8601(self, client):
+        r = client.get("/forecast/sci?horizon=1")
+        assert r.status_code == 200
+        for p in r.json()["predictions"]:
+            assert "T" in p["ds"] and p["ds"].endswith("Z"), f"Bad ds format: {p['ds']}"
+
+
+# ── node parameter ────────────────────────────────────────────────────────────
+
+class TestNodeParameter:
+
+    def test_forecast_node_echoed(self, client):
+        r = client.get("/forecast/consumption?horizon=1&node=node-42")
+        assert r.status_code == 200
+        assert r.json()["node"] == "node-42"
+
+    def test_forecast_node_null_when_absent(self, client):
+        r = client.get("/forecast/consumption?horizon=1")
+        assert r.json()["node"] is None
+
+    def test_anomaly_node_echoed(self, client):
+        r = client.get("/anomalies?metric=consumption&node=node-42")
+        assert r.status_code == 200
+        assert r.json()["node"] == "node-42"
+
+    def test_anomaly_node_null_when_absent(self, client):
+        r = client.get("/anomalies?metric=consumption")
+        assert r.json()["node"] is None
+
+    def test_optimal_window_node_echoed(self, client):
+        r = client.get("/optimal-window?horizon_days=1&node=node-42")
+        assert r.status_code == 200
+        assert r.json()["node"] == "node-42"
+
+    def test_optimal_window_node_null_when_absent(self, client):
+        r = client.get("/optimal-window?horizon_days=1")
+        assert r.json()["node"] is None
+
+    def test_investigation_leads_accepts_node_without_error(self, client):
+        """node param is accepted for API consistency but not echoed in the response."""
+        r = client.get("/investigation-leads?node=node-42")
+        assert r.status_code == 200
+        assert "node" not in r.json()
+
+
+# ── /metrics/prometheus ───────────────────────────────────────────────────────
+
+class TestPrometheusEndpoint:
+
+    def test_returns_text_plain(self, client):
+        r = client.get("/metrics/prometheus?horizon=1")
+        assert r.status_code == 200
+        assert "text/plain" in r.headers["content-type"]
+
+    def test_contains_consumption_metric(self, client):
+        r = client.get("/metrics/prometheus?horizon=1")
+        assert "ai_forecast_consumption_kwh" in r.text
+
+    def test_node_label_default(self, client):
+        r = client.get("/metrics/prometheus?horizon=1")
+        assert 'node="global"' in r.text
+
+    def test_node_label_custom(self, client):
+        r = client.get("/metrics/prometheus?horizon=1&node=test-node")
+        assert 'node="test-node"' in r.text
+
+    def test_forecast_ts_format(self, client):
+        import re
+        r = client.get("/metrics/prometheus?horizon=1")
+        assert re.search(r'forecast_ts="\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"', r.text)
+
+    def test_help_and_type_lines_present(self, client):
+        r = client.get("/metrics/prometheus?horizon=1")
+        assert "# HELP ai_forecast_consumption_kwh" in r.text
+        assert "# TYPE ai_forecast_consumption_kwh gauge" in r.text
+
+    def test_horizon_limit_enforced(self, client):
+        r = client.get("/metrics/prometheus?horizon=169")
+        assert r.status_code == 422

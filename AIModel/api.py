@@ -38,6 +38,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 import pandas as pd
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from data_generator import generate_energy_carbon_data
@@ -173,6 +174,7 @@ class ForecastPoint(BaseModel):
 
 
 class ForecastResponse(BaseModel):
+    node:          Optional[str]
     metric:        str
     unit:          str
     horizon_hours: int
@@ -190,6 +192,7 @@ class SchedulingWindow(BaseModel):
 
 
 class OptimalWindowResponse(BaseModel):
+    node:         Optional[str]
     horizon_days: int
     window_hours: int
     generated_at: str
@@ -221,6 +224,7 @@ class AnomalyPoint(BaseModel):
 
 
 class AnomalyResponse(BaseModel):
+    node:            Optional[str]
     metric:          str
     unit:            str
     direction:       str
@@ -400,10 +404,10 @@ def _run_forecast(metric: str, horizon: int) -> pd.DataFrame:
     return forecast.tail(horizon).reset_index(drop=True)
 
 
-def _to_response(metric: str, horizon: int, fc: pd.DataFrame) -> ForecastResponse:
+def _to_response(metric: str, horizon: int, fc: pd.DataFrame, node: Optional[str] = None) -> ForecastResponse:
     predictions = [
         ForecastPoint(
-            ds=str(row["ds"]),
+            ds=pd.Timestamp(row["ds"]).strftime("%Y-%m-%dT%H:%M:%SZ"),
             yhat=      round(float(row["yhat"]),       6),
             yhat_lower=round(float(row["yhat_lower"]), 6),
             yhat_upper=round(float(row["yhat_upper"]), 6),
@@ -411,6 +415,7 @@ def _to_response(metric: str, horizon: int, fc: pd.DataFrame) -> ForecastRespons
         for _, row in fc.iterrows()
     ]
     return ForecastResponse(
+        node=node,
         metric=metric,
         unit=UNIT_MAP.get(metric, ""),
         horizon_hours=horizon,
@@ -419,7 +424,7 @@ def _to_response(metric: str, horizon: int, fc: pd.DataFrame) -> ForecastRespons
     )
 
 
-def _build_sci_response(horizon: int) -> ForecastResponse:
+def _build_sci_response(horizon: int, node: Optional[str] = None) -> ForecastResponse:
     """Derive SCI with propagated uncertainty from two component forecasts."""
     carbon_fc  = _run_forecast("carbonEmissions", horizon)
     request_fc = _run_forecast("functionalUnit",  horizon)
@@ -431,13 +436,14 @@ def _build_sci_response(horizon: int) -> ForecastResponse:
         r_lower = max(float(r_row["yhat_lower"]), 1.0)
 
         predictions.append(ForecastPoint(
-            ds=str(c_row["ds"]),
+            ds=pd.Timestamp(c_row["ds"]).strftime("%Y-%m-%dT%H:%M:%SZ"),
             yhat=       round(float(c_row["yhat"])       / r_hat,   8),
             yhat_lower= round(float(c_row["yhat_lower"]) / r_upper, 8),  # best SCI
             yhat_upper= round(float(c_row["yhat_upper"]) / r_lower, 8),  # worst SCI
         ))
 
     return ForecastResponse(
+        node=node,
         metric="softwareCarbonIntensity",
         unit=UNIT_MAP["softwareCarbonIntensity"],
         horizon_hours=horizon,
@@ -552,7 +558,7 @@ def _anomaly_to_point(a, timesfm_flagged: bool = False, confidence: str = "proph
     """Convert an Anomaly dataclass to its Pydantic response model."""
     direction = "excess" if a.excess_pct >= 0 else "deficit"
     return AnomalyPoint(
-        ds=                   a.ds.isoformat(),
+        ds=                   a.ds.strftime("%Y-%m-%dT%H:%M:%SZ"),
         actual=               round(a.actual,               6),
         expected=             round(a.expected,             6),
         upper_bound=          round(a.upper_bound,          6),
@@ -606,9 +612,10 @@ def health():
     )
 
 
-@app.get("/forecast/all", response_model=dict[str, ForecastResponse], tags=["Forecast"])
+@app.get("/forecast/all", response_model=dict[str, ForecastResponse], tags=["Forecast", "Scheduler"])
 def forecast_all(
     horizon: int = Query(1, ge=1, le=168, description="Hours ahead to forecast (default 1 = next 60 min)"),
+    node: Optional[str] = Query(None, description="Node identifier (placeholder — per-node models pending Thanos integration)"),
 ):
     """
     Fetch forecasts for every available metric in one request.
@@ -622,17 +629,18 @@ def forecast_all(
 
     for metric in state["models"]:
         fc = _run_forecast(metric, horizon)
-        result[metric] = _to_response(metric, horizon, fc)
+        result[metric] = _to_response(metric, horizon, fc, node=node)
 
     # Append derived SCI
-    result["softwareCarbonIntensity"] = _build_sci_response(horizon)
+    result["softwareCarbonIntensity"] = _build_sci_response(horizon, node=node)
 
     return result
 
 
-@app.get("/forecast/sci", response_model=ForecastResponse, tags=["Forecast"])
+@app.get("/forecast/sci", response_model=ForecastResponse, tags=["Forecast", "Scheduler"])
 def forecast_sci(
     horizon: int = Query(1, ge=1, le=168, description="Hours ahead to forecast (default 1 = next 60 min)"),
+    node: Optional[str] = Query(None, description="Node identifier (placeholder — per-node models pending Thanos integration)"),
 ):
     """
     Forecast Software Carbon Intensity (kgCO2e/req) for the next N hours.
@@ -644,13 +652,14 @@ def forecast_sci(
       yhat_lower = carbon_lower / max(request_upper, 1)   (best-case SCI)
       yhat_upper = carbon_upper / max(request_lower, 1)   (worst-case SCI)
     """
-    return _build_sci_response(horizon)
+    return _build_sci_response(horizon, node=node)
 
 
-@app.get("/forecast/{metric}", response_model=ForecastResponse, tags=["Forecast"])
+@app.get("/forecast/{metric}", response_model=ForecastResponse, tags=["Forecast", "Scheduler"])
 def forecast_metric(
     metric: str,
     horizon: int = Query(1, ge=1, le=168, description="Hours ahead to forecast (default 1 = next 60 min)"),
+    node: Optional[str] = Query(None, description="Node identifier (placeholder — per-node models pending Thanos integration)"),
 ):
     """
     Forecast any directly-fit metric for the next N hours.
@@ -662,13 +671,14 @@ def forecast_metric(
     For all metrics at once use /forecast/all.
     """
     fc = _run_forecast(metric, horizon)
-    return _to_response(metric, horizon, fc)
+    return _to_response(metric, horizon, fc, node=node)
 
 
-@app.get("/optimal-window", response_model=OptimalWindowResponse, tags=["Scheduling"])
+@app.get("/optimal-window", response_model=OptimalWindowResponse, tags=["Scheduling", "Scheduler"])
 def optimal_window(
     horizon_days: int = Query(7,  ge=1, le=14, description="Days to scan"),
     window_hours: int = Query(6,  ge=1, le=12, description="Window length in hours"),
+    node: Optional[str] = Query(None, description="Node identifier (placeholder — per-node models pending Thanos integration)"),
 ):
     """
     Find the lowest-carbon scheduling window for each day over the next N days.
@@ -712,6 +722,7 @@ def optimal_window(
         ))
 
     return OptimalWindowResponse(
+        node=node,
         horizon_days=horizon_days,
         window_hours=window_hours,
         generated_at=datetime.utcnow().isoformat() + "Z",
@@ -719,7 +730,7 @@ def optimal_window(
     )
 
 
-@app.post("/data", response_model=DataIngestionResponse, status_code=202, tags=["Data"])
+@app.post("/data", response_model=DataIngestionResponse, status_code=202, tags=["Data", "Scheduler"])
 def ingest_data(
     payload: DataIngestionRequest,
     background_tasks: BackgroundTasks,
@@ -777,13 +788,14 @@ def ingest_data(
     )
 
 
-@app.get("/anomalies", response_model=AnomalyResponse, tags=["Anomaly Detection"])
+@app.get("/anomalies", response_model=AnomalyResponse, tags=["Anomaly Detection", "Frontend"])
 def anomalies_endpoint(
     metric:       str = Query(..., description="Metric to analyse, e.g. 'consumption' or 'carbonEmissions'"),
     lookback_days: int = Query(30, ge=1, le=365, description="Days of historical data to scan"),
     direction: Literal["excess", "deficit", "both"] = Query(
         "excess", description="'excess' → actual > yhat_upper; 'deficit' → actual < yhat_lower; 'both'"
     ),
+    node: Optional[str] = Query(None, description="Node identifier (placeholder — per-node models pending Thanos integration)"),
 ):
     """
     Detect point anomalies for a metric over the past N days.
@@ -859,6 +871,7 @@ def anomalies_endpoint(
         points = [_anomaly_to_point(a) for a in anomalies]
 
     return AnomalyResponse(
+        node=           node,
         metric=         metric,
         unit=           UNIT_MAP.get(metric, ""),
         direction=      direction,
@@ -869,11 +882,12 @@ def anomalies_endpoint(
     )
 
 
-@app.get("/investigation-leads", response_model=InvestigationLeadsResponse, tags=["Anomaly Detection"])
+@app.get("/investigation-leads", response_model=InvestigationLeadsResponse, tags=["Anomaly Detection", "Frontend"])
 def investigation_leads_endpoint(
     lookback_days:   int = Query(30, ge=1, le=365, description="Days of historical data to scan"),
     top_n:           int = Query(5,  ge=1, le=20,  description="Maximum leads to return"),
     min_occurrences: int = Query(3,  ge=1,          description="Minimum occurrences to form a recurring pattern"),
+    node: Optional[str] = Query(None, description="Node identifier (placeholder — accepted for API consistency but not echoed; per-node patterns pending Thanos integration)"),
 ):
     """
     Identify the top recurring energy/carbon anomaly patterns and surface actionable leads.
@@ -923,3 +937,61 @@ def investigation_leads_endpoint(
         generated_at= datetime.utcnow().isoformat() + "Z",
         leads=        [_lead_to_point(lead) for lead in leads],
     )
+
+
+def _metric_to_prometheus_block(
+    prom_name: str,
+    help_text: str,
+    fc: pd.DataFrame,
+    node_label: str,
+) -> str:
+    """Build a Prometheus text-format block for a single metric's future forecast rows.
+
+    `fc` must contain only future rows (as returned by `_run_forecast`).
+    Each row becomes a separate time series with `forecast_ts` as a label so that
+    future timestamps remain queryable even though Prometheus scraping uses wall time.
+    """
+    lines = [f"# HELP {prom_name} {help_text}", f"# TYPE {prom_name} gauge"]
+    for _, row in fc.iterrows():
+        ts = pd.Timestamp(row["ds"]).strftime("%Y-%m-%dT%H:%M:%SZ")
+        lines.append(f'{prom_name}{{node="{node_label}",forecast_ts="{ts}"}} {row["yhat"]:.6f}')
+    return "\n".join(lines)
+
+
+@app.get(
+    "/metrics/prometheus",
+    tags=["Prometheus", "Scheduler"],
+    summary="Prometheus text format forecast for HPA integration",
+)
+def prometheus_metrics(
+    horizon: int = Query(1, ge=1, le=168, description="Forecast horizon (hours)"),
+    node: Optional[str] = Query(None, description="Node identifier"),
+) -> Response:
+    """
+    Expose consumption and carbonEmissions forecasts in Prometheus text format.
+
+    Designed for EVIDEN's HPA (Horizontal Pod Autoscaler) which scrapes Prometheus.
+    Because Prometheus scraping uses the current time as the native timestamp,
+    future forecast timestamps are encoded as label values (`forecast_ts`) so that
+    each forecast point becomes a queryable time series.
+
+    Returns text/plain in Prometheus exposition format (version 0.0.4).
+    """
+    state = _require_state()
+    node_label = node if node is not None else "global"
+
+    _PROM_METRICS = [
+        ("consumption",     "ai_forecast_consumption_kwh",        "Predicted energy consumption (kWh/h)"),
+        ("carbonEmissions", "ai_forecast_carbon_emissions_kgco2e", "Predicted carbon emissions (kgCO2e/h)"),
+    ]
+
+    blocks = []
+    for metric, prom_name, help_text in _PROM_METRICS:
+        if metric not in state["models"]:
+            continue
+        fc = _run_forecast(metric, horizon)   # returns only the future `horizon` rows
+        block = _metric_to_prometheus_block(prom_name, help_text, fc, node_label)
+        blocks.append(block)
+
+    content = "\n\n".join(blocks) + "\n"
+    return Response(content=content, media_type="text/plain; version=0.0.4; charset=utf-8")
