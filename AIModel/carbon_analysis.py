@@ -115,6 +115,41 @@ def fit_models(df: pd.DataFrame, config: PipelineConfig) -> dict:
         forecast = model.predict(FORECAST_PERIODS, future_df=df)
         results[metric] = {"model": model, "forecast": forecast, "eval": eval_m}
 
+    # Chained forecasting: re-predict metrics that have regressors using the
+    # regressor's own forecast for the future period instead of zero-fill.
+    # Without this, future functionalUnit = 0 → consumption collapses to baseline.
+    last_ts = pd.to_datetime(df["ds"].max())
+    for metric in config.fit_metrics:
+        regs = config.regressor_map.get(metric, [])
+        if not regs or results.get(metric, {}).get("model") is None:
+            continue
+        avail = [r for r in regs if r in df.columns]
+        combined = df[["ds"] + avail].copy()
+        combined["ds"] = pd.to_datetime(combined["ds"])
+        for reg in regs:
+            if reg not in results:
+                continue
+            reg_fc = results[reg]["forecast"].copy()
+            reg_fc["ds"] = pd.to_datetime(reg_fc["ds"])
+            future_rows = reg_fc[reg_fc["ds"] > last_ts][["ds", "yhat"]].rename(columns={"yhat": reg})
+            combined = pd.concat([combined, future_rows], ignore_index=True)
+        results[metric]["forecast"] = results[metric]["model"].predict(FORECAST_PERIODS, future_df=combined)
+        print(f"  Chained forecast applied for '{metric}' using {regs}")
+
+    # TimesFM override: use foundation model for carbonEmissions when available
+    try:
+        from timesfm_model import EnergyTimesFM
+        tfm = EnergyTimesFM()
+        tfm.fit(df, "carbonEmissions")
+        tfm_fc = tfm.predict(FORECAST_PERIODS)
+        # tail() gives future-only rows; prepend history timestamps to align with Prophet output
+        future_only = tfm_fc.tail(FORECAST_PERIODS).reset_index(drop=True)
+        if "carbonEmissions" in results:
+            results["carbonEmissions"]["forecast"] = future_only
+            print("  carbonEmissions: using TimesFM (foundation model override)")
+    except Exception as e:
+        print(f"  carbonEmissions: TimesFM unavailable ({e}), keeping Prophet")
+
     if config.has_sci and "carbonEmissions" in results and "functionalUnit" in results:
         print("\n  Deriving SCI from carbonEmissions / functionalUnit …")
         results["softwareCarbonIntensity"] = _derive_sci(df, results)

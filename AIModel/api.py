@@ -82,6 +82,9 @@ FIT_METRICS: list[str] = [
     "cost",
 ]
 
+# Metrics where TimesFM outperforms Prophet — route through TimesFM when available
+_TIMESFM_PREFERRED: frozenset[str] = frozenset({"carbonEmissions"})
+
 # ── App state ────────────────────────────────────────────────────────────────────
 
 _state: dict = {}
@@ -404,6 +407,26 @@ def _run_forecast(metric: str, horizon: int) -> pd.DataFrame:
     return forecast.tail(horizon).reset_index(drop=True)
 
 
+def _run_timesfm_forecast(metric: str, horizon: int) -> pd.DataFrame:
+    """Run TimesFM forecast for a single metric. Returns future-only DataFrame."""
+    tfm_models = _state.get("timesfm_models", {})
+    if metric not in tfm_models:
+        raise HTTPException(status_code=503, detail=f"TimesFM model for {metric} not available")
+    model = tfm_models[metric]
+    fc = model.predict(horizon)   # returns history + future rows
+    return fc.tail(horizon).reset_index(drop=True)
+
+
+def _run_best_forecast(metric: str, horizon: int) -> pd.DataFrame:
+    """Use TimesFM for preferred metrics (fallback: Prophet)."""
+    if _TIMESFM_AVAILABLE and metric in _TIMESFM_PREFERRED:
+        try:
+            return _run_timesfm_forecast(metric, horizon)
+        except Exception:
+            pass  # fall through to Prophet
+    return _run_forecast(metric, horizon)
+
+
 def _to_response(metric: str, horizon: int, fc: pd.DataFrame, node: Optional[str] = None) -> ForecastResponse:
     predictions = [
         ForecastPoint(
@@ -426,7 +449,7 @@ def _to_response(metric: str, horizon: int, fc: pd.DataFrame, node: Optional[str
 
 def _build_sci_response(horizon: int, node: Optional[str] = None) -> ForecastResponse:
     """Derive SCI with propagated uncertainty from two component forecasts."""
-    carbon_fc  = _run_forecast("carbonEmissions", horizon)
+    carbon_fc  = _run_best_forecast("carbonEmissions", horizon)
     request_fc = _run_forecast("functionalUnit",  horizon)
 
     predictions = []
@@ -628,7 +651,7 @@ def forecast_all(
     result: dict[str, ForecastResponse] = {}
 
     for metric in state["models"]:
-        fc = _run_forecast(metric, horizon)
+        fc = _run_best_forecast(metric, horizon)
         result[metric] = _to_response(metric, horizon, fc, node=node)
 
     # Append derived SCI
@@ -670,7 +693,7 @@ def forecast_metric(
     For SCI (derived from two models) use /forecast/sci.
     For all metrics at once use /forecast/all.
     """
-    fc = _run_forecast(metric, horizon)
+    fc = _run_best_forecast(metric, horizon)
     return _to_response(metric, horizon, fc, node=node)
 
 

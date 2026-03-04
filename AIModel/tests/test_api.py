@@ -668,3 +668,43 @@ class TestPrometheusEndpoint:
     def test_horizon_limit_enforced(self, client):
         r = client.get("/metrics/prometheus?horizon=169")
         assert r.status_code == 422
+
+
+class TestCarbonForecastContract:
+    """Physical constraints on carbon forecasts — model-agnostic (Prophet or TimesFM)."""
+
+    def test_carbon_forecast_positive(self, client):
+        """Carbon emissions must be non-negative."""
+        r = client.get("/forecast/carbonEmissions?horizon=24")
+        assert r.status_code == 200
+        for p in r.json()["predictions"]:
+            assert p["yhat"] >= 0, f"Negative carbon: {p['yhat']}"
+
+    def test_carbon_forecast_plausible_range(self, client):
+        """kgCO2e/h must be < 10 for a single service (synthetic data ~0.3–0.7)."""
+        r = client.get("/forecast/carbonEmissions?horizon=24")
+        assert r.status_code == 200
+        for p in r.json()["predictions"]:
+            assert p["yhat"] < 10, f"Implausibly high carbon: {p['yhat']}"
+
+    def test_carbon_forecast_has_uncertainty_interval(self, client):
+        """yhat_lower <= yhat <= yhat_upper must hold for every point."""
+        r = client.get("/forecast/carbonEmissions?horizon=24")
+        assert r.status_code == 200
+        for p in r.json()["predictions"]:
+            assert p["yhat_lower"] <= p["yhat"] <= p["yhat_upper"], (
+                f"Interval order violated: {p['yhat_lower']} <= {p['yhat']} <= {p['yhat_upper']}"
+            )
+
+    def test_forecast_all_includes_carbon(self, client):
+        """/forecast/all must include carbonEmissions."""
+        r = client.get("/forecast/all?horizon=1")
+        assert r.status_code == 200
+        assert "carbonEmissions" in r.json()
+
+    def test_carbon_ds_iso8601(self, client):
+        """ds timestamps in carbon forecast must be ISO 8601 with T and Z."""
+        r = client.get("/forecast/carbonEmissions?horizon=1")
+        assert r.status_code == 200
+        for p in r.json()["predictions"]:
+            assert "T" in p["ds"] and p["ds"].endswith("Z"), f"Bad ds: {p['ds']}"

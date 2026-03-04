@@ -176,8 +176,11 @@ class TestDataLoader:
             f"Expected consumption regressor=['functionalUnit'], "
             f"got {config.regressor_map.get('consumption')}"
         )
-        # carbonEmissions has no regressors
-        assert config.regressor_map.get("carbonEmissions") == []
+        # carbonEmissions uses carbonIntensityFactor as a regressor (direct physical driver)
+        assert config.regressor_map.get("carbonEmissions") == ["carbonIntensityFactor"], (
+            f"Expected carbonEmissions regressor=['carbonIntensityFactor'], "
+            f"got {config.regressor_map.get('carbonEmissions')}"
+        )
 
     def test_pipeline_config_candidate_fit_metrics_complete(self):
         """CANDIDATE_FIT_METRICS must list exactly the 7 expected metrics."""
