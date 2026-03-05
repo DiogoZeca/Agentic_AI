@@ -22,7 +22,8 @@ services:
 
   # ── Test suite ────────────────────────────────────────────────────────────────
   # Run with:  docker compose --profile test run --rm test
-  # Runs 4 test groups: data contract, chained forecasting, API contract, anomaly detection.
+  # Runs 6 test groups: data contract, chained forecasting, API contract, anomaly detection,
+  # physics formula, ensemble pure functions (5 TimesFM integration tests skipped).
   # Uses a 30-day (720-row) dataset for fast Prophet fitting (~60-90s total).
   # Exit code 0 = all tests passed.
 
@@ -56,6 +57,7 @@ services:
     volumes:
       - ./AIModel/data:/app/data
       - ./AIModel/analysis_output:/app/analysis_output
+      - hf-cache:/root/.cache/huggingface
     depends_on:
       generate:
         condition: service_completed_successfully

@@ -345,11 +345,12 @@ class TestEvaluateContract:
                 f"{model_name}.sMAPE = {smape:.2f}% is outside the expected range"
             )
 
-    def test_evaluate_stores_test_attributes(self, ensemble_results):
-        """evaluate() must expose _test_actuals, _test_prophet, etc. for analysis scripts."""
+    def test_get_test_predictions_returns_required_keys(self, ensemble_results):
+        """get_test_predictions() must return all 4 array keys after evaluate()."""
         ens, _ = ensemble_results
-        for attr in ("_test_actuals", "_test_prophet", "_test_timesfm", "_test_ensemble"):
-            assert hasattr(ens, attr), f"EnsembleForecaster missing attribute '{attr}'"
-            assert isinstance(getattr(ens, attr), np.ndarray), (
-                f"'{attr}' should be a numpy array"
+        preds = ens.get_test_predictions()
+        for key in ("actuals", "prophet", "timesfm", "ensemble"):
+            assert key in preds, f"get_test_predictions() missing key '{key}'"
+            assert isinstance(preds[key], np.ndarray), (
+                f"preds['{key}'] should be a numpy array"
             )

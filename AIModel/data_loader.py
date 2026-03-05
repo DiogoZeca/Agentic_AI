@@ -44,7 +44,6 @@ Usage:
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -104,13 +103,16 @@ class PipelineConfig:
 def load_and_validate(path: str) -> pd.DataFrame:
     """Load CSV and enforce minimum schema.
 
-    Raises SystemExit with a clear message if required columns are missing.
+    Raises:
+        FileNotFoundError: if the CSV file does not exist at ``path``.
+        ValueError: if required columns (``ds``, ``consumption``) are absent.
+
     Prints a schema report showing what was found.
     """
     try:
         df = pd.read_csv(path, parse_dates=["ds"])
     except FileNotFoundError:
-        sys.exit(
+        raise FileNotFoundError(
             f"\n[data_loader] File not found: {path}\n"
             "  Generate synthetic data first:  python data_generator.py\n"
             "  Or point DATA_PATH to your CSV.\n"
@@ -119,7 +121,7 @@ def load_and_validate(path: str) -> pd.DataFrame:
     # Check required columns
     missing_required = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing_required:
-        sys.exit(
+        raise ValueError(
             f"\n[data_loader] Missing required columns: {missing_required}\n"
             f"  Found columns: {list(df.columns)}\n"
             f"  Required: {REQUIRED_COLUMNS}\n"

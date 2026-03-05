@@ -105,8 +105,8 @@ class InvestigationLead:
 
     Example:
         "Weekday 15:00 consumption spike — 22 occurrences (88% of weekdays).
-         Average 34% above baseline. Move to 03:00–07:00 to save −29% carbon,
-         −22% cost."
+         Average 34% above baseline. Move to 03:00–07:00 to save +29% carbon,
+         +22% cost."
     """
 
     rank:                        int        # 1 = highest priority
@@ -120,8 +120,8 @@ class InvestigationLead:
     total_excess_cost_eur:       float
     optimal_window_start_hour:   int        # start of lowest-carbon 4h window
     optimal_window_end_hour:     int        # start + window_hours
-    estimated_carbon_saving_pct: float      # negative = saving
-    estimated_cost_saving_pct:   float      # negative = saving
+    estimated_carbon_saving_pct: float      # positive = you save (GHG Protocol convention)
+    estimated_cost_saving_pct:   float      # positive = you save (GHG Protocol convention)
     carbon_context:              str
     example_timestamps:          list[str]  = field(default_factory=list)  # first 3 ds
 

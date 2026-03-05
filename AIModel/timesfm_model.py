@@ -269,8 +269,8 @@ if __name__ == "__main__":
     print("\nLoading TimesFM model (first run downloads ~925 MB)...")
     model = EnergyTimesFM()
 
-    print("\nEvaluating on 'totalEnergyConsumption'...")
-    metrics = model.evaluate(df, "totalEnergyConsumption")
+    print("\nEvaluating on 'consumption'...")
+    metrics = model.evaluate(df, "consumption")
     print("\nEvaluation Metrics:")
     for name, value in metrics.items():
         if isinstance(value, float):
@@ -279,7 +279,7 @@ if __name__ == "__main__":
             print(f"  {name}: {value}")
 
     print("\nGenerating 24-hour forecast...")
-    model.fit(df, "totalEnergyConsumption")
+    model.fit(df, "consumption")
     forecast = model.predict(periods=24)
     print("\nForecast (next 24 hours):")
     print(forecast[["ds", "yhat", "yhat_lower", "yhat_upper"]].tail(24))

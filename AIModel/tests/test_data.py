@@ -186,17 +186,17 @@ class TestDataLoader:
         """CANDIDATE_FIT_METRICS must list exactly the 7 expected metrics."""
         assert set(CANDIDATE_FIT_METRICS) == EXPECTED_FIT_METRICS
 
-    def test_missing_required_column_raises_system_exit(self, tmp_path):
-        """load_and_validate must exit cleanly if 'consumption' is absent."""
+    def test_missing_required_column_raises_value_error(self, tmp_path):
+        """load_and_validate must raise ValueError if 'consumption' is absent."""
         bad_df = pd.DataFrame({
             "ds":   pd.date_range("2024-01-01", periods=10, freq="h"),
             "energy": [1.0] * 10,  # wrong column name
         })
         bad_csv = str(tmp_path / "bad.csv")
         bad_df.to_csv(bad_csv, index=False)
-        with pytest.raises(SystemExit):
+        with pytest.raises(ValueError, match="Missing required columns"):
             load_and_validate(bad_csv)
 
-    def test_missing_file_raises_system_exit(self):
-        with pytest.raises(SystemExit):
+    def test_missing_file_raises_file_not_found_error(self):
+        with pytest.raises(FileNotFoundError, match="File not found"):
             load_and_validate("/nonexistent/path/data.csv")

@@ -54,8 +54,14 @@ class EnsembleForecaster:
         self.timesfm_residual = EnergyTimesFM(**self.timesfm_kwargs)
 
         self.target_column: Optional[str] = None
-        self._residuals: Optional[np.ndarray] = None
-        self._alpha: float = 1.0  # residual correction weight
+        self._residuals:     Optional[np.ndarray] = None
+        self._alpha:         float = 1.0  # residual correction weight
+
+        # Populated by evaluate() — None until that call completes.
+        self._test_actuals:  Optional[np.ndarray] = None
+        self._test_prophet:  Optional[np.ndarray] = None
+        self._test_timesfm:  Optional[np.ndarray] = None
+        self._test_ensemble: Optional[np.ndarray] = None
 
     def fit(self, df: pd.DataFrame, target_column: str) -> "EnsembleForecaster":
         """
@@ -303,6 +309,29 @@ class EnsembleForecaster:
             "test_size": test_size,
         }
 
+    def get_test_predictions(self) -> Dict[str, np.ndarray]:
+        """Raw test-set arrays from the last ``evaluate()`` call.
+
+        Returns a dict with keys:
+            actuals  — ground-truth values for the test set
+            prophet  — Prophet-only predictions
+            timesfm  — TimesFM standalone predictions
+            ensemble — Prophet + alpha × clamped(TimesFM residual) predictions
+
+        Raises:
+            ValueError: if ``evaluate()`` has not been called yet.
+        """
+        if self._test_actuals is None:
+            raise ValueError(
+                "No test predictions available. Call evaluate() before get_test_predictions()."
+            )
+        return {
+            "actuals":  self._test_actuals,
+            "prophet":  self._test_prophet,
+            "timesfm":  self._test_timesfm,
+            "ensemble": self._test_ensemble,
+        }
+
     def get_residual_stats(self) -> Dict[str, float]:
         """
         Analyze Prophet's residuals to check if they contain patterns.
@@ -329,6 +358,7 @@ class EnsembleForecaster:
 
 if __name__ == "__main__":
     import logging
+    import math as _math
     logging.getLogger("cmdstanpy").setLevel(logging.ERROR)
     logging.getLogger("cmdstanpy").addHandler(logging.NullHandler())
     logging.getLogger("cmdstanpy").propagate = False
@@ -347,7 +377,8 @@ if __name__ == "__main__":
     print("=" * 60)
     for model_name in ["prophet", "timesfm", "ensemble"]:
         m = results[model_name]
-        print(f"  {model_name:<12} {m['MAE']:>8.4f} {m['RMSE']:>8.4f} {m['MAPE']:>7.2f}% {m['sMAPE']:>7.2f}%")
+        mape_str = "N/A" if _math.isnan(m['MAPE']) else f"{m['MAPE']:.2f}%"
+        print(f"  {model_name:<12} {m['MAE']:>8.4f} {m['RMSE']:>8.4f} {mape_str:>8} {m['sMAPE']:>7.2f}%")
     print("=" * 60)
 
     stats = ensemble.get_residual_stats()

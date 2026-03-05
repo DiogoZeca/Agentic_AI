@@ -27,5 +27,9 @@ RUN python -c "import cmdstanpy; cmdstanpy.install_cmdstan(progress=False)"
 # Copy all Python modules
 COPY *.py ./
 
-# Output directories — bind-mounted in compose; defined here for standalone use
+# Output directories — bind-mounted in compose
 RUN mkdir -p data analysis_output
+
+# Default entrypoint for standalone use.
+# The compose file overrides this per-service (carbon_analysis.py / ensemble_analysis.py).
+CMD ["python", "carbon_analysis.py"]

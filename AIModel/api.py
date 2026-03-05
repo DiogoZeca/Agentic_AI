@@ -119,7 +119,11 @@ async def lifespan(app: FastAPI):
     # 1. Load or generate data
     if os.path.exists(DATA_PATH):
         log.info("Loading data from %s", DATA_PATH)
-        df = load_and_validate(DATA_PATH)
+        try:
+            df = load_and_validate(DATA_PATH)
+        except (FileNotFoundError, ValueError) as exc:
+            log.error("Data validation failed: %s — falling back to synthetic data", exc)
+            df = generate_energy_carbon_data()
     else:
         log.info("No data found — generating synthetic data …")
         os.makedirs(os.path.dirname(DATA_PATH) or ".", exist_ok=True)
@@ -1016,7 +1020,7 @@ def investigation_leads_endpoint(
     excess carbon impact. Each lead includes:
 
     - The optimal low-carbon 4-hour window to reschedule the workload
-    - Estimated carbon saving (negative = saving) vs current anomaly window
+    - Estimated carbon saving (positive = you save by rescheduling) vs current anomaly window
     - Estimated cost saving including any peak/off-peak tariff conflict
 
     Carbon and cost impacts may point in opposite directions — both are surfaced so

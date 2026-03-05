@@ -11,6 +11,7 @@ Usage:
     python ensemble_analysis.py
     DATA_PATH=data/my_data.csv python ensemble_analysis.py
 """
+import math
 import os
 import logging
 import warnings
@@ -43,6 +44,11 @@ C = {
 }
 
 
+def _fmt_pct(v: float) -> str:
+    """Format a percentage for display; returns 'N/A' for nan (e.g. MAPE when actuals are zero)."""
+    return "N/A" if math.isnan(v) else f"{v:.1f}%"
+
+
 def _safe_mape(actuals: np.ndarray, preds: np.ndarray) -> float:
     """MAPE with zero-actual guard — returns nan instead of inf when actuals contain 0."""
     if np.any(actuals == 0):
@@ -68,7 +74,16 @@ def _apply_style():
 # ── Section 1: Load Data ──────────────────────────────────────────────────────
 
 def load_data(path: str) -> tuple[pd.DataFrame, PipelineConfig]:
-    df = load_and_validate(path)
+    """Load CSV and build pipeline config.
+
+    Raises SystemExit with a human-readable message if the file is missing
+    or the schema is invalid — appropriate for a CLI script entry point.
+    """
+    try:
+        df = load_and_validate(path)
+    except (FileNotFoundError, ValueError) as exc:
+        print(exc, flush=True)
+        raise SystemExit(1) from exc
     config = build_pipeline_config(df)
 
     print("=" * 65)
@@ -98,7 +113,7 @@ def run_evaluation(df: pd.DataFrame, config: PipelineConfig) -> dict:
         print(f"  {'-'*42}")
         for name in ["prophet", "timesfm", "ensemble"]:
             m = res[name]
-            print(f"  {name:<12} {m['sMAPE']:>7.1f}%  {m['MAPE']:>7.1f}%  {m['RMSE']:>10.4f}")
+            print(f"  {name:<12} {_fmt_pct(m['sMAPE']):>8}  {_fmt_pct(m['MAPE']):>8}  {m['RMSE']:>10.4f}")
 
         stats = ens.get_residual_stats()
         print(f"  Residual autocorr lag-1: {stats['autocorr_lag1']:.3f}  |  alpha: {stats['alpha']:.2f}")
@@ -114,7 +129,7 @@ def run_evaluation(df: pd.DataFrame, config: PipelineConfig) -> dict:
         print(f"  {'-'*42}")
         for name in ["prophet", "timesfm", "ensemble"]:
             m = sci_res[name]
-            print(f"  {name:<12} {m['sMAPE']:>7.1f}%  {m['MAPE']:>7.1f}%  {m['RMSE']:>10.4f}")
+            print(f"  {name:<12} {_fmt_pct(m['sMAPE']):>8}  {_fmt_pct(m['MAPE']):>8}  {m['RMSE']:>10.4f}")
 
     return all_results
 
@@ -137,10 +152,13 @@ def _derive_sci_ensemble(df: pd.DataFrame, all_results: dict) -> dict:
         s = df["carbonEmissions"] / df["functionalUnit"].clip(lower=1)
         sci_actuals = s.iloc[train_size:].values
 
+    c_test = ens_c.get_test_predictions()
+    r_test = ens_r.get_test_predictions()
+
     sci_results = {}
-    for name, attr in [("prophet", "_test_prophet"), ("timesfm", "_test_timesfm"), ("ensemble", "_test_ensemble")]:
-        c_preds = getattr(ens_c, attr)
-        r_preds = np.maximum(getattr(ens_r, attr), 1)
+    for name in ("prophet", "timesfm", "ensemble"):
+        c_preds = c_test[name]
+        r_preds = np.maximum(r_test[name], 1)
         sci_preds = c_preds / r_preds   # kgCO2e/req
 
         mae   = float(np.mean(np.abs(sci_preds - sci_actuals)))
@@ -185,33 +203,34 @@ def generate_charts(df: pd.DataFrame, all_results: dict, config: PipelineConfig)
 
 def _chart_forecast_comparison(df: pd.DataFrame, ens: EnsembleForecaster, metric: str):
     """Chart 7: One representative test week — actual vs all 3 model predictions."""
-    actuals  = ens._test_actuals
-    n_test   = len(actuals)
+    preds   = ens.get_test_predictions()
+    actuals = preds["actuals"]
+    n_test  = len(actuals)
 
     # Show a representative week (first 168 h of the test set)
     show_n  = min(168, n_test)
     idx     = range(show_n)
 
-    prophet_mape  = _safe_mape(actuals[:show_n], ens._test_prophet[:show_n])
-    timesfm_mape  = _safe_mape(actuals[:show_n], ens._test_timesfm[:show_n])
-    ensemble_mape = _safe_mape(actuals[:show_n], ens._test_ensemble[:show_n])
+    prophet_mape  = _safe_mape(actuals[:show_n], preds["prophet"][:show_n])
+    timesfm_mape  = _safe_mape(actuals[:show_n], preds["timesfm"][:show_n])
+    ensemble_mape = _safe_mape(actuals[:show_n], preds["ensemble"][:show_n])
 
     fig, ax = plt.subplots(figsize=(14, 5))
 
     ax.plot(idx, actuals[:show_n],
             color=C["actual"], linewidth=1.8, label="Actual", zorder=4)
-    ax.plot(idx, ens._test_prophet[:show_n],
+    ax.plot(idx, preds["prophet"][:show_n],
             color=C["prophet"], linewidth=1.2, linestyle="--",
-            label=f"Prophet  (MAPE {prophet_mape:.1f}%)", alpha=0.8, zorder=3)
-    ax.plot(idx, ens._test_timesfm[:show_n],
+            label=f"Prophet  (MAPE {_fmt_pct(prophet_mape)})", alpha=0.8, zorder=3)
+    ax.plot(idx, preds["timesfm"][:show_n],
             color=C["timesfm"], linewidth=1.2, linestyle=":",
-            label=f"TimesFM  (MAPE {timesfm_mape:.1f}%)", alpha=0.8, zorder=3)
-    ax.plot(idx, ens._test_ensemble[:show_n],
+            label=f"TimesFM  (MAPE {_fmt_pct(timesfm_mape)})", alpha=0.8, zorder=3)
+    ax.plot(idx, preds["ensemble"][:show_n],
             color=C["ensemble"], linewidth=1.6,
-            label=f"Ensemble (MAPE {ensemble_mape:.1f}%)", alpha=0.9, zorder=4)
+            label=f"Ensemble (MAPE {_fmt_pct(ensemble_mape)})", alpha=0.9, zorder=4)
 
     # Highlight worst gap for Prophet to make differences visible
-    errors = np.abs(actuals[:show_n] - ens._test_prophet[:show_n])
+    errors = np.abs(actuals[:show_n] - preds["prophet"][:show_n])
     worst_idx = int(np.argmax(errors))
     ax.annotate(
         f"Largest Prophet error\n({errors[worst_idx]:.3f})",

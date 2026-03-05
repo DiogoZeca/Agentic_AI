@@ -254,6 +254,7 @@ def quick_forecast(
 
 
 if __name__ == "__main__":
+    import math as _math
     from data_generator import generate_energy_carbon_data
 
     print("Generating sample data...")
@@ -262,14 +263,17 @@ if __name__ == "__main__":
     # Without regressors (baseline)
     print("\n--- Prophet WITHOUT regressors ---")
     model_base = EnergyProphet()
-    metrics_base = model_base.evaluate(df, "totalEnergyConsumption")
-    print(f"  MAPE: {metrics_base['MAPE']:.2f}%  |  sMAPE: {metrics_base['sMAPE']:.2f}%")
+    metrics_base = model_base.evaluate(df, "consumption")
+    mape_str = "N/A" if _math.isnan(metrics_base['MAPE']) else f"{metrics_base['MAPE']:.2f}%"
+    print(f"  MAPE: {mape_str}  |  sMAPE: {metrics_base['sMAPE']:.2f}%")
 
-    # With trainingActive regressor
-    print("\n--- Prophet WITH trainingActive regressor ---")
-    model_reg = EnergyProphet(regressors=["trainingActive"])
-    metrics_reg = model_reg.evaluate(df, "totalEnergyConsumption")
-    print(f"  MAPE: {metrics_reg['MAPE']:.2f}%  |  sMAPE: {metrics_reg['sMAPE']:.2f}%")
+    # With functionalUnit regressor
+    print("\n--- Prophet WITH functionalUnit regressor ---")
+    model_reg = EnergyProphet(regressors=["functionalUnit"])
+    metrics_reg = model_reg.evaluate(df, "consumption")
+    mape_str = "N/A" if _math.isnan(metrics_reg['MAPE']) else f"{metrics_reg['MAPE']:.2f}%"
+    print(f"  MAPE: {mape_str}  |  sMAPE: {metrics_reg['sMAPE']:.2f}%")
 
-    improvement = metrics_base["MAPE"] - metrics_reg["MAPE"]
-    print(f"\n  Regressor improvement: {improvement:+.2f}% MAPE")
+    if not (_math.isnan(metrics_base["MAPE"]) or _math.isnan(metrics_reg["MAPE"])):
+        improvement = metrics_base["MAPE"] - metrics_reg["MAPE"]
+        print(f"\n  Regressor improvement: {improvement:+.2f}% MAPE")

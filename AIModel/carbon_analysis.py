@@ -18,6 +18,7 @@ Usage:
     python carbon_analysis.py
     DATA_PATH=data/my_data.csv python carbon_analysis.py
 """
+import math
 import os
 import logging
 import warnings
@@ -43,6 +44,11 @@ from physics_constraint import derive_carbon_emissions, evaluate_formula_accurac
 OUTPUT_DIR = "analysis_output"
 DATA_PATH = os.environ.get("DATA_PATH", "data/sample_energy_data.csv")
 FORECAST_PERIODS = 168   # 7 days × 24 hours
+
+
+def _fmt_pct(v: float) -> str:
+    """Format a percentage for display; returns 'N/A' for nan (e.g. MAPE when actuals are zero)."""
+    return "N/A" if math.isnan(v) else f"{v:.1f}%"
 
 DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
@@ -79,8 +85,16 @@ def _apply_style():
 # ── Section 1: Load & Summarise ────────────────────────────────────────────────
 
 def load_and_summarise(path: str) -> tuple[pd.DataFrame, PipelineConfig]:
-    """Load CSV, validate schema, print summary."""
-    df = load_and_validate(path)
+    """Load CSV, validate schema, print summary.
+
+    Raises SystemExit with a human-readable message if the file is missing
+    or the schema is invalid — appropriate for a CLI script entry point.
+    """
+    try:
+        df = load_and_validate(path)
+    except (FileNotFoundError, ValueError) as exc:
+        print(exc, flush=True)
+        raise SystemExit(1) from exc
     config = build_pipeline_config(df)
 
     print("=" * 60)
@@ -111,7 +125,7 @@ def fit_models(df: pd.DataFrame, config: PipelineConfig) -> dict:
         print(f"\n  Fitting Prophet on '{metric}'{label} …")
         model = EnergyProphet(regressors=regs)
         eval_m = model.evaluate(df, metric)
-        print(f"    sMAPE {eval_m['sMAPE']:.1f}%  |  MAPE {eval_m['MAPE']:.1f}%  |  RMSE {eval_m['RMSE']:.6f}")
+        print(f"    sMAPE {_fmt_pct(eval_m['sMAPE'])}  |  MAPE {_fmt_pct(eval_m['MAPE'])}  |  RMSE {eval_m['RMSE']:.6f}")
         model.fit(df, metric)
         forecast = model.predict(FORECAST_PERIODS, future_df=df)
         results[metric] = {"model": model, "forecast": forecast, "eval": eval_m}
@@ -177,7 +191,7 @@ def fit_models(df: pd.DataFrame, config: PipelineConfig) -> dict:
         print("\n  Deriving SCI from carbonEmissions / functionalUnit …")
         results["softwareCarbonIntensity"] = _derive_sci(df, results)
         e = results["softwareCarbonIntensity"]["eval"]
-        print(f"    sMAPE {e['sMAPE']:.1f}%  |  MAPE {e['MAPE']:.1f}%  |  RMSE {e['RMSE']:.8f}")
+        print(f"    sMAPE {_fmt_pct(e['sMAPE'])}  |  MAPE {_fmt_pct(e['MAPE'])}  |  RMSE {e['RMSE']:.8f}")
 
     return results
 
@@ -560,8 +574,8 @@ def _chart_forecast(
     ax.set_ylabel(ylabel)
     ax.set_title(
         f"{title_prefix} — 7-Day Forecast\n"
-        f"Model accuracy on held-out test set: sMAPE {eval_m['sMAPE']:.1f}%  |  "
-        f"MAPE {eval_m['MAPE']:.1f}%  |  RMSE {eval_m['RMSE']:.6f}"
+        f"Model accuracy on held-out test set: sMAPE {_fmt_pct(eval_m['sMAPE'])}  |  "
+        f"MAPE {_fmt_pct(eval_m['MAPE'])}  |  RMSE {eval_m['RMSE']:.6f}"
     )
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
     ax.legend(loc="upper left", fontsize=9)
@@ -653,7 +667,7 @@ def print_insights(df: pd.DataFrame, results: dict, config: PipelineConfig):
         if metric not in results:
             continue
         e = results[metric]["eval"]
-        print(f"  {metric:<28} {e['MAPE']:>6.1f}%  {e['sMAPE']:>6.1f}%  {e['RMSE']:>12.6f}")
+        print(f"  {metric:<28} {_fmt_pct(e['MAPE']):>7}  {_fmt_pct(e['sMAPE']):>7}  {e['RMSE']:>12.6f}")
 
     if "carbonEmissions_formula" in results and "carbonEmissions" in results:
         print("\n  carbonEmissions FORECAST METHOD COMPARISON:")

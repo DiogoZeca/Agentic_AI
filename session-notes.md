@@ -59,7 +59,7 @@
 - Atomic swap: refit builds new models locally, replaces node's state dict in one assignment
 - All internal functions (`_run_forecast`, `_run_best_forecast`, etc.) thread `node: Optional[str]` consistently
 
-### Pass 6 — Bug audit + sign convention fix (260 → 260 tests, 2 assertions corrected)
+### Pass 6 — Bug audit + sign convention fix (260 → 260 tests, 2 assertions corrected + 2 renamed)
 
 | # | Problem | Fix |
 |---|---------|-----|
@@ -84,6 +84,29 @@ Formula first for `carbonEmissions` is validated. Routing `["formula", "timesfm"
 
 ---
 
+### Pass 7 — Enhancement A+B: library exceptions + public ensemble API (260 → 260 tests)
+
+| # | Problem | Fix |
+|---|---------|-----|
+| 25 | `data_loader.load_and_validate()` called `sys.exit()` — kills API server silently on bad CSV schema | Replaced with `raise FileNotFoundError` / `raise ValueError`; `api.py` lifespan catches and falls back to synthetic data; analysis scripts catch and re-raise `SystemExit(1)` at CLI entry point |
+| 26 | `test_data.py` asserted `pytest.raises(SystemExit)` — tested the bug, not the spec | Updated to `raises(FileNotFoundError, match=...)` / `raises(ValueError, match=...)`; method names corrected |
+| 27 | `ensemble_analysis.py` accessed `ens._test_prophet` etc. directly — fragile private coupling | Added `get_test_predictions() -> dict` public method to `EnsembleForecaster`; all 6 `ens._test_*` access sites replaced with `preds = ens.get_test_predictions()` |
+| 28 | `TestEvaluateContract` test checked for private `_test_*` attrs — tested internals not contract | Updated to test `get_test_predictions()` keys and array types |
+
+### Pass 8 — Enhancement C+D+E: dead code + NaN display + doc accuracy (260 → 260 tests)
+
+| # | Problem | Fix |
+|---|---------|-----|
+| 29 | `benchmark.py` never imported anywhere — dead code | Deleted file entirely |
+| 30 | `visualizations.py` listed in CLAUDE.md but never existed | Removed from architecture section |
+| 31 | CLAUDE.md said "Thirteen-module pipeline" — counted two non-existent modules | Corrected to "Eleven-module pipeline"; `data_loader.py` docstring updated; `ensemble_model.py` entry updated with `get_test_predictions()` mention |
+| 32 | CLAUDE.md said "225-test suite" — stale count | Corrected to "260-test suite" with six groups listed |
+| 33 | `f"{e['MAPE']:.1f}%"` prints `"nan%"` when actuals contain zeros — cosmetically broken | Added `_fmt_pct(v)` module-level helper to `carbon_analysis.py` and `ensemble_analysis.py`; fixed 5 call sites in each; inline guard in `ensemble_model.py` and `prophet_model.py` demo blocks |
+
+**`_fmt_pct` design:** 3-line helper using `math.isnan()` — defined in each analysis script independently (they are standalone scripts; a shared `utils.py` for one function would over-engineer). Demo blocks in model files use inline `math.isnan()` guard to avoid adding module-level symbols used only in `__main__`.
+
+---
+
 ## Open Questions (requires EVIDEN answers)
 
 - Which observability framework? (Prometheus? Grafana? Custom?)
@@ -96,21 +119,23 @@ Formula first for `carbonEmissions` is validated. Routing `["formula", "timesfm"
 ## Architecture Snapshot (current)
 
 ```
-Modules (13):
+Modules (11):
   data_generator.py        synthetic CSV (8,760 rows, 15 columns)
-  data_loader.py           schema validation + PipelineConfig  [NOTE: uses sys.exit() — see Known Issues]
+  data_loader.py           schema validation + PipelineConfig
+                           raises FileNotFoundError / ValueError (not sys.exit)
   model_base.py            ForecasterBase ABC
   prophet_model.py         EnergyProphet(ForecasterBase)
   timesfm_model.py         EnergyTimesFM(ForecasterBase)
   physics_constraint.py    derive_carbon_emissions(), evaluate_formula_accuracy()
   model_registry.py        MODEL_ROUTING, get_best_model_key()
-  benchmark.py             ModelBenchmark — DEAD CODE (never imported anywhere)
   ensemble_model.py        EnsembleForecaster (Prophet + TimesFM residual)
+                           get_test_predictions() → public API for analysis scripts
   anomaly_detector.py      detect_point_anomalies(), find_recurring_patterns()
   api.py                   FastAPI, 9 endpoints, per-node state isolation
   carbon_analysis.py       analysis script + formula vs TimesFM comparison table
+                           _fmt_pct() helper for NaN-safe % display
   ensemble_analysis.py     3-way comparison script (Prophet / TimesFM / Ensemble)
-                           [NOTE: accesses private _test_* attrs on EnsembleForecaster]
+                           _fmt_pct() helper; uses get_test_predictions() public API
 
 Tests (260 passed, 5 skipped):
   test_data.py             data contract (schema, value ranges, SCI identity)
@@ -126,7 +151,7 @@ Requirements:
   requirements-analysis.txt prophet + timesfm + matplotlib + plotly (analysis image only)
 
 Docker images:
-  Dockerfile               API service (Prophet + TimesFM + all 13 modules)
+  Dockerfile               API service (Prophet + TimesFM + all 11 modules)
   Dockerfile.test          Lightweight test image (no TimesFM/PyTorch)
   Dockerfile.analysis      Analysis image (COPY *.py ./), uses requirements-analysis.txt
 ```
@@ -151,10 +176,4 @@ All forecast/anomaly endpoints accept `?node=<name>` for per-node isolation.
 
 ## Known Issues (not yet fixed)
 
-| # | File | Issue | Severity |
-|---|------|-------|----------|
-| A | `data_loader.py:113,122` | Uses `sys.exit()` — anti-pattern in library code; should raise `FileNotFoundError` / `ValueError` so callers can catch | Medium |
-| B | `benchmark.py` | Never imported anywhere — dead code with no tests | Low |
-| C | `ensemble_analysis.py:134-135` | Accesses private `_test_prophet`, `_test_timesfm`, `_test_ensemble`, `_test_actuals` attrs directly on `EnsembleForecaster` — fragile coupling | Low |
-| D | Analysis print statements | `f"{e['MAPE']:.1f}%"` prints `"nan%"` when actuals contain zeros — cosmetically broken | Low |
-| E | CLAUDE.md | Lists `visualizations.py` in module description but the file does not exist | Low |
+None outstanding. All previously identified issues resolved across Passes 1–8.
