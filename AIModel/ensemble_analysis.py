@@ -43,6 +43,13 @@ C = {
 }
 
 
+def _safe_mape(actuals: np.ndarray, preds: np.ndarray) -> float:
+    """MAPE with zero-actual guard — returns nan instead of inf when actuals contain 0."""
+    if np.any(actuals == 0):
+        return float("nan")
+    return float(np.mean(np.abs((actuals - preds) / actuals)) * 100)
+
+
 def _apply_style():
     plt.rcParams.update({
         "figure.facecolor":  "white",
@@ -136,14 +143,17 @@ def _derive_sci_ensemble(df: pd.DataFrame, all_results: dict) -> dict:
         r_preds = np.maximum(getattr(ens_r, attr), 1)
         sci_preds = c_preds / r_preds   # kgCO2e/req
 
-        mae   = np.mean(np.abs(sci_preds - sci_actuals))
-        mse   = np.mean((sci_preds - sci_actuals) ** 2)
-        rmse  = np.sqrt(mse)
-        mape  = np.mean(np.abs((sci_actuals - sci_preds) / sci_actuals)) * 100
-        smape = np.mean(
+        mae   = float(np.mean(np.abs(sci_preds - sci_actuals)))
+        mse   = float(np.mean((sci_preds - sci_actuals) ** 2))
+        rmse  = float(np.sqrt(mse))
+        if np.any(sci_actuals == 0):
+            mape = float("nan")
+        else:
+            mape = float(np.mean(np.abs((sci_actuals - sci_preds) / sci_actuals)) * 100)
+        smape = float(np.mean(
             2 * np.abs(sci_actuals - sci_preds)
             / (np.abs(sci_actuals) + np.abs(sci_preds) + 1e-10)
-        ) * 100
+        ) * 100)
         sci_results[name] = {"MAE": mae, "MSE": mse, "RMSE": rmse,
                              "MAPE": mape, "sMAPE": smape,
                              "train_size": train_size, "test_size": test_size}
@@ -182,9 +192,9 @@ def _chart_forecast_comparison(df: pd.DataFrame, ens: EnsembleForecaster, metric
     show_n  = min(168, n_test)
     idx     = range(show_n)
 
-    prophet_mape  = np.mean(np.abs((actuals[:show_n] - ens._test_prophet[:show_n])  / actuals[:show_n])) * 100
-    timesfm_mape  = np.mean(np.abs((actuals[:show_n] - ens._test_timesfm[:show_n])  / actuals[:show_n])) * 100
-    ensemble_mape = np.mean(np.abs((actuals[:show_n] - ens._test_ensemble[:show_n]) / actuals[:show_n])) * 100
+    prophet_mape  = _safe_mape(actuals[:show_n], ens._test_prophet[:show_n])
+    timesfm_mape  = _safe_mape(actuals[:show_n], ens._test_timesfm[:show_n])
+    ensemble_mape = _safe_mape(actuals[:show_n], ens._test_ensemble[:show_n])
 
     fig, ax = plt.subplots(figsize=(14, 5))
 

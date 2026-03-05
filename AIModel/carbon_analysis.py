@@ -213,14 +213,17 @@ def _derive_sci(df: pd.DataFrame, results: dict) -> dict:
         sci_actuals = s.iloc[train_size:].values
         sci_p99 = np.percentile(s.values, 99)
 
-    mae  = np.mean(np.abs(sci_preds - sci_actuals))
-    mse  = np.mean((sci_preds - sci_actuals) ** 2)
-    rmse = np.sqrt(mse)
-    mape = np.mean(np.abs((sci_actuals - sci_preds) / np.maximum(sci_actuals, 1e-12))) * 100
-    smape = np.mean(
+    mae  = float(np.mean(np.abs(sci_preds - sci_actuals)))
+    mse  = float(np.mean((sci_preds - sci_actuals) ** 2))
+    rmse = float(np.sqrt(mse))
+    if np.any(sci_actuals == 0):
+        mape = float("nan")
+    else:
+        mape = float(np.mean(np.abs((sci_actuals - sci_preds) / sci_actuals)) * 100)
+    smape = float(np.mean(
         2 * np.abs(sci_actuals - sci_preds)
         / (np.abs(sci_actuals) + np.abs(sci_preds) + 1e-10)
-    ) * 100
+    ) * 100)
 
     # Forecast from full-data components
     cf = results["carbonEmissions"]["forecast"][["ds", "yhat"]].copy()
@@ -298,6 +301,7 @@ def generate_charts(df: pd.DataFrame, results: dict, config: PipelineConfig):
             title_prefix="Carbon Emissions",
             color=C["carbon"],
             filename="08_carbon_forecast.png",
+            model_label="TimesFM" if results.get("_tfm_used") else "Prophet",
         )
     else:
         print("  [skip] 08_carbon_forecast — missing carbonEmissions")
@@ -507,6 +511,7 @@ def _chart_forecast(
     title_prefix: str,
     color: str,
     filename: str,
+    model_label: str = "Prophet",
 ):
     """Charts 2 & 8: Historical context + model fit + 7-day forecast with CI."""
     forecast = result["forecast"]
@@ -530,7 +535,7 @@ def _chart_forecast(
     ax.plot(
         context_fitted["ds"], context_fitted["yhat"],
         color=color, linewidth=1.2, linestyle="--", alpha=0.65,
-        label=f"Prophet fit  (sMAPE {eval_m['sMAPE']:.1f}%)",
+        label=f"{model_label} fit  (sMAPE {eval_m['sMAPE']:.1f}%)",
     )
     ax.plot(
         future_fc["ds"], future_fc["yhat"],

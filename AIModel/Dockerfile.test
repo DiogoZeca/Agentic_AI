@@ -24,7 +24,7 @@ RUN python -c "import cmdstanpy; cmdstanpy.install_cmdstan(progress=False)"
 
 # Copy application source and test suite
 COPY api.py data_generator.py data_loader.py prophet_model.py anomaly_detector.py \
-     model_base.py model_registry.py physics_constraint.py ./
+     model_base.py model_registry.py physics_constraint.py ensemble_model.py ./
 COPY tests/ ./tests/
 
 # Scratch directories used by tests and the app

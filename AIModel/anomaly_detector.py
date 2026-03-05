@@ -419,7 +419,10 @@ def build_investigation_leads(
         # Carbon saving: shift from pattern CI to optimal window CI
         ci_pat = pat.avg_carbon_intensity if pat.avg_carbon_intensity > 0 else avg_ci_opt
         if ci_pat > 0 and avg_ci_opt > 0:
-            carbon_saving_pct = round((avg_ci_opt - ci_pat) / ci_pat * 100, 1)
+            # Positive = you save carbon by moving to the optimal window.
+            # Formula: (baseline_ci - optimal_ci) / baseline_ci × 100
+            # Negative means the optimal window is actually worse (edge case).
+            carbon_saving_pct = round((ci_pat - avg_ci_opt) / ci_pat * 100, 1)
         else:
             carbon_saving_pct = 0.0
 
@@ -429,7 +432,8 @@ def build_investigation_leads(
             if not hourly_cost_rate.empty else 0.0
         )
         if avg_rate_pat > 0:
-            cost_saving_pct = round((avg_rate_opt - avg_rate_pat) / avg_rate_pat * 100, 1)
+            # Positive = you save cost by moving to the optimal window.
+            cost_saving_pct = round((avg_rate_pat - avg_rate_opt) / avg_rate_pat * 100, 1)
         else:
             cost_saving_pct = 0.0
 

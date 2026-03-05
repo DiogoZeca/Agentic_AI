@@ -1,191 +1,160 @@
-# Session Notes — Pipeline Structural Improvements + Physics Formula Forecaster
+# Session Notes — Energy & Carbon Forecasting Pipeline
 
-**Date:** 2026-03-04
-**Status:** COMPLETE — 225/225 tests passing
+**Last updated:** 2026-03-05
+**Status:** COMPLETE — 260 passed, 5 skipped (TimesFM-only tests, skipped in lightweight image)
 
 ---
 
-## What Was Done
+## Cumulative Work Log
 
-Two-pass implementation of a structural overhaul + metric reliability fixes.
-
-### Pass 1 — 11-file plan (222 tests)
+### Pass 1 — Structural overhaul (222 → 222 tests)
 
 | # | Problem | Fix |
 |---|---------|-----|
-| 1 | `EnergyTimesFM.evaluate()` missing `sMAPE` key — caused `KeyError` in comparison tables | Added sMAPE computation + `float()` casts to all returned values |
-| 2 | `_TIMESFM_PREFERRED: frozenset` magic constant — hard to extend, not self-documenting | Replaced with `MODEL_ROUTING` dict + `get_best_model_key()` in `model_registry.py` |
+| 1 | `EnergyTimesFM.evaluate()` missing `sMAPE` key — caused `KeyError` in comparison tables | Added sMAPE + `float()` casts to all returned values |
+| 2 | `_TIMESFM_PREFERRED: frozenset` magic constant — hard to extend | Replaced with `MODEL_ROUTING` dict + `get_best_model_key()` in `model_registry.py` |
 | 3 | Physics formula `E × CIF + 0.002` documented but never used as a forecast strategy | Implemented in `physics_constraint.py`, wired into `api.py` as `_run_formula_forecast()` |
 | 4 | `carbon_analysis.py` showing Prophet's sMAPE even after TimesFM override | Fixed by calling `tfm.evaluate()` explicitly after the forecast override |
 
-### Pass 2 — metric reliability fixes (225 tests)
+### Pass 2 — Metric reliability (222 → 225 tests)
 
 | # | Problem | Fix |
 |---|---------|-----|
-| 5 | TimesFM sMAPE epsilon `1e-15` vs Prophet `1e-10` — different scores on identical data | Standardised to `1e-10` in `timesfm_model.py` |
-| 6 | MAPE divides by zero if any actual = 0 — `NaN` propagates silently | Added `if np.any(actuals == 0): mape = float("nan")` guard in both Prophet and TimesFM |
-| 7 | Formula sMAPE vs TimesFM 7.3% unknown — `MODEL_ROUTING` unvalidated | Ran analysis pipeline: formula sMAPE = **0.0%** → routing confirmed correct |
+| 5 | TimesFM sMAPE epsilon `1e-15` vs Prophet `1e-10` — inconsistent scores | Standardised to `1e-10` in `timesfm_model.py` |
+| 6 | MAPE zero-division when actuals contain 0 — silent `inf` propagation | Added `if np.any(actuals == 0): mape = float("nan")` in Prophet + TimesFM |
+| 7 | Formula sMAPE vs TimesFM 7.3% unvalidated | Ran analysis pipeline: formula sMAPE = **0.0%** → routing confirmed correct |
+
+### Pass 3 — Audit fixes + model_used field (225 → 230 tests)
+
+| # | Problem | Fix |
+|---|---------|-----|
+| 8 | `/optimal-window` and `/metrics/prometheus` calling `_run_forecast` (Prophet-only), bypassing formula routing | Fixed both to use `_run_best_forecast` |
+| 9 | No `model_used` field on forecast responses — callers couldn't tell which model served | Added `_ForecastResult(NamedTuple)`, `_ModelKey = Literal[...]`, `model_used` on `ForecastResponse` + `OptimalWindowResponse` + Prometheus labels |
+| 10 | `sMAPE` epsilon `1e-15` in `carbon_analysis.py:_derive_sci()` (missed in pass 2) | Fixed to `1e-10` |
+| 11 | CLAUDE.md endpoint table had 4 non-existent endpoints, missing 4 real ones | Rewrote endpoint table to match actual code |
+
+### Pass 4 — Ensemble fixes + test_ensemble.py (230 → 252 tests, +5 skipped)
+
+| # | Problem | Fix |
+|---|---------|-----|
+| 12 | `ensemble_model._compute_metrics()` returned numpy scalars (no `float()` casts) | Added `float()` casts to all 5 metric values |
+| 13 | `ensemble_model._compute_metrics()` MAPE zero-division → `inf` not `nan` | Added zero-guard consistent with all other modules |
+| 14 | `ensemble_model.__main__` block and class docstring referenced `"totalEnergyConsumption"` and `"trainingActive"` (wrong schema) | Updated to `"consumption"` and `"functionalUnit"` |
+| 15 | No test coverage for `EnsembleForecaster` | Created `tests/test_ensemble.py` — 21 pure-function tests (no real model fitting), 5 integration tests skipped without TimesFM |
+
+`tests/test_ensemble.py` uses `sys.modules` patching (`torch`, `timesfm`, `timesfm_model`) to run pure-function tests in the lightweight Docker image. The `TestEvaluateContract` class is marked `skipif(not _TIMESFM_INSTALLED)` and runs locally with the full environment.
+
+### Pass 5 — Per-node isolation (252 → 260 tests)
+
+| # | Problem | Fix |
+|---|---------|-----|
+| 16 | `?node=<name>` accepted by all endpoints but silently ignored — all requests hit the same models | Refactored `_state` from a flat dict to `dict[str, dict]` keyed by node name |
+| 17 | New nodes had no state until EVIDEN integration is done | `POST /data?node=<name>` bootstraps new nodes from default state; node-specific Prophet refit queued async |
+| 18 | `GET /health` showed no information about known nodes | Added `nodes: list[str]` field to `HealthResponse` |
+
+**Per-node design:**
+- `_DEFAULT_NODE = "_default"` — startup models always live here
+- `_require_state(node)` — returns node state or falls back to `_DEFAULT_NODE` (unknown nodes never get 503)
+- `POST /data?node=<name>` — first call initialises node with copy of default df + models, then schedules node-specific refit
+- Atomic swap: refit builds new models locally, replaces node's state dict in one assignment
+- All internal functions (`_run_forecast`, `_run_best_forecast`, etc.) thread `node: Optional[str]` consistently
+
+### Pass 6 — Bug audit + sign convention fix (260 → 260 tests, 2 assertions corrected)
+
+| # | Problem | Fix |
+|---|---------|-----|
+| 19 | `ensemble_analysis.py:_derive_sci_ensemble()` MAPE divides by `sci_actuals` directly — no zero-guard | Added standard `if np.any == 0: nan else: float(...)` guard + `float()` casts to all 5 metrics |
+| 20 | `ensemble_analysis.py:_chart_forecast_comparison()` — 3 inline MAPE calculations with no zero-guard | Extracted `_safe_mape(actuals, preds)` helper; 3 divisions replaced with one-liner calls |
+| 21 | `anomaly_detector.py` `estimated_carbon_saving_pct` / `estimated_cost_saving_pct` sign inverted — negative meant saving | Fixed formula to `(baseline - optimal) / baseline × 100`: **positive = saving** (matches GHG Protocol and AWS Compute Optimizer conventions) |
+| 22 | `tests/test_anomaly.py` — 2 tests encoded the inverted sign as correct | Assertions flipped `< 0` → `> 0`; test names + docstrings updated to document correct semantics |
+| 23 | `carbon_analysis.py:_derive_sci()` MAPE used `np.maximum(sci_actuals, 1e-12)` — inconsistent with standard zero-guard pattern | Replaced with standard guard; `float()` casts added to all 5 metrics |
+| 24 | `carbon_analysis.py:_chart_forecast()` labelled all model fits as "Prophet fit" — wrong when TimesFM is active for carbonEmissions | Added `model_label: str = "Prophet"` param; `generate_charts()` passes `"TimesFM"` or `"Prophet"` based on `_tfm_used` |
 
 ---
 
-## Files Created
+## Key Measurements
 
-### `model_base.py`
-Abstract base class (ABC) for all single-metric forecasting models.
-```python
-class ForecasterBase(ABC):
-    def fit(self, df, target_column) -> "ForecasterBase": ...
-    def predict(self, periods, **kwargs) -> pd.DataFrame: ...   # [ds, yhat, yhat_lower, yhat_upper]
-    def evaluate(self, df, target_column, train_ratio=0.8) -> Dict[str, float]: ...  # 7 keys
-```
-`EnsembleForecaster` is NOT a subclass — it returns a nested dict, different contract.
+| Metric | Method | sMAPE |
+|--------|--------|-------|
+| carbonEmissions | Formula (E×CIF+0.002) | **0.0%** |
+| carbonEmissions | TimesFM | 7.3% |
+| carbonEmissions | Prophet | ~15% |
 
-### `physics_constraint.py`
-Pure-function module. No learnable parameters.
-```python
-EMBODIED_EMISSIONS_KGC02E_H: float = 0.002
-
-def derive_carbon_emissions(consumption_fc, cif_fc) -> pd.DataFrame:
-    # yhat       = consumption.yhat       * cif.yhat       + 0.002, clipped >= 0
-    # yhat_lower = consumption.yhat_lower * cif.yhat_lower + 0.002
-    # yhat_upper = consumption.yhat_upper * cif.yhat_upper + 0.002
-
-def evaluate_formula_accuracy(df, train_ratio=0.8) -> Dict:
-    # Returns: MAE, MSE, RMSE, MAPE, sMAPE, train_size, test_size
-    # 80/20 split — same methodology as Prophet.evaluate()
-
-def check_physical_consistency(forecast_df) -> Dict:
-    # Returns: is_non_negative, negative_count, max_value, min_value, interval_ordered
-```
-
-### `model_registry.py`
-Routing registry — replaces magic frozenset in api.py.
-```python
-MODEL_ROUTING: dict[str, list[str]] = {
-    "carbonEmissions": ["formula", "timesfm", "prophet"],
-    "consumption":     ["prophet"],
-}
-_DEFAULT_ROUTING: list[str] = ["timesfm", "prophet"]
-
-def get_best_model_key(metric: str, available_keys: set[str]) -> str:
-    # Returns first key from routing list present in available_keys
-    # Unconditional fallback: "prophet"
-```
-
-### `benchmark.py`
-Unified evaluation runner used by analysis scripts.
-```python
-class ModelBenchmark:
-    def run(self, models: dict, df, metric, train_ratio=0.8) -> pd.DataFrame: ...
-    def print_table(self, results: pd.DataFrame) -> None: ...
-    def winner(self, results: pd.DataFrame) -> str: ...   # model with lowest sMAPE
-```
-Skips failing models with a printed warning — never crashes the pipeline.
-
-### `tests/test_physics.py`
-8 tests in `TestPhysicsFormula`:
-- `test_formula_output_non_negative` — yhat/lower/upper all >= 0
-- `test_formula_uncertainty_ordered` — yhat_lower <= yhat <= yhat_upper each row
-- `test_formula_evaluate_returns_required_keys` — all 7 keys present
-- `test_formula_smape_is_finite` — sMAPE is finite and > 0
-- `test_physical_consistency_check` — check_physical_consistency() flags are correct
-- `test_evaluate_returns_python_floats` — all numeric keys are Python `float`, not numpy scalars
-- `test_evaluate_zero_actual_smape_stays_finite` — sMAPE finite when actuals = 0
-- `test_smape_uses_consistent_epsilon` — sMAPE > 0 and < 100 on normal data
+Formula first for `carbonEmissions` is validated. Routing `["formula", "timesfm", "prophet"]` in `model_registry.py` is correct.
 
 ---
 
-## Files Modified
+## Open Questions (requires EVIDEN answers)
 
-### `prophet_model.py`
-- Inherit `ForecasterBase`
-- Zero-actual MAPE guard: `if np.any(actuals == 0): mape = float("nan")`
-
-### `timesfm_model.py`
-- Inherit `ForecasterBase`
-- Added missing `sMAPE` key to `evaluate()` return dict
-- `float()` casts on all returned values
-- sMAPE epsilon `1e-15` → `1e-10` (matches Prophet)
-- Zero-actual MAPE guard: `if np.any(actuals == 0): mape = float("nan")`
-
-### `api.py`
-- Removed `_TIMESFM_PREFERRED: frozenset`
-- Added `from model_registry import get_best_model_key`
-- Added `from physics_constraint import derive_carbon_emissions`
-- Added `_run_formula_forecast(horizon)` — runs consumption + CIF forecasts, applies formula
-- Rewrote `_run_best_forecast(metric, horizon)` — builds `available` set, calls `get_best_model_key()`, falls through formula → timesfm → prophet
-
-### `carbon_analysis.py`
-- Added formula evaluation block — stores as `results["carbonEmissions_formula"]`
-- Fixed TimesFM eval bug: calls `tfm.evaluate()` after forecast override (was keeping Prophet's eval)
-- Added `results["_tfm_used"]` bool for comparison table label
-- Added comparison table in `print_insights()`:
-  ```
-  carbonEmissions FORECAST METHOD COMPARISON:
-  Method                       sMAPE
-  ------------------------------------
-  Formula (E×CIF+0.002)         0.0%
-  TimesFM                        7.3%
-  ```
-
-### `Dockerfile`
-Added `model_base.py model_registry.py physics_constraint.py` to COPY list.
-
-### `Dockerfile.test`
-Added `model_base.py model_registry.py physics_constraint.py` to COPY list.
-(`benchmark.py` excluded — not imported by test files or api.py.)
-`Dockerfile.analysis` uses `COPY *.py ./` — picks up all new files automatically.
-
----
-
-## Verification
-
-```bash
-docker compose --profile test run --rm --build test
-# 222 passed  (after pass 1)
-# 225 passed  (after pass 2)
-
-docker compose --profile analysis up --build generate analyse
-# Formula sMAPE = 0.0%  |  TimesFM sMAPE = 7.3%
-# Routing ["formula", "timesfm", "prophet"] confirmed correct — no change needed
-```
-
----
-
-## Pending / Open Questions
-
-### `node` query param — stub, not implemented
-The API accepts `?node=<name>` on `/forecast/{metric}`, `/anomalies/{metric}`, and `/optimal-window` endpoints. Currently ignored — all nodes share a single trained model. To implement per-node isolation, `_app_state` would need to key models by node name and training would need to partition the CSV by node.
-
-### Still missing (requires EVIDEN answers)
-- Which observability framework do they use? (Prometheus? Grafana? Custom?)
-- What push format/protocol? (HTTP POST? Prometheus remote-write? OTLP?)
+- Which observability framework? (Prometheus? Grafana? Custom?)
+- Push format/protocol? (HTTP POST? Prometheus remote-write? OTLP?)
 - What metrics and granularity are collected at their end?
-- Real data connector: currently reads a local synthetic CSV — no live telemetry ingestion path exists yet
+- Real data connector: currently reads synthetic CSV — no live telemetry ingestion path
 
 ---
 
 ## Architecture Snapshot (current)
 
 ```
-data_generator.py        → synthetic CSV (8,760 rows)
-data_loader.py           → validation + PipelineConfig
-model_base.py            → ForecasterBase ABC
-prophet_model.py         → EnergyProphet(ForecasterBase)
-timesfm_model.py         → EnergyTimesFM(ForecasterBase)
-physics_constraint.py    → derive_carbon_emissions(), evaluate_formula_accuracy()
-model_registry.py        → MODEL_ROUTING, get_best_model_key()
-benchmark.py             → ModelBenchmark (evaluation runner)
-ensemble_model.py        → EnsembleForecaster (Prophet + TimesFM residual)
-anomaly_detector.py      → detect_point_anomalies(), find_recurring_patterns()
-api.py                   → FastAPI, 8 endpoints
-carbon_analysis.py       → analysis + comparison table output
-ensemble_analysis.py     → 3-way comparison output
-visualizations.py        → 5 Matplotlib helpers
-tests/
-  test_data.py           → data contract
-  test_forecasting.py    → chained Prophet forecasting
-  test_api.py            → API contract
-  test_anomaly.py        → anomaly engine
-  test_physics.py        → physics formula contract
+Modules (13):
+  data_generator.py        synthetic CSV (8,760 rows, 15 columns)
+  data_loader.py           schema validation + PipelineConfig  [NOTE: uses sys.exit() — see Known Issues]
+  model_base.py            ForecasterBase ABC
+  prophet_model.py         EnergyProphet(ForecasterBase)
+  timesfm_model.py         EnergyTimesFM(ForecasterBase)
+  physics_constraint.py    derive_carbon_emissions(), evaluate_formula_accuracy()
+  model_registry.py        MODEL_ROUTING, get_best_model_key()
+  benchmark.py             ModelBenchmark — DEAD CODE (never imported anywhere)
+  ensemble_model.py        EnsembleForecaster (Prophet + TimesFM residual)
+  anomaly_detector.py      detect_point_anomalies(), find_recurring_patterns()
+  api.py                   FastAPI, 9 endpoints, per-node state isolation
+  carbon_analysis.py       analysis script + formula vs TimesFM comparison table
+  ensemble_analysis.py     3-way comparison script (Prophet / TimesFM / Ensemble)
+                           [NOTE: accesses private _test_* attrs on EnsembleForecaster]
+
+Tests (260 passed, 5 skipped):
+  test_data.py             data contract (schema, value ranges, SCI identity)
+  test_forecasting.py      chained Prophet regressor (zero-fill vs chained)
+  test_api.py              API contract + model_used field + per-node isolation
+  test_anomaly.py          anomaly engine (Prophet-free, synthetic forecasts)
+  test_physics.py          physics formula contract (8 tests)
+  test_ensemble.py         ensemble pure functions (21 tests) + contract (5 skipped)
+
+Requirements:
+  requirements-service.txt  prophet, pandas, numpy, fastapi, uvicorn
+  requirements-test.txt     pytest, httpx
+  requirements-analysis.txt prophet + timesfm + matplotlib + plotly (analysis image only)
+
+Docker images:
+  Dockerfile               API service (Prophet + TimesFM + all 13 modules)
+  Dockerfile.test          Lightweight test image (no TimesFM/PyTorch)
+  Dockerfile.analysis      Analysis image (COPY *.py ./), uses requirements-analysis.txt
 ```
+
+## API Endpoints (9 total)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Liveness + model state + known nodes |
+| POST | `/data` | Ingest rows, schedule refit (`?node=` scopes to node) |
+| GET | `/forecast/all` | All metrics in one response |
+| GET | `/forecast/sci` | SCI derived (kgCO2e/req) |
+| GET | `/forecast/{metric}` | Single metric, best model |
+| GET | `/optimal-window` | Best low-carbon scheduling windows |
+| GET | `/anomalies` | Point anomalies + dual-model confidence |
+| GET | `/investigation-leads` | Ranked recurring anomaly patterns |
+| GET | `/metrics/prometheus` | Prometheus text format for HPA |
+
+All forecast/anomaly endpoints accept `?node=<name>` for per-node isolation.
+
+---
+
+## Known Issues (not yet fixed)
+
+| # | File | Issue | Severity |
+|---|------|-------|----------|
+| A | `data_loader.py:113,122` | Uses `sys.exit()` — anti-pattern in library code; should raise `FileNotFoundError` / `ValueError` so callers can catch | Medium |
+| B | `benchmark.py` | Never imported anywhere — dead code with no tests | Low |
+| C | `ensemble_analysis.py:134-135` | Accesses private `_test_prophet`, `_test_timesfm`, `_test_ensemble`, `_test_actuals` attrs directly on `EnsembleForecaster` — fragile coupling | Low |
+| D | Analysis print statements | `f"{e['MAPE']:.1f}%"` prints `"nan%"` when actuals contain zeros — cosmetically broken | Low |
+| E | CLAUDE.md | Lists `visualizations.py` in module description but the file does not exist | Low |

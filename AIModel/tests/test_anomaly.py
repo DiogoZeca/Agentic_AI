@@ -617,16 +617,17 @@ class TestBuildInvestigationLeads:
         leads = build_investigation_leads(patterns, _one_week_df())
         assert 0 <= leads[0].optimal_window_start_hour <= 23
 
-    def test_carbon_saving_negative_when_optimal_ci_lower(self):
+    def test_carbon_saving_positive_when_moving_to_lower_ci_window(self):
         """
         Pattern at hour 15 (CI = 0.45), optimal window at hours 3–6 (CI = 0.30).
-        Carbon saving = (0.30 - 0.45) / 0.45 × 100 ≈ −33.3% (negative = saving).
+        Carbon saving = (0.45 - 0.30) / 0.45 × 100 ≈ +33.3% (positive = you save).
+        Convention matches GHG Protocol and AWS Compute Optimizer: positive = benefit.
         """
         df = _one_week_df(ci_by_hour={3: 0.30, 4: 0.30, 5: 0.30, 6: 0.30})
         pattern = self._make_pattern(hour=15, avg_ci=0.45, ctx="high-carbon")
         leads = build_investigation_leads([pattern], df, window_hours=4)
-        assert leads[0].estimated_carbon_saving_pct < 0, (
-            "Carbon saving should be negative (a reduction) when moving "
+        assert leads[0].estimated_carbon_saving_pct > 0, (
+            "Carbon saving should be positive (a genuine saving) when moving "
             "to a lower-CI window."
         )
 
@@ -664,11 +665,12 @@ class TestBuildInvestigationLeads:
         assert lead.total_excess_carbon_kgco2e  == pytest.approx(0.3)
         assert lead.total_excess_cost_eur       == pytest.approx(0.1)
 
-    def test_cost_saving_negative_when_off_peak_is_optimal(self):
+    def test_cost_saving_positive_when_moving_to_cheaper_window(self):
         """
         Pattern at peak hour (09:00–18:00, cost rate €0.18/kWh).
         Optimal carbon window at off-peak hour (e.g., 03:00, €0.12/kWh).
-        Cost saving = (0.12 − 0.18) / 0.18 × 100 ≈ −33.3% (saving).
+        Cost saving = (0.18 − 0.12) / 0.18 × 100 ≈ +33.3% (positive = you save).
+        Convention matches GHG Protocol and AWS Compute Optimizer: positive = benefit.
         """
         # Build df with explicit cost/consumption columns at known rates
         dates   = pd.date_range("2024-01-01", periods=24 * 7, freq="h")
@@ -689,8 +691,8 @@ class TestBuildInvestigationLeads:
 
         pattern = self._make_pattern(hour=15, avg_ci=0.40, ctx="high-carbon")
         leads   = build_investigation_leads([pattern], df_cost, window_hours=4)
-        assert leads[0].estimated_cost_saving_pct < 0, (
-            "Moving from peak to off-peak should show negative (saving) cost_saving_pct"
+        assert leads[0].estimated_cost_saving_pct > 0, (
+            "Moving from peak to off-peak should show positive (saving) cost_saving_pct"
         )
 
 

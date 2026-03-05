@@ -57,6 +57,10 @@ except ImportError:
 
 log = logging.getLogger("api")
 
+# Node name used when no ?node= query param is supplied.
+# All startup models are stored under this key; unknown nodes fall back to it.
+_DEFAULT_NODE = "_default"
+
 # ── Internal types ───────────────────────────────────────────────────────────────
 
 _ModelKey = Literal["formula", "timesfm", "prophet"]
@@ -98,8 +102,11 @@ FIT_METRICS: list[str] = [
 # Model routing is defined in model_registry.py — see get_best_model_key()
 
 # ── App state ────────────────────────────────────────────────────────────────────
+# Outer key: node name (str). Inner dict: models, df, caches for that node.
+# All startup models live under _DEFAULT_NODE. New nodes are created on first
+# POST /data?node=<name> and receive a background refit on their own data.
 
-_state: dict = {}
+_state: dict[str, dict] = {}
 
 
 # ── Lifespan ─────────────────────────────────────────────────────────────────────
@@ -148,7 +155,7 @@ async def lifespan(app: FastAPI):
             len(timesfm_models),
         )
 
-    _state.update({
+    _state[_DEFAULT_NODE] = {
         "df":                         df,
         "models":                     models,
         "config":                     config,
@@ -157,7 +164,7 @@ async def lifespan(app: FastAPI):
         "timesfm_insample_forecasts": {},   # lazy-populated on first /anomalies call per metric
         "fitted_at":                  datetime.utcnow().isoformat() + "Z",
         "data_rows":                  len(df),
-    })
+    }
     log.info("Service ready — %d rows, models: %s", len(df), list(models.keys()))
 
     yield  # service runs here
@@ -221,6 +228,7 @@ class HealthResponse(BaseModel):
     fitted_at:    str
     data_rows:    int
     models_ready: list[str]
+    nodes:        list[str]   # all known node keys (includes "_default")
 
 
 class AnomalyPoint(BaseModel):
@@ -311,19 +319,27 @@ class DataIngestionResponse(BaseModel):
 
 # ── Helpers ──────────────────────────────────────────────────────────────────────
 
-def _require_state() -> dict:
-    if not _state:
+def _require_state(node: Optional[str] = None) -> dict:
+    """Return the state dict for `node`, falling back to the default node.
+
+    When `node` is None or not yet known, returns the default node's state.
+    This makes per-node operations fail-safe: an unknown node transparently
+    uses the global default models until its own background refit completes.
+    """
+    key = node if node is not None else _DEFAULT_NODE
+    state = _state.get(key) or _state.get(_DEFAULT_NODE)
+    if state is None:
         raise HTTPException(status_code=503, detail="Models not ready yet.")
-    return _state
+    return state
 
 
-def _refit_models_in_background(df: pd.DataFrame) -> None:
-    """Refit all Prophet models on the updated dataset.
+def _refit_models_in_background(df: pd.DataFrame, node: str = _DEFAULT_NODE) -> None:
+    """Refit all Prophet models for `node` on its updated dataset.
 
     Called via FastAPI BackgroundTasks after POST /data so the endpoint
     returns 202 immediately while the 2-3 minute refit runs asynchronously.
     Old models continue serving forecasts until the refit completes, at which
-    point they are atomically replaced.
+    point they are atomically replaced (only the target node is affected).
     """
     config = build_pipeline_config(df)
     new_models: dict[str, EnergyProphet] = {}
@@ -336,26 +352,28 @@ def _refit_models_in_background(df: pd.DataFrame) -> None:
         try:
             m.fit(df, metric)
             new_models[metric] = m
-            log.info("Background refit OK: '%s'", metric)
+            log.info("Background refit OK: '%s' (node=%s)", metric, node)
         except Exception:
-            log.exception("Background refit failed for '%s' — keeping old model", metric)
-            old = _state.get("models", {}).get(metric)
+            log.exception("Background refit failed for '%s' (node=%s) — keeping old model", metric, node)
+            old = _state.get(node, {}).get("models", {}).get(metric)
             if old is not None:
                 new_models[metric] = old
 
     # Guard: service might have shut down between task creation and execution
-    if not _state:
+    if node not in _state:
         return
 
-    # Atomically swap in new models and flush all stale caches
-    _state["models"] = new_models
-    _state["config"] = config
-    _state["insample_forecasts"] = {}
-    _state["timesfm_insample_forecasts"] = {}
-    log.info("Background refit complete — %d Prophet models updated", len(new_models))
+    # Atomically swap in new models and flush all stale caches for this node only
+    _state[node]["models"] = new_models
+    _state[node]["config"] = config
+    _state[node]["insample_forecasts"] = {}
+    _state[node]["timesfm_insample_forecasts"] = {}
+    log.info("Background refit complete — %d Prophet models updated (node=%s)", len(new_models), node)
 
 
-def _build_regressor_future_df(horizon: int, regressors: list[str]) -> pd.DataFrame:
+def _build_regressor_future_df(
+    horizon: int, regressors: list[str], node: Optional[str] = None
+) -> pd.DataFrame:
     """
     Build a future_df that includes forecasted regressor values for the next
     `horizon` hours, implementing chained forecasting.
@@ -369,7 +387,7 @@ def _build_regressor_future_df(horizon: int, regressors: list[str]) -> pd.DataFr
       Without this → future functionalUnit = 0 (service assumed idle).
       With this    → future functionalUnit follows its daily/weekly pattern.
     """
-    state = _require_state()
+    state = _require_state(node)
     df = state["df"]
 
     # Start with historical regressor values (actual, known timestamps)
@@ -384,7 +402,7 @@ def _build_regressor_future_df(horizon: int, regressors: list[str]) -> pd.DataFr
                 "No model for regressor '%s' — future values will be zero-filled.", reg
             )
             continue
-        reg_fc = _run_forecast(reg, horizon)
+        reg_fc = _run_forecast(reg, horizon, node)
         future_rows = pd.DataFrame({
             "ds": pd.to_datetime(reg_fc["ds"]),
             reg:  reg_fc["yhat"].values,
@@ -394,14 +412,14 @@ def _build_regressor_future_df(horizon: int, regressors: list[str]) -> pd.DataFr
     return combined
 
 
-def _run_forecast(metric: str, horizon: int) -> pd.DataFrame:
+def _run_forecast(metric: str, horizon: int, node: Optional[str] = None) -> pd.DataFrame:
     """Return the future `horizon` rows from Prophet for `metric`.
 
     For metrics with regressors (e.g. consumption → functionalUnit), uses
     chained forecasting: the regressor's own model is run first to produce
     realistic future values, which are then passed into the primary model.
     """
-    state = _require_state()
+    state = _require_state(node)
     if metric not in state["models"]:
         available = list(state["models"].keys())
         raise HTTPException(
@@ -413,7 +431,7 @@ def _run_forecast(metric: str, horizon: int) -> pd.DataFrame:
 
     if regressors:
         # Chained forecasting: forecast regressors first, inject as future_df
-        future_df = _build_regressor_future_df(horizon, regressors)
+        future_df = _build_regressor_future_df(horizon, regressors, node)
     else:
         future_df = state["df"]
 
@@ -421,9 +439,9 @@ def _run_forecast(metric: str, horizon: int) -> pd.DataFrame:
     return forecast.tail(horizon).reset_index(drop=True)
 
 
-def _run_timesfm_forecast(metric: str, horizon: int) -> pd.DataFrame:
+def _run_timesfm_forecast(metric: str, horizon: int, node: Optional[str] = None) -> pd.DataFrame:
     """Run TimesFM forecast for a single metric. Returns future-only DataFrame."""
-    tfm_models = _state.get("timesfm_models", {})
+    tfm_models = _require_state(node).get("timesfm_models", {})
     if metric not in tfm_models:
         raise HTTPException(status_code=503, detail=f"TimesFM model for {metric} not available")
     model = tfm_models[metric]
@@ -431,21 +449,21 @@ def _run_timesfm_forecast(metric: str, horizon: int) -> pd.DataFrame:
     return fc.tail(horizon).reset_index(drop=True)
 
 
-def _run_formula_forecast(horizon: int) -> pd.DataFrame:
+def _run_formula_forecast(horizon: int, node: Optional[str] = None) -> pd.DataFrame:
     """Derive carbonEmissions analytically: consumption × carbonIntensityFactor + 0.002."""
-    consumption_fc = _run_forecast("consumption", horizon)
-    cif_fc         = _run_forecast("carbonIntensityFactor", horizon)
+    consumption_fc = _run_forecast("consumption", horizon, node)
+    cif_fc         = _run_forecast("carbonIntensityFactor", horizon, node)
     return derive_carbon_emissions(consumption_fc, cif_fc)
 
 
-def _run_best_forecast(metric: str, horizon: int) -> _ForecastResult:
+def _run_best_forecast(metric: str, horizon: int, node: Optional[str] = None) -> _ForecastResult:
     """Route to the best available model for a metric (see model_registry.py).
 
     Returns a _ForecastResult(data, model_used) so callers know which model
     actually served the request — useful for logging, response metadata, and
     Prometheus labels.
     """
-    state = _require_state()
+    state = _require_state(node)
     available: set[str] = set()
     if "consumption" in state["models"] and "carbonIntensityFactor" in state["models"]:
         available.add("formula")
@@ -458,15 +476,15 @@ def _run_best_forecast(metric: str, horizon: int) -> _ForecastResult:
 
     if best == "formula":
         try:
-            return _ForecastResult(_run_formula_forecast(horizon), "formula")
+            return _ForecastResult(_run_formula_forecast(horizon, node), "formula")
         except Exception:
             log.warning("Formula forecast failed for '%s' — falling back", metric)
     if best in ("timesfm", "formula"):   # formula fell through
         try:
-            return _ForecastResult(_run_timesfm_forecast(metric, horizon), "timesfm")
+            return _ForecastResult(_run_timesfm_forecast(metric, horizon, node), "timesfm")
         except Exception:
             log.warning("TimesFM forecast failed for '%s' — falling back to Prophet", metric)
-    return _ForecastResult(_run_forecast(metric, horizon), "prophet")
+    return _ForecastResult(_run_forecast(metric, horizon, node), "prophet")
 
 
 def _to_response(
@@ -498,9 +516,9 @@ def _to_response(
 
 def _build_sci_response(horizon: int, node: Optional[str] = None) -> ForecastResponse:
     """Derive SCI with propagated uncertainty from two component forecasts."""
-    carbon_result = _run_best_forecast("carbonEmissions", horizon)
+    carbon_result = _run_best_forecast("carbonEmissions", horizon, node)
     carbon_fc     = carbon_result.data
-    request_fc    = _run_forecast("functionalUnit", horizon)
+    request_fc    = _run_forecast("functionalUnit", horizon, node)
 
     predictions = []
     for (_, c_row), (_, r_row) in zip(carbon_fc.iterrows(), request_fc.iterrows()):
@@ -526,14 +544,14 @@ def _build_sci_response(horizon: int, node: Optional[str] = None) -> ForecastRes
     )
 
 
-def _get_insample_forecast(metric: str) -> "pd.DataFrame":
+def _get_insample_forecast(metric: str, node: Optional[str] = None) -> "pd.DataFrame":
     """Return in-sample Prophet predictions for `metric`, lazy-cached.
 
     Calls model.predict(periods=0, future_df=df) which returns fitted yhat /
     yhat_lower / yhat_upper for every historical timestamp. Results are cached
-    in _state["insample_forecasts"] — computed once per metric on first call.
+    per node — computed once per (node, metric) on first call.
     """
-    state = _require_state()
+    state = _require_state(node)
     if metric not in state["models"]:
         available = list(state["models"].keys())
         raise HTTPException(
@@ -556,7 +574,7 @@ def _get_insample_forecast(metric: str) -> "pd.DataFrame":
     return cache[metric]
 
 
-def _compute_timesfm_rolling_insample(metric: str) -> "pd.DataFrame":
+def _compute_timesfm_rolling_insample(metric: str, node: Optional[str] = None) -> "pd.DataFrame":
     """Generate genuine out-of-sample TimesFM predictions via rolling CV.
 
     Uses forward-chaining cross-validation (step=24h, min_context=168h) to
@@ -567,7 +585,7 @@ def _compute_timesfm_rolling_insample(metric: str) -> "pd.DataFrame":
     or the metric has no stored context.
     """
     _empty = pd.DataFrame(columns=["ds", "yhat", "yhat_lower", "yhat_upper"])
-    state = _require_state()
+    state = _require_state(node)
     if metric not in state.get("timesfm_models", {}):
         return _empty
 
@@ -611,16 +629,16 @@ def _compute_timesfm_rolling_insample(metric: str) -> "pd.DataFrame":
     return result
 
 
-def _get_timesfm_insample_forecast(metric: str) -> "pd.DataFrame":
+def _get_timesfm_insample_forecast(metric: str, node: Optional[str] = None) -> "pd.DataFrame":
     """Return TimesFM rolling-CV in-sample predictions for `metric`, lazy-cached.
 
-    Mirrors _get_insample_forecast() — computes once per metric on first call,
-    then returns the cached result on subsequent calls.
+    Mirrors _get_insample_forecast() — computes once per (node, metric) on first
+    call, then returns the cached result on subsequent calls.
     """
-    state = _require_state()
+    state = _require_state(node)
     cache = state["timesfm_insample_forecasts"]
     if metric not in cache:
-        cache[metric] = _compute_timesfm_rolling_insample(metric)
+        cache[metric] = _compute_timesfm_rolling_insample(metric, node)
         log.info(
             "TimesFM in-sample forecast cached for '%s' (%d rows)",
             metric, len(cache[metric]),
@@ -677,12 +695,13 @@ def _lead_to_point(lead) -> InvestigationLeadPoint:
 @app.get("/health", response_model=HealthResponse, tags=["System"])
 def health():
     """Service liveness and model readiness check."""
-    state = _require_state()
+    state = _require_state()   # returns default node state
     return HealthResponse(
         status="ok",
         fitted_at=state["fitted_at"],
         data_rows=state["data_rows"],
         models_ready=list(state["models"].keys()),
+        nodes=list(_state.keys()),
     )
 
 
@@ -698,11 +717,11 @@ def forecast_all(
     plus the derived `softwareCarbonIntensity` (SCI).
     Suitable for feeding downstream AI models or dashboards.
     """
-    state = _require_state()
+    state = _require_state(node)
     result: dict[str, ForecastResponse] = {}
 
     for metric in state["models"]:
-        r = _run_best_forecast(metric, horizon)
+        r = _run_best_forecast(metric, horizon, node)
         result[metric] = _to_response(metric, horizon, r.data, r.model_used, node=node)
 
     # Append derived SCI
@@ -744,7 +763,7 @@ def forecast_metric(
     For SCI (derived from two models) use /forecast/sci.
     For all metrics at once use /forecast/all.
     """
-    r = _run_best_forecast(metric, horizon)
+    r = _run_best_forecast(metric, horizon, node)
     return _to_response(metric, horizon, r.data, r.model_used, node=node)
 
 
@@ -764,7 +783,7 @@ def optimal_window(
     vs_daily_mean_pct < 0 means the window is greener than the day's average.
     """
     horizon_hours = horizon_days * 24
-    carbon_result = _run_best_forecast("carbonEmissions", horizon_hours)
+    carbon_result = _run_best_forecast("carbonEmissions", horizon_hours, node)
     carbon_fc = carbon_result.data.copy()
     carbon_fc["ds"]   = pd.to_datetime(carbon_fc["ds"])
     carbon_fc["date"] = carbon_fc["ds"].dt.date
@@ -809,6 +828,7 @@ def optimal_window(
 def ingest_data(
     payload: DataIngestionRequest,
     background_tasks: BackgroundTasks,
+    node: Optional[str] = Query(None, description="Node identifier. Rows are stored under this node; a separate Prophet refit is scheduled for that node's dataset. Unknown nodes are initialised automatically."),
 ):
     """
     Ingest new measurement rows from an external system (e.g. EVIDEN).
@@ -826,15 +846,39 @@ def ingest_data(
     Minimum required fields per row: `ds` (ISO 8601) and `consumption` (kWh/h).
     All other schema fields are optional; missing columns are handled by
     data_loader's graceful degradation logic.
+
+    Supplying ?node=<name> scopes the data and refit to that node. Forecast
+    endpoints with the same ?node= will use the node-specific models once the
+    refit completes. Unknown nodes are initialised with a copy of the default
+    node's models so forecasts are available immediately (using global data)
+    while the node-specific refit runs in the background.
     """
-    state = _require_state()
+    node_key = node if node is not None else _DEFAULT_NODE
+    default_state = _require_state()   # raises 503 if not ready
+
+    # First time seeing this node — bootstrap state from the default node so
+    # forecasts are immediately available before the node-specific refit finishes.
+    if node_key not in _state:
+        _state[node_key] = {
+            "df":                         default_state["df"].copy(),   # context for regressors until node-specific data arrives
+            "models":                     dict(default_state["models"]),
+            "config":                     default_state["config"],
+            "insample_forecasts":         {},
+            "timesfm_models":             dict(default_state.get("timesfm_models", {})),
+            "timesfm_insample_forecasts": {},
+            "fitted_at":                  datetime.utcnow().isoformat() + "Z",
+            "data_rows":                  0,
+        }
+        log.info("New node '%s' initialised — borrowing default models until refit completes", node_key)
+
+    state = _state[node_key]
 
     # Build a DataFrame from the incoming rows, preserving only non-None fields
     records = [row.model_dump(exclude_none=True) for row in payload.rows]
     new_df = pd.DataFrame(records)
     new_df["ds"] = pd.to_datetime(new_df["ds"])
 
-    # Merge into the live dataset, keeping chronological order
+    # Merge into the node's dataset, keeping chronological order
     updated_df = (
         pd.concat([state["df"], new_df], ignore_index=True)
         .sort_values("ds")
@@ -853,8 +897,8 @@ def ingest_data(
     # Flush Prophet in-sample cache (stale after new data)
     state["insample_forecasts"] = {}
 
-    # Refit Prophet models asynchronously — old models keep serving until done
-    background_tasks.add_task(_refit_models_in_background, updated_df.copy())
+    # Refit Prophet models asynchronously for this node — old models keep serving
+    background_tasks.add_task(_refit_models_in_background, updated_df.copy(), node_key)
 
     return DataIngestionResponse(
         rows_accepted=len(payload.rows),
@@ -884,7 +928,7 @@ def anomalies_endpoint(
 
     Example: GET /anomalies?metric=consumption&lookback_days=30&direction=excess
     """
-    state = _require_state()
+    state = _require_state(node)
     df = state["df"].copy()
     df["ds"] = pd.to_datetime(df["ds"])
 
@@ -901,7 +945,7 @@ def anomalies_endpoint(
     df_window = df[df["ds"] > cutoff].copy()
 
     # Retrieve (or lazily compute) in-sample forecast, then filter to window
-    df_forecast = _get_insample_forecast(metric).copy()
+    df_forecast = _get_insample_forecast(metric, node).copy()
     df_forecast["ds"] = pd.to_datetime(df_forecast["ds"])
     df_forecast_window = df_forecast[df_forecast["ds"] > cutoff]
 
@@ -909,7 +953,7 @@ def anomalies_endpoint(
 
     # --- Dual-model confidence scoring ---
     if _TIMESFM_AVAILABLE and metric in state.get("timesfm_models", {}):
-        tfm_fc = _get_timesfm_insample_forecast(metric).copy()
+        tfm_fc = _get_timesfm_insample_forecast(metric, node).copy()
         tfm_fc["ds"] = pd.to_datetime(tfm_fc["ds"])
         tfm_fc_window = tfm_fc[tfm_fc["ds"] > cutoff].copy()
 
@@ -983,7 +1027,7 @@ def investigation_leads_endpoint(
 
     Example: GET /investigation-leads?lookback_days=30&top_n=5
     """
-    state = _require_state()
+    state = _require_state(node)
     df = state["df"].copy()
     df["ds"] = pd.to_datetime(df["ds"])
 
@@ -995,7 +1039,7 @@ def investigation_leads_endpoint(
     for metric in ["consumption", "carbonEmissions"]:
         if metric not in state["models"]:
             continue
-        df_forecast = _get_insample_forecast(metric).copy()
+        df_forecast = _get_insample_forecast(metric, node).copy()
         df_forecast["ds"] = pd.to_datetime(df_forecast["ds"])
         df_forecast_window = df_forecast[df_forecast["ds"] > cutoff]
         metric_anomalies = detect_point_anomalies(
@@ -1057,7 +1101,7 @@ def prometheus_metrics(
 
     Returns text/plain in Prometheus exposition format (version 0.0.4).
     """
-    state = _require_state()
+    state = _require_state(node)
     node_label = node if node is not None else "global"
 
     _PROM_METRICS = [
@@ -1069,7 +1113,7 @@ def prometheus_metrics(
     for metric, prom_name, help_text in _PROM_METRICS:
         if metric not in state["models"]:
             continue
-        r = _run_best_forecast(metric, horizon)   # honours formula→TimesFM→Prophet routing
+        r = _run_best_forecast(metric, horizon, node)   # honours formula→TimesFM→Prophet routing
         block = _metric_to_prometheus_block(prom_name, help_text, r.data, node_label, r.model_used)
         blocks.append(block)
 

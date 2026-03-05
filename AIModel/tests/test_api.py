@@ -745,3 +745,75 @@ class TestCarbonForecastContract:
         assert r.status_code == 200
         for p in r.json()["predictions"]:
             assert "T" in p["ds"] and p["ds"].endswith("Z"), f"Bad ds: {p['ds']}"
+
+
+class TestPerNodeIsolation:
+    """
+    Verify that the ?node= query param is handled correctly across endpoints.
+
+    All state is shared within the session-scoped client — tests use a
+    deliberately unusual node name ("_test_node_xyz") to avoid colliding
+    with fixtures created by other test classes.
+    """
+
+    _NODE = "_test_node_xyz"
+
+    def test_health_shows_default_node(self, client):
+        """On startup only _default exists; health must list it."""
+        r = client.get("/health")
+        assert r.status_code == 200
+        assert "_default" in r.json()["nodes"]
+
+    def test_health_includes_nodes_field(self, client):
+        r = client.get("/health")
+        assert "nodes" in r.json(), "HealthResponse missing 'nodes' field"
+        assert isinstance(r.json()["nodes"], list)
+
+    def test_forecast_unknown_node_falls_back_to_default(self, client):
+        """A ?node= that has never pushed data falls back to default models."""
+        r_default = client.get("/forecast/consumption?horizon=1")
+        r_unknown = client.get("/forecast/consumption?horizon=1&node=never_seen_node")
+        assert r_unknown.status_code == 200
+        # Both should return valid forecasts (same model, same data)
+        assert "predictions" in r_unknown.json()
+        assert len(r_unknown.json()["predictions"]) == len(r_default.json()["predictions"])
+
+    def test_post_data_with_node_returns_202(self, client):
+        """POST /data?node=<name> must be accepted."""
+        payload = {
+            "rows": [{"ds": "2024-06-01T12:00:00", "consumption": 0.12}]
+        }
+        r = client.post(f"/data?node={self._NODE}", json=payload)
+        assert r.status_code == 202
+        assert r.json()["models_status"] == "refit_scheduled"
+
+    def test_post_data_with_node_registers_node(self, client):
+        """After POST /data?node=<name>, health must list that node."""
+        # Depends on test_post_data_with_node_returns_202 having run first
+        # (session-scoped client preserves state between tests)
+        r = client.get("/health")
+        assert self._NODE in r.json()["nodes"], (
+            f"Node '{self._NODE}' not in nodes after POST /data"
+        )
+
+    def test_forecast_for_new_node_uses_default_models(self, client):
+        """
+        Immediately after POST /data?node=<name>, forecast returns valid data.
+        The background refit hasn't finished yet, so default models are used.
+        """
+        r = client.get(f"/forecast/consumption?horizon=1&node={self._NODE}")
+        assert r.status_code == 200
+        assert "predictions" in r.json()
+        assert len(r.json()["predictions"]) == 1
+
+    def test_node_param_on_optimal_window(self, client):
+        """?node= is threaded through to /optimal-window without error."""
+        r = client.get(f"/optimal-window?horizon_days=1&node={self._NODE}")
+        assert r.status_code == 200
+        assert "windows" in r.json()
+
+    def test_node_echoed_in_forecast_response(self, client):
+        """The ?node= value must appear in the response body."""
+        r = client.get(f"/forecast/consumption?horizon=1&node={self._NODE}")
+        assert r.status_code == 200
+        assert r.json()["node"] == self._NODE

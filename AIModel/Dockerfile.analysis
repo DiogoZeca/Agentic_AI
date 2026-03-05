@@ -18,8 +18,8 @@ WORKDIR /app
 
 # Install Python deps — full stack including matplotlib, timesfm, torch
 # Layer cached separately from source code: only re-runs on requirements change
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements-analysis.txt .
+RUN pip install --no-cache-dir -r requirements-analysis.txt
 
 # Pre-compile cmdstan so analysis runs start fast (C++ compilation is a one-time cost)
 RUN python -c "import cmdstanpy; cmdstanpy.install_cmdstan(progress=False)"
