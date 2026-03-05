@@ -26,7 +26,7 @@ import logging
 import warnings
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Literal, NamedTuple, Optional
 
 # Suppress noisy loggers before prophet imports
 logging.getLogger("prophet").setLevel(logging.WARNING)
@@ -45,6 +45,8 @@ from data_generator import generate_energy_carbon_data
 from data_loader import load_and_validate, build_pipeline_config
 from prophet_model import EnergyProphet
 from anomaly_detector import detect_point_anomalies, find_recurring_patterns, build_investigation_leads
+from model_registry import get_best_model_key
+from physics_constraint import derive_carbon_emissions
 
 try:
     from timesfm_model import EnergyTimesFM
@@ -54,6 +56,17 @@ except ImportError:
     # Prophet-only mode; timesfm_flagged=False, confidence="prophet-only" on all anomalies
 
 log = logging.getLogger("api")
+
+# ── Internal types ───────────────────────────────────────────────────────────────
+
+_ModelKey = Literal["formula", "timesfm", "prophet"]
+
+
+class _ForecastResult(NamedTuple):
+    """Return type for _run_best_forecast: forecast DataFrame + which model served it."""
+    data:       pd.DataFrame
+    model_used: _ModelKey
+
 
 # ── Config ──────────────────────────────────────────────────────────────────────
 
@@ -82,8 +95,7 @@ FIT_METRICS: list[str] = [
     "cost",
 ]
 
-# Metrics where TimesFM outperforms Prophet — route through TimesFM when available
-_TIMESFM_PREFERRED: frozenset[str] = frozenset({"carbonEmissions"})
+# Model routing is defined in model_registry.py — see get_best_model_key()
 
 # ── App state ────────────────────────────────────────────────────────────────────
 
@@ -180,6 +192,7 @@ class ForecastResponse(BaseModel):
     node:          Optional[str]
     metric:        str
     unit:          str
+    model_used:    _ModelKey   # "formula" | "timesfm" | "prophet"
     horizon_hours: int
     generated_at:  str
     predictions:   list[ForecastPoint]
@@ -196,6 +209,7 @@ class SchedulingWindow(BaseModel):
 
 class OptimalWindowResponse(BaseModel):
     node:         Optional[str]
+    model_used:   _ModelKey   # model used for the carbonEmissions forecast
     horizon_days: int
     window_hours: int
     generated_at: str
@@ -417,17 +431,51 @@ def _run_timesfm_forecast(metric: str, horizon: int) -> pd.DataFrame:
     return fc.tail(horizon).reset_index(drop=True)
 
 
-def _run_best_forecast(metric: str, horizon: int) -> pd.DataFrame:
-    """Use TimesFM for preferred metrics (fallback: Prophet)."""
-    if _TIMESFM_AVAILABLE and metric in _TIMESFM_PREFERRED:
+def _run_formula_forecast(horizon: int) -> pd.DataFrame:
+    """Derive carbonEmissions analytically: consumption × carbonIntensityFactor + 0.002."""
+    consumption_fc = _run_forecast("consumption", horizon)
+    cif_fc         = _run_forecast("carbonIntensityFactor", horizon)
+    return derive_carbon_emissions(consumption_fc, cif_fc)
+
+
+def _run_best_forecast(metric: str, horizon: int) -> _ForecastResult:
+    """Route to the best available model for a metric (see model_registry.py).
+
+    Returns a _ForecastResult(data, model_used) so callers know which model
+    actually served the request — useful for logging, response metadata, and
+    Prometheus labels.
+    """
+    state = _require_state()
+    available: set[str] = set()
+    if "consumption" in state["models"] and "carbonIntensityFactor" in state["models"]:
+        available.add("formula")
+    if _TIMESFM_AVAILABLE and metric in state.get("timesfm_models", {}):
+        available.add("timesfm")
+    if metric in state["models"]:
+        available.add("prophet")
+
+    best = get_best_model_key(metric, available)
+
+    if best == "formula":
         try:
-            return _run_timesfm_forecast(metric, horizon)
+            return _ForecastResult(_run_formula_forecast(horizon), "formula")
         except Exception:
-            pass  # fall through to Prophet
-    return _run_forecast(metric, horizon)
+            log.warning("Formula forecast failed for '%s' — falling back", metric)
+    if best in ("timesfm", "formula"):   # formula fell through
+        try:
+            return _ForecastResult(_run_timesfm_forecast(metric, horizon), "timesfm")
+        except Exception:
+            log.warning("TimesFM forecast failed for '%s' — falling back to Prophet", metric)
+    return _ForecastResult(_run_forecast(metric, horizon), "prophet")
 
 
-def _to_response(metric: str, horizon: int, fc: pd.DataFrame, node: Optional[str] = None) -> ForecastResponse:
+def _to_response(
+    metric: str,
+    horizon: int,
+    fc: pd.DataFrame,
+    model_used: _ModelKey,
+    node: Optional[str] = None,
+) -> ForecastResponse:
     predictions = [
         ForecastPoint(
             ds=pd.Timestamp(row["ds"]).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -441,6 +489,7 @@ def _to_response(metric: str, horizon: int, fc: pd.DataFrame, node: Optional[str
         node=node,
         metric=metric,
         unit=UNIT_MAP.get(metric, ""),
+        model_used=model_used,
         horizon_hours=horizon,
         generated_at=datetime.utcnow().isoformat() + "Z",
         predictions=predictions,
@@ -449,8 +498,9 @@ def _to_response(metric: str, horizon: int, fc: pd.DataFrame, node: Optional[str
 
 def _build_sci_response(horizon: int, node: Optional[str] = None) -> ForecastResponse:
     """Derive SCI with propagated uncertainty from two component forecasts."""
-    carbon_fc  = _run_best_forecast("carbonEmissions", horizon)
-    request_fc = _run_forecast("functionalUnit",  horizon)
+    carbon_result = _run_best_forecast("carbonEmissions", horizon)
+    carbon_fc     = carbon_result.data
+    request_fc    = _run_forecast("functionalUnit", horizon)
 
     predictions = []
     for (_, c_row), (_, r_row) in zip(carbon_fc.iterrows(), request_fc.iterrows()):
@@ -469,6 +519,7 @@ def _build_sci_response(horizon: int, node: Optional[str] = None) -> ForecastRes
         node=node,
         metric="softwareCarbonIntensity",
         unit=UNIT_MAP["softwareCarbonIntensity"],
+        model_used=carbon_result.model_used,
         horizon_hours=horizon,
         generated_at=datetime.utcnow().isoformat() + "Z",
         predictions=predictions,
@@ -651,8 +702,8 @@ def forecast_all(
     result: dict[str, ForecastResponse] = {}
 
     for metric in state["models"]:
-        fc = _run_best_forecast(metric, horizon)
-        result[metric] = _to_response(metric, horizon, fc, node=node)
+        r = _run_best_forecast(metric, horizon)
+        result[metric] = _to_response(metric, horizon, r.data, r.model_used, node=node)
 
     # Append derived SCI
     result["softwareCarbonIntensity"] = _build_sci_response(horizon, node=node)
@@ -693,8 +744,8 @@ def forecast_metric(
     For SCI (derived from two models) use /forecast/sci.
     For all metrics at once use /forecast/all.
     """
-    fc = _run_best_forecast(metric, horizon)
-    return _to_response(metric, horizon, fc, node=node)
+    r = _run_best_forecast(metric, horizon)
+    return _to_response(metric, horizon, r.data, r.model_used, node=node)
 
 
 @app.get("/optimal-window", response_model=OptimalWindowResponse, tags=["Scheduling", "Scheduler"])
@@ -713,8 +764,8 @@ def optimal_window(
     vs_daily_mean_pct < 0 means the window is greener than the day's average.
     """
     horizon_hours = horizon_days * 24
-    carbon_fc = _run_forecast("carbonEmissions", horizon_hours)
-    carbon_fc = carbon_fc.copy()
+    carbon_result = _run_best_forecast("carbonEmissions", horizon_hours)
+    carbon_fc = carbon_result.data.copy()
     carbon_fc["ds"]   = pd.to_datetime(carbon_fc["ds"])
     carbon_fc["date"] = carbon_fc["ds"].dt.date
     carbon_fc["hour"] = carbon_fc["ds"].dt.hour
@@ -746,6 +797,7 @@ def optimal_window(
 
     return OptimalWindowResponse(
         node=node,
+        model_used=carbon_result.model_used,
         horizon_days=horizon_days,
         window_hours=window_hours,
         generated_at=datetime.utcnow().isoformat() + "Z",
@@ -967,17 +1019,22 @@ def _metric_to_prometheus_block(
     help_text: str,
     fc: pd.DataFrame,
     node_label: str,
+    model_used: _ModelKey,
 ) -> str:
     """Build a Prometheus text-format block for a single metric's future forecast rows.
 
     `fc` must contain only future rows (as returned by `_run_forecast`).
     Each row becomes a separate time series with `forecast_ts` as a label so that
     future timestamps remain queryable even though Prometheus scraping uses wall time.
+    `model_used` is exposed as a label so dashboards can filter or alert by routing.
     """
     lines = [f"# HELP {prom_name} {help_text}", f"# TYPE {prom_name} gauge"]
     for _, row in fc.iterrows():
         ts = pd.Timestamp(row["ds"]).strftime("%Y-%m-%dT%H:%M:%SZ")
-        lines.append(f'{prom_name}{{node="{node_label}",forecast_ts="{ts}"}} {row["yhat"]:.6f}')
+        lines.append(
+            f'{prom_name}{{node="{node_label}",forecast_ts="{ts}",model_used="{model_used}"}}'
+            f" {row['yhat']:.6f}"
+        )
     return "\n".join(lines)
 
 
@@ -1012,8 +1069,8 @@ def prometheus_metrics(
     for metric, prom_name, help_text in _PROM_METRICS:
         if metric not in state["models"]:
             continue
-        fc = _run_forecast(metric, horizon)   # returns only the future `horizon` rows
-        block = _metric_to_prometheus_block(prom_name, help_text, fc, node_label)
+        r = _run_best_forecast(metric, horizon)   # honours formula→TimesFM→Prophet routing
+        block = _metric_to_prometheus_block(prom_name, help_text, r.data, node_label, r.model_used)
         blocks.append(block)
 
     content = "\n\n".join(blocks) + "\n"

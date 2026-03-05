@@ -38,6 +38,7 @@ import matplotlib.dates as mdates
 
 from prophet_model import EnergyProphet
 from data_loader import load_and_validate, build_pipeline_config, PipelineConfig
+from physics_constraint import derive_carbon_emissions, evaluate_formula_accuracy
 
 OUTPUT_DIR = "analysis_output"
 DATA_PATH = os.environ.get("DATA_PATH", "data/sample_energy_data.csv")
@@ -137,6 +138,7 @@ def fit_models(df: pd.DataFrame, config: PipelineConfig) -> dict:
         print(f"  Chained forecast applied for '{metric}' using {regs}")
 
     # TimesFM override: use foundation model for carbonEmissions when available
+    _tfm_used = False
     try:
         from timesfm_model import EnergyTimesFM
         tfm = EnergyTimesFM()
@@ -146,9 +148,30 @@ def fit_models(df: pd.DataFrame, config: PipelineConfig) -> dict:
         future_only = tfm_fc.tail(FORECAST_PERIODS).reset_index(drop=True)
         if "carbonEmissions" in results:
             results["carbonEmissions"]["forecast"] = future_only
-            print("  carbonEmissions: using TimesFM (foundation model override)")
+            tfm_eval = tfm.evaluate(df, "carbonEmissions")
+            results["carbonEmissions"]["eval"] = tfm_eval
+            _tfm_used = True
+            print(f"  carbonEmissions: using TimesFM (sMAPE {tfm_eval['sMAPE']:.1f}%)")
     except Exception as e:
         print(f"  carbonEmissions: TimesFM unavailable ({e}), keeping Prophet")
+
+    # Formula evaluation: derive carbonEmissions = consumption × CIF + 0.002
+    try:
+        formula_eval = evaluate_formula_accuracy(df)
+        if "consumption" in results and "carbonIntensityFactor" in results:
+            results["carbonEmissions_formula"] = {
+                "model": None,
+                "forecast": derive_carbon_emissions(
+                    results["consumption"]["forecast"],
+                    results["carbonIntensityFactor"]["forecast"],
+                ),
+                "eval": formula_eval,
+            }
+        print(f"  carbonEmissions (formula): sMAPE {formula_eval['sMAPE']:.1f}%")
+    except Exception as e:
+        print(f"  carbonEmissions formula evaluation skipped: {e}")
+
+    results["_tfm_used"] = _tfm_used
 
     if config.has_sci and "carbonEmissions" in results and "functionalUnit" in results:
         print("\n  Deriving SCI from carbonEmissions / functionalUnit …")
@@ -196,7 +219,7 @@ def _derive_sci(df: pd.DataFrame, results: dict) -> dict:
     mape = np.mean(np.abs((sci_actuals - sci_preds) / np.maximum(sci_actuals, 1e-12))) * 100
     smape = np.mean(
         2 * np.abs(sci_actuals - sci_preds)
-        / (np.abs(sci_actuals) + np.abs(sci_preds) + 1e-15)
+        / (np.abs(sci_actuals) + np.abs(sci_preds) + 1e-10)
     ) * 100
 
     # Forecast from full-data components
@@ -615,6 +638,8 @@ def print_insights(df: pd.DataFrame, results: dict, config: PipelineConfig):
     print("  KEY FINDINGS & RECOMMENDATIONS")
     print("=" * 60)
 
+    _tfm_used = results.get("_tfm_used", False)
+
     # Model accuracy
     print("\n  FORECAST ACCURACY (held-out 20% test set):")
     print(f"  {'Metric':<28} {'MAPE':>7} {'sMAPE':>8} {'RMSE':>12}")
@@ -624,6 +649,16 @@ def print_insights(df: pd.DataFrame, results: dict, config: PipelineConfig):
             continue
         e = results[metric]["eval"]
         print(f"  {metric:<28} {e['MAPE']:>6.1f}%  {e['sMAPE']:>6.1f}%  {e['RMSE']:>12.6f}")
+
+    if "carbonEmissions_formula" in results and "carbonEmissions" in results:
+        print("\n  carbonEmissions FORECAST METHOD COMPARISON:")
+        print(f"  {'Method':<26} {'sMAPE':>8}")
+        print(f"  {'-'*36}")
+        formula_smape = results["carbonEmissions_formula"]["eval"]["sMAPE"]
+        active_smape  = results["carbonEmissions"]["eval"]["sMAPE"]
+        active_label  = "TimesFM" if _tfm_used else "Prophet + CIF regressor"
+        print(f"  {'Formula (E×CIF+0.002)':<26} {formula_smape:>7.1f}%")
+        print(f"  {active_label:<26} {active_smape:>7.1f}%")
 
     # SCI efficiency: best vs worst hour
     if "softwareCarbonIntensity" in df.columns:

@@ -670,6 +670,43 @@ class TestPrometheusEndpoint:
         assert r.status_code == 422
 
 
+_VALID_MODEL_KEYS = {"formula", "timesfm", "prophet"}
+
+
+class TestModelUsedField:
+    """model_used must be present on every ForecastResponse and OptimalWindowResponse."""
+
+    def test_forecast_model_used_present(self, client):
+        r = client.get("/forecast/consumption?horizon=1")
+        assert r.status_code == 200
+        assert "model_used" in r.json(), "model_used missing from ForecastResponse"
+
+    def test_forecast_model_used_valid_value(self, client):
+        r = client.get("/forecast/consumption?horizon=1")
+        assert r.json()["model_used"] in _VALID_MODEL_KEYS
+
+    def test_carbon_forecast_uses_formula(self, client):
+        """In the test env both component models are present, so formula must win."""
+        r = client.get("/forecast/carbonEmissions?horizon=1")
+        assert r.json()["model_used"] == "formula"
+
+    def test_optimal_window_model_used_present(self, client):
+        r = client.get("/optimal-window?horizon_days=1")
+        assert r.status_code == 200
+        data = r.json()
+        assert "model_used" in data, "model_used missing from OptimalWindowResponse"
+        assert data["model_used"] in _VALID_MODEL_KEYS
+
+    def test_forecast_all_every_metric_has_model_used(self, client):
+        r = client.get("/forecast/all?horizon=1")
+        assert r.status_code == 200
+        for metric, payload in r.json().items():
+            assert "model_used" in payload, f"model_used missing for '{metric}'"
+            assert payload["model_used"] in _VALID_MODEL_KEYS, (
+                f"Invalid model_used '{payload['model_used']}' for '{metric}'"
+            )
+
+
 class TestCarbonForecastContract:
     """Physical constraints on carbon forecasts — model-agnostic (Prophet or TimesFM)."""
 

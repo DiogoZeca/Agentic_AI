@@ -20,7 +20,8 @@ RUN pip install --no-cache-dir "timesfm[torch]>=1.3.0"
 RUN python -c "import cmdstanpy; cmdstanpy.install_cmdstan(progress=False)"
 
 # Copy application code
-COPY api.py data_generator.py data_loader.py prophet_model.py anomaly_detector.py timesfm_model.py ./
+COPY api.py data_generator.py data_loader.py prophet_model.py anomaly_detector.py timesfm_model.py \
+     model_base.py model_registry.py physics_constraint.py ./
 
 # Data directory — mount a volume here to persist / pre-load CSV
 RUN mkdir -p data

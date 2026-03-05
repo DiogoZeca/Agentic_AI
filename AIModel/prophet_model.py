@@ -6,8 +6,10 @@ import numpy as np
 from prophet import Prophet
 from typing import Optional, List, Tuple, Dict, Any
 
+from model_base import ForecasterBase
 
-class EnergyProphet:
+
+class EnergyProphet(ForecasterBase):
     """
     Prophet wrapper for energy and carbon metrics forecasting.
 
@@ -178,19 +180,21 @@ class EnergyProphet:
         predictions = forecast.iloc[train_size:]["yhat"].values
         actuals = test_df[target_column].values
 
-        mae = np.mean(np.abs(predictions - actuals))
-        mse = np.mean((predictions - actuals) ** 2)
-        rmse = np.sqrt(mse)
-        mape = np.mean(np.abs((actuals - predictions) / actuals)) * 100
-        # sMAPE: symmetric MAPE, robust to extreme values
-        smape = np.mean(
+        mae  = float(np.mean(np.abs(predictions - actuals)))
+        mse  = float(np.mean((predictions - actuals) ** 2))
+        rmse = float(np.sqrt(mse))
+        if np.any(actuals == 0):
+            mape = float("nan")
+        else:
+            mape = float(np.mean(np.abs((actuals - predictions) / actuals)) * 100)
+        smape = float(np.mean(
             2 * np.abs(actuals - predictions)
             / (np.abs(actuals) + np.abs(predictions) + 1e-10)
-        ) * 100
+        ) * 100)
 
         return {
-            "MAE": mae,
-            "MSE": mse,
+            "MAE":  mae,
+            "MSE":  mse,
             "RMSE": rmse,
             "MAPE": mape,
             "sMAPE": smape,

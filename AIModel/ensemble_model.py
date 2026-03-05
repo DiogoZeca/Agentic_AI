@@ -33,8 +33,8 @@ class EnsembleForecaster:
     split within the training data, preventing TimesFM from adding noise.
 
     Usage:
-        ensemble = EnsembleForecaster(regressors=["trainingActive"])
-        results = ensemble.evaluate(df, "totalEnergyConsumption")
+        ensemble = EnsembleForecaster(regressors=["functionalUnit"])
+        results = ensemble.evaluate(df, "consumption")
     """
 
     def __init__(
@@ -282,14 +282,17 @@ class EnsembleForecaster:
         train_size: int,
         test_size: int,
     ) -> Dict[str, float]:
-        mae = np.mean(np.abs(predictions - actuals))
-        mse = np.mean((predictions - actuals) ** 2)
-        rmse = np.sqrt(mse)
-        mape = np.mean(np.abs((actuals - predictions) / actuals)) * 100
-        smape = np.mean(
+        mae  = float(np.mean(np.abs(predictions - actuals)))
+        mse  = float(np.mean((predictions - actuals) ** 2))
+        rmse = float(np.sqrt(mse))
+        if np.any(actuals == 0):
+            mape = float("nan")
+        else:
+            mape = float(np.mean(np.abs((actuals - predictions) / actuals)) * 100)
+        smape = float(np.mean(
             2 * np.abs(actuals - predictions)
             / (np.abs(actuals) + np.abs(predictions) + 1e-10)
-        ) * 100
+        ) * 100)
         return {
             "MAE": mae,
             "MSE": mse,
@@ -335,9 +338,9 @@ if __name__ == "__main__":
     print("Generating sample data...")
     df = generate_energy_carbon_data(periods=24 * 30)
 
-    print("\nRunning three-way evaluation on 'totalEnergyConsumption'...")
-    ensemble = EnsembleForecaster(regressors=["trainingActive"])
-    results = ensemble.evaluate(df, "totalEnergyConsumption")
+    print("\nRunning three-way evaluation on 'consumption'...")
+    ensemble = EnsembleForecaster(regressors=["functionalUnit"])
+    results = ensemble.evaluate(df, "consumption")
 
     print("\n" + "=" * 60)
     print(f"  {'Model':<12} {'MAE':>8} {'RMSE':>8} {'MAPE':>8} {'sMAPE':>8}")

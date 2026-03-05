@@ -23,7 +23,8 @@ RUN pip install --no-cache-dir -r requirements-service.txt -r requirements-test.
 RUN python -c "import cmdstanpy; cmdstanpy.install_cmdstan(progress=False)"
 
 # Copy application source and test suite
-COPY api.py data_generator.py data_loader.py prophet_model.py anomaly_detector.py ./
+COPY api.py data_generator.py data_loader.py prophet_model.py anomaly_detector.py \
+     model_base.py model_registry.py physics_constraint.py ./
 COPY tests/ ./tests/
 
 # Scratch directories used by tests and the app

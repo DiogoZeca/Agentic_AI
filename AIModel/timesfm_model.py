@@ -12,13 +12,15 @@ import torch
 import timesfm
 from typing import Optional, Dict
 
+from model_base import ForecasterBase
+
 logger = logging.getLogger(__name__)
 
 # Model checkpoint — 200M parameter version (lighter, ~925 MB download)
 _DEFAULT_REPO_ID = "google/timesfm-1.0-200m-pytorch"
 
 
-class EnergyTimesFM:
+class EnergyTimesFM(ForecasterBase):
     """
     TimesFM wrapper for energy and carbon metrics forecasting.
 
@@ -195,18 +197,26 @@ class EnergyTimesFM:
         predictions = forecast.iloc[train_size:]["yhat"].values
         actuals = df.iloc[train_size:][target_column].values
 
-        mae = np.mean(np.abs(predictions - actuals))
-        mse = np.mean((predictions - actuals) ** 2)
-        rmse = np.sqrt(mse)
-        mape = np.mean(np.abs((actuals - predictions) / actuals)) * 100
+        mae   = float(np.mean(np.abs(predictions - actuals)))
+        mse   = float(np.mean((predictions - actuals) ** 2))
+        rmse  = float(np.sqrt(mse))
+        if np.any(actuals == 0):
+            mape = float("nan")
+        else:
+            mape = float(np.mean(np.abs((actuals - predictions) / actuals)) * 100)
+        smape = float(np.mean(
+            2 * np.abs(actuals - predictions)
+            / (np.abs(actuals) + np.abs(predictions) + 1e-10)
+        ) * 100)
 
         return {
-            "MAE": mae,
-            "MSE": mse,
-            "RMSE": rmse,
-            "MAPE": mape,
+            "MAE":        mae,
+            "MSE":        mse,
+            "RMSE":       rmse,
+            "MAPE":       mape,
+            "sMAPE":      smape,
             "train_size": train_size,
-            "test_size": test_size,
+            "test_size":  test_size,
         }
 
     def forecast_batch(
