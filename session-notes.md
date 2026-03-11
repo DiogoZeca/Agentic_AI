@@ -1,6 +1,6 @@
 # Session Notes — Energy & Carbon Forecasting Pipeline
 
-**Last updated:** 2026-03-06
+**Last updated:** 2026-03-11
 **Status:** COMPLETE — 260 passed, 5 skipped (TimesFM-only tests, skipped in lightweight image)
 
 ---
@@ -533,3 +533,278 @@ Quality must be captured, not just quantity.
 | L.1801 framework site | `https://l1801framework.netlify.app/` | Interactive framework overview |
 | ISO/IEC 21031:2024 | `https://www.iso.org/standard/86612.html` | SCI specification (aligns with our formula) |
 | Green Software Foundation SCI | `https://sci.greensoftware.foundation/` | SCI spec + pattern library |
+
+---
+
+## Carbon Emissions Forecasting — Market Landscape (March 2026)
+
+Research conducted March 2026. Covers data sources, carbon intensity APIs, accounting tools,
+real-time monitoring, carbon-aware scheduling, AI/ML approaches, regulatory context, and gaps.
+
+---
+
+### Layer 1: Upstream Data Sources (what everything is built on)
+
+Raw grid carbon intensity originates from national system operators. All commercial products
+are downstream consumers of these sources.
+
+| Source | What it provides | Region | Cost |
+|--------|-----------------|--------|------|
+| ENTSO-E | Generation by fuel type, cross-border flows, demand forecasts | Europe | Free API (`entsoe-py` client) |
+| US EIA | Grid mix, real-time generation by fuel type | USA | Free |
+| UK NESO | 96h+ ahead forecasts, 30-min granularity, 14 GB regions | UK | Free (CC BY 4.0) |
+| Ember Climate | Annual country-level generation mix | Global | Free (annual averages only) |
+
+---
+
+### Layer 2: Carbon Intensity APIs
+
+These process raw grid data and sell it as APIs. The primary market layer for carbon signals.
+
+#### Electricity Maps — dominant commercial player
+- **Coverage:** 190+ countries/zones globally
+- **Data types:** Average lifecycle emissions, renewable %, carbon-free energy %, electricity mix,
+  electricity flows, day-ahead prices
+- **Forecast horizon:** 24/48/72h (plan-dependent)
+- **Granularity:** 5-min, 15-min, hourly, daily, monthly
+- **Key endpoints:** `/past`, `/latest`, `/forecast`, `/history`
+- **Query by:** zone-key, lat/lon, cloud provider+region, or IP address
+- **CRITICAL 2025 change:** Discontinued marginal emissions data, citing "verifiability concerns
+  and regulatory incompatibility." Now only provides **average** carbon intensity. This breaks
+  any marginal-based load-shifting system built on Electricity Maps.
+
+#### WattTime — marginal emissions specialist (nonprofit)
+- **Coverage:** Near-global (v3 API: added Japan 10 regions, South Korea, Brazil, India, Mexico,
+  Singapore, Chile, Peru, Turkey, Malaysia, Nicaragua, Philippines)
+- **Signals:**
+  - `co2_moer` — Marginal Operating Emissions Rate (lb CO₂/MWh), 5-min, 24h forecast (72h PRO)
+  - `co2_aoer` — Average emissions rate, for GHG reporting
+  - `health_damage` — Human health cost ($/MWh), US-only
+- **Latency:** Real-time data available within 5 minutes
+- **2025:** Launched **Grid Emissions Data Platform** (with REsurety) — free marginal emissions
+  data globally for qualified users. WattTime is now the only major provider still serving marginal signals.
+
+#### UK Carbon Intensity API — best-in-class accuracy for UK
+- Free, open-source, CC BY 4.0 license
+- 96+ hour ahead forecasts, 30-minute granularity, 14 GB regions + national
+- Uses ML ensemble + AC power flow analysis
+- **Accuracy:** ~20 g/kWh MAE at 4-day horizon (~11% relative error); ~10 g/kWh at 4h-ahead
+
+#### Signal distinction — critical for scheduling decisions
+
+| Signal | Definition | Use |
+|--------|-----------|-----|
+| **Average (AOER)** | Carbon content of all electricity on the grid right now | GHG reporting, auditing |
+| **Marginal (MOER)** | Carbon emissions impact of the *next unit* of load | Load-shifting scheduling decisions |
+
+Electricity Maps dropped marginal in 2025. WattTime kept it. Using average for scheduling
+decisions is theoretically incorrect — it does not reflect what your additional load actually causes.
+
+---
+
+### Layer 3: Carbon Accounting Tools (retrospective — not forecasting)
+
+These calculate what already happened. Reporting tools, not operational forecasting tools.
+
+| Tool | Scope | Limitation |
+|------|-------|-----------|
+| **Climatiq** | 90,000+ emission factors, Scope 1/2/3, cloud CPU/GPU/network/PUE | Retrospective only |
+| **Google Cloud Carbon Footprint** (Carbon Sense) | Scope 1+2+3, hourly, BigQuery export, best cloud tool | Google Cloud only; no forecasting |
+| **Azure Carbon Optimization** | 12 months history, month-to-month trends, right-sizing | Monthly aggregates only — too coarse for operations |
+| **Azure Emissions Insights** | SQL queries, API access | Requires Power BI Pro |
+| **AWS CCFT** | Scope 1+2, country-level breakdown | 3-month data delay; rounds to 0.1 metric ton; Scope 3 absent; coarse for operations |
+| **Cloud Carbon Footprint (CCF)** | Multi-cloud, Scope 2+3, daily update | As of May 2025: minimal maintenance, unclear if actively supported |
+
+**Cloud provider summary:** GCP best-in-class. Azure has good tooling but monthly-only.
+AWS is 2–3 years behind both — 3-month delay and Scope 3 still absent make it operationally useless.
+
+---
+
+### Layer 4: Real-Time Energy Monitoring
+
+These tools measure actual power draw of running containers/processes. No forecasting capability.
+
+| Tool | Approach | Supports | Limitation |
+|------|----------|---------|-----------|
+| **Kepler** (CNCF Sandbox) | eBPF → CPU perf counters → ML model → Prometheus per-pod metrics | Kubernetes | 2025 paper: per-container attribution accuracy not systematically validated; significant discrepancies vs. hardware measurements |
+| **Scaphandre** | RAPL hardware registers → CPU time share per process | Bare metal, VMs, K8s | Intel/AMD x86 only; no GPU, network, or storage energy |
+| **CodeCarbon** | CPU + GPU + RAM energy × regional CI | Python ML scripts | No lifecycle coverage; no embodied emissions; not suited for persistent services |
+| **carbontracker** | Real-time ML training monitoring with early-stopping prediction | Python | Same gaps as CodeCarbon |
+| **Green Metrics Tool** | Software lifecycle analysis (SLCA) for benchmarking | Reproducible scenarios | Benchmarking only; not continuous monitoring |
+| **Impact Framework (GSF)** | YAML pipeline (IMP files), plugin architecture, multi-environment | Cloud, bare metal, VM, container, mobile, IoT | Plugin quality varies; user responsible for chosen methodologies |
+
+**Critical gap:** These tools produce `E(t)` — current energy. None produce `E(t+n)` — the
+future energy a service will consume. A scheduler needs the forecast, not the current reading.
+
+---
+
+### Layer 5: Carbon-Aware Scheduling Frameworks
+
+These consume carbon intensity signals and decide when/where to run workloads.
+
+#### Carbon Aware SDK (Green Software Foundation) — reference implementation
+- .NET 8 (v1.4+), NPM and Java client libraries
+- Connects to: WattTime, Electricity Maps, UK Carbon Intensity API
+- Core query: "what is the best time/location to run this workload in the next N hours?"
+- **Production adopters:** UBS, Vestas, Microsoft Windows Update (schedules OS updates)
+- **Limitation:** Provides the *when* (grid forecast). Cannot tell you what the carbon of your
+  specific service will be at that time. Requires external E and SCI calculation.
+
+#### Production Deployments (2025–2026)
+
+| System | Operator | Approach | Result |
+|--------|---------|----------|--------|
+| **Caspian** (IBM) | Multi-cluster K8s | Spatial + temporal shifting | ~33% carbon reduction; 98% workloads on-time |
+| **ING S.C.A.L.E.** | ING Bank | ML task time prediction + green energy forecasting + pipeline integration | Production for ML + ETL |
+| **COGEniX** (research) | Industrial edge | Multi-horizon forecasting + RL scheduling + deterministic deployment | Nature Sci Reports 2025 |
+| **GreenCourier** (research) | Kubernetes | Custom plugin: marginal emission scores per region for node filtering | Research |
+| **Azure APIM** | Microsoft | Propagates `X-Sustainability-CarbonEmission` HTTP header | Demand-shaping for backend services |
+
+#### What research says about temporal shifting effectiveness
+
+ACM EuroSys 2024 paper — "On the Limitations of Carbon-Aware Temporal and Spatial Workload Shifting":
+
+- **>70% of grid regions globally have insufficient daily carbon variation** to make temporal
+  shifting worthwhile — they rely on stable fossil fuels, hydro, or nuclear
+- Spatial shifting dominates; temporal adds limited incremental value
+- At 50% datacenter utilisation: real savings drop to 51.5% of theoretical ideal (1.9× gap)
+- Adding 50ms latency constraint: reduces savings from 52% to 31%
+- Increasing slack from 24h to 1 year yields only 3.1× improvement — not 365×
+- Long jobs (1% of jobs = 90% of resources) cannot be temporally shifted
+
+**Temporal shifting works best for:** short deferrable batch jobs — ML training, CI/CD pipelines,
+backups, data processing, ETL. Minimal benefit for persistent services or latency-sensitive workloads.
+
+**Real-world carbon reduction range across all literature: 10–70%**, highly dependent on
+workload type, flexibility, and geography.
+
+---
+
+### Layer 6: SCI in Production
+
+SCI is now **ISO/IEC 21031:2024** — a ratified international standard.
+
+#### Production implementations
+
+**Microsoft Azure (reference architecture, January 2026):**
+- Stack: Azure Carbon Optimization + WattTime/Electricity Maps + Application Insights +
+  Azure Functions + Logic Apps + Data Lake Storage + Power BI
+- Requires 6+ services wired together for one SCI score
+- Azure API Management propagates `X-Sustainability-CarbonEmission` HTTP header
+
+**Green Software Foundation Impact Framework:**
+- No-code YAML pipeline (IMP files), plugin architecture
+- 4 GSF member organisations piloting in production as of October 2025
+- Covers: public cloud, bare metal, VM, container, mobile, IoT
+- Calculates: carbon, energy, water
+
+**SCI for AI (GSF extension, late 2025):**
+- Specialised SCI extension mapping AI lifecycle stages (training, inference, deployment)
+  onto LCA stages — directly aligned with what ITU-T L.1801 requires
+
+**Assessment:** Production SCI implementation remains rare outside large hyperscalers.
+Microsoft's reference architecture requires integrating 6+ services to produce one score.
+A turnkey, cloud-agnostic SCI measurement-and-forecast pipeline is not a commodity product.
+
+---
+
+### Layer 7: AI/ML Approaches for Carbon Intensity Forecasting
+
+| Model | Best MAPE | Horizon | Notes |
+|-------|-----------|---------|-------|
+| ARIMA/SARIMA | 3–14% | Short-term | Linear only; fails on abrupt grid changes |
+| Prophet (Meta) | 5–10% | Days | Multiplicative seasonality; good for energy demand |
+| LSTM | 1.8–7% | Days | Best on large datasets; data-hungry, black-box |
+| Hybrid LSTM+Prophet | ~7% | Days | Best of both; added complexity |
+| TimesFM 200M (Google, zero-shot) | 10–16% globally | Up to 21 days | No retraining needed; used in CarbonX |
+| DACF (ML ensemble, day-ahead) | 6.4% avg | 24h | US grid regions; day-ahead specialist |
+| **EnsembleCI (2025, current SOTA)** | **4.19%** | 4 days | PJM grid; current published state-of-the-art |
+| Physics formula (E × I + M) | ~0% sMAPE | Any | Causally correct; requires independent E and I forecasts |
+
+**CarbonX (October 2025)** — most relevant comparable research:
+- Uses 5 foundation models: MOMENT (385M), Chronos (710M), TimesFM (500M), Sundial (128M), Time-MoE (50M)
+- Data: Electricity Maps, hourly, 214 grids, 2021–2024
+- Accuracy: 9.59% mean MAPE (13 benchmark grids), 15.82% (214 global grids) at 4-day horizon
+- **First published system** supporting 21-day carbon intensity forecasting
+- Supports conformal prediction for calibrated uncertainty bounds
+
+**Key insight:** The physics formula (`carbonEmissions = E × CIF + M`) remains the most accurate
+approach when E and I can be independently forecasted — it is causally correct, not learned.
+The 0.0% sMAPE in this project's own evaluation confirms this. The pipeline's formula-first
+routing for `carbonEmissions` is aligned with research consensus.
+
+---
+
+### Layer 8: Regulatory Context
+
+| Regulation | Who it targets | Key carbon requirement | Active from |
+|-----------|---------------|----------------------|-------------|
+| **EU CSRD** | Large EU companies >250 employees | Mandatory sustainability reporting (ESRS), Scope 1+2+3 | Wave 2: FY2025, published 2026 |
+| **EU Taxonomy** | CSRD-covered companies | % revenue/CapEx/OpEx aligned with 6 sustainability objectives | All 6 objectives from 2026 |
+| **ITU-T L.1801** | AI systems | Full LCA for AI environmental impact; training + inference separated | Voluntary now; EU AI Act pathway ~2–3 years |
+| **ISO/IEC 21031:2024** | Anyone computing SCI | Standardised SCI methodology | Ratified — reference standard now |
+| **SEC Climate Rules** | Large US public companies | Scope 1+2, governance, climate risk | FY2025, disclosed 2026 (contested in litigation) |
+
+**Market size:** Cloud carbon management market $4.92B in 2025 → $17.07B by 2035 (CAGR 13.25%).
+**Adoption signal:** 53% of European practices now reporting carbon metrics — 10% jump year-over-year.
+**Gartner prediction:** Cloud carbon emissions expected to be a top-3 factor in cloud provider
+selection by 2025.
+
+---
+
+### Layer 9: Market Gaps — Where the Opportunity Is
+
+| # | Gap | What is missing |
+|---|-----|----------------|
+| 1 | **Infrastructure-level carbon forecasting** | Grid APIs provide `I(t+n)`. Monitoring tools provide `E(t)`. No product provides `E(t+n)` for a specific named service. |
+| 2 | **Sub-hourly forecasting at scale** | Most APIs are hourly. WattTime is 5-min but limited coverage. Scheduling often needs 15-min granularity. |
+| 3 | **Predictive vs. reactive scheduling** | Existing schedulers react to current grid state. None combine workload load forecasting + grid intensity forecasting to predict future service carbon before the load runs. |
+| 4 | **Embodied carbon in real-time accounting** | `M` is ignored or hardcoded everywhere. Accounts for 50–80% of data center lifecycle emissions when running on clean electricity. |
+| 5 | **Marginal vs. average signal confusion** | Electricity Maps dropped marginal in 2025. No industry consensus. Mixing signals creates inconsistent results. |
+| 6 | **Per-workload power attribution accuracy** | Kepler not systematically validated (2025 paper). RAPL tools miss GPU, network, storage energy. |
+| 7 | **SCI tooling gap** | ISO/IEC 21031 ratified. CSRD requires reporting. Production SCI implementation rare outside hyperscalers. No turnkey cloud-agnostic pipeline exists. |
+| 8 | **Forecast accuracy beyond 24h** | Best-in-class: ~6–10% MAPE at 24h. At 4+ days: 15%+ globally. Week-ahead scheduling is too inaccurate for confident decisions. |
+| 9 | **Private/hybrid cloud blind spot** | All tools target public cloud. On-premise infrastructure (e.g., EVIDEN's scenario) is underserved at tooling level. |
+| 10 | **Regulatory-grade forecasting** | CSRD needs audit-ready point estimates with traceable data provenance. Probabilistic forecasts do not reconcile with accounting standards. |
+
+---
+
+### Where This Pipeline Sits vs. the Market
+
+Every existing product stops just short of what EVIDEN needs:
+
+```
+Electricity Maps / WattTime       → provides I(t+n)    [grid carbon intensity forecast]
+Kepler / Scaphandre               → provides E(t)      [current service energy consumption]
+Climatiq / Azure Carbon / AWS     → provides E×I+M     [past carbon accounting, retrospective]
+Carbon Aware SDK                  → provides "use this window" [scheduling signal, no SCI]
+
+This pipeline                     → provides (E×I+M)/R at t+n [future SCI per request]
+                                    for a specific named infrastructure service
+                                    in Prometheus-compatible format
+                                    consumable directly by a Kubernetes HPA or custom scheduler
+```
+
+**The specific capability — per-service SCI forecasting in Prometheus format for predictive
+scheduling — is not available as a commodity product anywhere in the market as of March 2026.**
+
+---
+
+### Key External Resources (Market Layer)
+
+| Resource | URL | Purpose |
+|----------|-----|---------|
+| Electricity Maps | `https://app.electricitymaps.com/developer-hub/api/getting-started` | Grid carbon intensity API |
+| WattTime | `https://watttime.org/data-science/data-signals/` | Marginal emissions API |
+| UK Carbon Intensity API | `https://carbonintensity.org.uk/` | Free UK 96h forecast API |
+| Grid Emissions Data Platform | `https://watttime.org` (search Grid Emissions Data) | Free marginal data (qualified users) |
+| Carbon Aware SDK | `https://carbon-aware-sdk.greensoftware.foundation/` | GSF scheduling SDK |
+| Impact Framework | `https://if.greensoftware.foundation/` | No-code SCI pipeline |
+| SCI for AI | `https://sci-for-ai.greensoftware.foundation/` | SCI extension for AI lifecycle |
+| Kepler | `https://github.com/sustainable-computing-io/kepler` | K8s per-pod power metrics |
+| Scaphandre | `https://hubblo-org.github.io/scaphandre-documentation/` | Bare metal RAPL energy |
+| ENTSO-E Python client | `https://github.com/EnergieID/entsoe-py` | European grid raw data |
+| CarbonX (research) | `https://arxiv.org/html/2510.01521` | Foundation model carbon forecasting |
+| EnsembleCI (SOTA) | `https://arxiv.org/pdf/2505.01959` | State-of-the-art ensemble CI forecasting |
+| ACM EuroSys shifting limits | `https://arxiv.org/html/2306.06502v2` | Temporal shifting effectiveness study |
+| Microsoft SCI reference architecture | `https://learn.microsoft.com/en-us/azure/architecture/example-scenario/apps/measure-azure-app-sustainability-sci-score` | Production SCI implementation |
