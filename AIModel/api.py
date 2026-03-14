@@ -9,13 +9,15 @@ Usage (Docker):
 
 Endpoints:
     POST /data                               — ingest new measurements (EVIDEN push)
-    GET /health                              — model status and readiness
+    GET /health                              — model status, readiness, and L.1801 compliance
     GET /forecast/all?horizon=1             — all metrics in one response (default 60 min)
-    GET /forecast/sci?horizon=1             — SCI (derived, kgCO2e/req)
+    GET /forecast/sci?horizon=1             — SCI (derived, kgCO2e/req) with functional unit
+    GET /forecast/peak?metric=consumption   — peak provisioning value (yhat_upper) for HPA/KEDA
     GET /forecast/{metric}?horizon=1        — single metric forecast
     GET /optimal-window?horizon_days=7       — best low-carbon scheduling windows
     GET /anomalies?metric=consumption        — point anomalies vs Prophet bounds
     GET /investigation-leads                 — ranked recurring anomaly patterns
+    GET /metrics/prometheus                  — Prometheus text format with confidence bands
 
 Available metrics for /forecast/{metric}:
     consumption, carbonEmissions, carbonIntensityFactor,
@@ -185,7 +187,7 @@ app = FastAPI(
         "Loads all 15 schema columns; fits 7 Prophet models directly; derives "
         "softwareCarbonIntensity (SCI) from carbonEmissions / functionalUnit."
     ),
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -199,14 +201,24 @@ class ForecastPoint(BaseModel):
     yhat_upper: float
 
 
+class CarbonBreakdown(BaseModel):
+    """L.1801-aligned carbon accounting metadata for carbonEmissions / SCI forecasts."""
+    formula:           str    # human-readable formula used to derive carbonEmissions
+    embodied_kgco2e_h: float  # hardware amortization constant (kgCO2e/h)
+    sci_standard:      str    # ratified standard reference
+    l1801_stage:       str    # L.1801 lifecycle stage this formula covers
+
+
 class ForecastResponse(BaseModel):
-    node:          Optional[str]
-    metric:        str
-    unit:          str
-    model_used:    _ModelKey   # "formula" | "timesfm" | "prophet"
-    horizon_hours: int
-    generated_at:  str
-    predictions:   list[ForecastPoint]
+    node:                        Optional[str]
+    metric:                      str
+    unit:                        str
+    model_used:                  _ModelKey   # "formula" | "timesfm" | "prophet"
+    horizon_hours:               int
+    generated_at:                str
+    predictions:                 list[ForecastPoint]
+    carbon_breakdown:            Optional[CarbonBreakdown] = None
+    functional_unit_declaration: Optional[str] = None
 
 
 class SchedulingWindow(BaseModel):
@@ -227,12 +239,47 @@ class OptimalWindowResponse(BaseModel):
     windows:      list[SchedulingWindow]
 
 
+class L1801Compliance(BaseModel):
+    """Partial ITU-T L.1801 compliance declaration (approved 2026-02-06).
+
+    L.1801 §4.3 requires omissions to be declared explicitly — partial compliance
+    with a transparency statement is preferred over silent non-compliance.
+    """
+    standard:           str
+    version:            str        # ISO date of standard approval
+    partial_compliance: bool
+    implemented:        list[str]  # lifecycle stages / capabilities already satisfied
+    pending_gaps:       list[str]  # declared omissions
+    sci_standard:       str        # ISO/IEC 21031:2024 (SCI formula)
+
+
+class PeakForecastResponse(BaseModel):
+    """Scheduler-facing peak provisioning values for HPA/KEDA integration.
+
+    provision_for is yhat_upper at the forecast peak — the conservative ceiling
+    a Kubernetes HPA or KEDA ScaledObject should pre-provision for. Use this
+    value as the HPA metric threshold to prevent brownouts during demand spikes.
+    """
+    node:                Optional[str]
+    metric:              str
+    unit:                str
+    horizon_hours:       int
+    provision_for:       float   # max yhat_upper in the forecast window — provision at least this
+    expected:            float   # yhat at the peak hour — best estimate
+    floor:               float   # yhat_lower at the peak hour — minimum expected
+    confidence_band_pct: float   # (provision_for − floor) / expected × 100 — width of uncertainty
+    peak_hour:           str     # ISO 8601 timestamp of the forecast peak
+    model_used:          _ModelKey
+    generated_at:        str
+
+
 class HealthResponse(BaseModel):
-    status:       str
-    fitted_at:    str
-    data_rows:    int
-    models_ready: list[str]
-    nodes:        list[str]   # all known node keys (includes "_default")
+    status:           str
+    fitted_at:        str
+    data_rows:        int
+    models_ready:     list[str]
+    nodes:            list[str]          # all known node keys (includes "_default")
+    l1801_compliance: L1801Compliance
 
 
 class AnomalyPoint(BaseModel):
@@ -321,6 +368,34 @@ class DataIngestionResponse(BaseModel):
     models_status:  str  # "refit_scheduled"
 
 
+# ── L.1801 compliance declaration (static — does not change at runtime) ──────────
+# ITU-T L.1801 §4.3: omissions must be declared explicitly.
+# Partial compliance with a transparency statement is preferred over silent non-compliance.
+
+_L1801_COMPLIANCE = L1801Compliance(
+    standard="ITU-T L.1801",
+    version="2026-02-06",
+    partial_compliance=True,
+    implemented=[
+        "Stage3_Operation: energy consumption monitored and forecast (consumption kWh/h)",
+        "Stage3_Operation: carbon emissions forecast via physics formula E×CIF+M",
+        "SCI formula implemented (ISO/IEC 21031:2024): SCI = (E×I + M) / R",
+        "Functional unit declared in /forecast/sci (R = req/h)",
+        "Confidence intervals propagated through all forecasts (yhat_lower, yhat_upper)",
+        "Model provenance exposed via model_used label on every forecast response",
+    ],
+    pending_gaps=[
+        "Stage1_Training: Prophet and TimesFM training emissions not tracked",
+        "Stage2_Deployment: container build and inference serving emissions not tracked",
+        "Stage4_Disposal: model decommissioning and hardware disposal not modelled",
+        "Hardware embodied carbon M=0.002 from engineering estimate, not Boavizta LCA",
+        "WUE (Water Usage Effectiveness) of data centre not measured",
+        "Second-order network and cooling effects not modelled",
+    ],
+    sci_standard="ISO/IEC 21031:2024",
+)
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────────
 
 def _require_state(node: Optional[str] = None) -> dict:
@@ -338,13 +413,7 @@ def _require_state(node: Optional[str] = None) -> dict:
 
 
 def _refit_models_in_background(df: pd.DataFrame, node: str = _DEFAULT_NODE) -> None:
-    """Refit all Prophet models for `node` on its updated dataset.
-
-    Called via FastAPI BackgroundTasks after POST /data so the endpoint
-    returns 202 immediately while the 2-3 minute refit runs asynchronously.
-    Old models continue serving forecasts until the refit completes, at which
-    point they are atomically replaced (only the target node is affected).
-    """
+    """Refit all Prophet models for `node`; atomically replaces old models when done."""
     config = build_pipeline_config(df)
     new_models: dict[str, EnergyProphet] = {}
 
@@ -378,19 +447,7 @@ def _refit_models_in_background(df: pd.DataFrame, node: str = _DEFAULT_NODE) -> 
 def _build_regressor_future_df(
     horizon: int, regressors: list[str], node: Optional[str] = None
 ) -> pd.DataFrame:
-    """
-    Build a future_df that includes forecasted regressor values for the next
-    `horizon` hours, implementing chained forecasting.
-
-    Each regressor is forecast independently using its own Prophet model, then
-    those predictions are appended to the historical data and passed as `future_df`
-    to the primary model. This replaces the zero-fill fallback with realistic,
-    seasonality-aware regressor values.
-
-    Example: consumption needs future functionalUnit values.
-      Without this → future functionalUnit = 0 (service assumed idle).
-      With this    → future functionalUnit follows its daily/weekly pattern.
-    """
+    """Build historical + forecast regressor values for chained forecasting."""
     state = _require_state(node)
     df = state["df"]
 
@@ -417,12 +474,7 @@ def _build_regressor_future_df(
 
 
 def _run_forecast(metric: str, horizon: int, node: Optional[str] = None) -> pd.DataFrame:
-    """Return the future `horizon` rows from Prophet for `metric`.
-
-    For metrics with regressors (e.g. consumption → functionalUnit), uses
-    chained forecasting: the regressor's own model is run first to produce
-    realistic future values, which are then passed into the primary model.
-    """
+    """Return the future `horizon` rows from Prophet for `metric` (with chained regressors)."""
     state = _require_state(node)
     if metric not in state["models"]:
         available = list(state["models"].keys())
@@ -461,12 +513,7 @@ def _run_formula_forecast(horizon: int, node: Optional[str] = None) -> pd.DataFr
 
 
 def _run_best_forecast(metric: str, horizon: int, node: Optional[str] = None) -> _ForecastResult:
-    """Route to the best available model for a metric (see model_registry.py).
-
-    Returns a _ForecastResult(data, model_used) so callers know which model
-    actually served the request — useful for logging, response metadata, and
-    Prometheus labels.
-    """
+    """Route to the best available model for a metric (see model_registry.py)."""
     state = _require_state(node)
     available: set[str] = set()
     if "consumption" in state["models"] and "carbonIntensityFactor" in state["models"]:
@@ -491,12 +538,21 @@ def _run_best_forecast(metric: str, horizon: int, node: Optional[str] = None) ->
     return _ForecastResult(_run_forecast(metric, horizon, node), "prophet")
 
 
+_CARBON_BREAKDOWN = CarbonBreakdown(
+    formula="carbonEmissions = consumption × carbonIntensityFactor + 0.002",
+    embodied_kgco2e_h=0.002,
+    sci_standard="ISO/IEC 21031:2024",
+    l1801_stage="Stage3_Operation",
+)
+
+
 def _to_response(
     metric: str,
     horizon: int,
     fc: pd.DataFrame,
     model_used: _ModelKey,
     node: Optional[str] = None,
+    include_breakdown: bool = False,
 ) -> ForecastResponse:
     predictions = [
         ForecastPoint(
@@ -507,6 +563,7 @@ def _to_response(
         )
         for _, row in fc.iterrows()
     ]
+    breakdown = _CARBON_BREAKDOWN if (include_breakdown and metric == "carbonEmissions") else None
     return ForecastResponse(
         node=node,
         metric=metric,
@@ -515,10 +572,23 @@ def _to_response(
         horizon_hours=horizon,
         generated_at=datetime.utcnow().isoformat() + "Z",
         predictions=predictions,
+        carbon_breakdown=breakdown,
     )
 
 
-def _build_sci_response(horizon: int, node: Optional[str] = None) -> ForecastResponse:
+_SCI_CARBON_BREAKDOWN = CarbonBreakdown(
+    formula="SCI = ((consumption × carbonIntensityFactor + 0.002) / functionalUnit)",
+    embodied_kgco2e_h=0.002,
+    sci_standard="ISO/IEC 21031:2024",
+    l1801_stage="Stage3_Operation",
+)
+
+_SCI_FUNCTIONAL_UNIT = "req/h — requests per hour (the SCI denominator R in ISO/IEC 21031:2024)"
+
+
+def _build_sci_response(
+    horizon: int, node: Optional[str] = None, include_breakdown: bool = False
+) -> ForecastResponse:
     """Derive SCI with propagated uncertainty from two component forecasts."""
     carbon_result = _run_best_forecast("carbonEmissions", horizon, node)
     carbon_fc     = carbon_result.data
@@ -537,6 +607,7 @@ def _build_sci_response(horizon: int, node: Optional[str] = None) -> ForecastRes
             yhat_upper= round(float(c_row["yhat_upper"]) / r_lower, 8),  # worst SCI
         ))
 
+    breakdown = _SCI_CARBON_BREAKDOWN if include_breakdown else None
     return ForecastResponse(
         node=node,
         metric="softwareCarbonIntensity",
@@ -545,16 +616,13 @@ def _build_sci_response(horizon: int, node: Optional[str] = None) -> ForecastRes
         horizon_hours=horizon,
         generated_at=datetime.utcnow().isoformat() + "Z",
         predictions=predictions,
+        carbon_breakdown=breakdown,
+        functional_unit_declaration=_SCI_FUNCTIONAL_UNIT,
     )
 
 
 def _get_insample_forecast(metric: str, node: Optional[str] = None) -> "pd.DataFrame":
-    """Return in-sample Prophet predictions for `metric`, lazy-cached.
-
-    Calls model.predict(periods=0, future_df=df) which returns fitted yhat /
-    yhat_lower / yhat_upper for every historical timestamp. Results are cached
-    per node — computed once per (node, metric) on first call.
-    """
+    """Return in-sample Prophet predictions for `metric`, lazy-cached per node."""
     state = _require_state(node)
     if metric not in state["models"]:
         available = list(state["models"].keys())
@@ -579,14 +647,9 @@ def _get_insample_forecast(metric: str, node: Optional[str] = None) -> "pd.DataF
 
 
 def _compute_timesfm_rolling_insample(metric: str, node: Optional[str] = None) -> "pd.DataFrame":
-    """Generate genuine out-of-sample TimesFM predictions via rolling CV.
+    """Rolling CV for TimesFM in-sample predictions (step=24h, min_context=168h).
 
-    Uses forward-chaining cross-validation (step=24h, min_context=168h) to
-    produce TimesFM predictions for each historical point without data leakage.
-    Covers history[168:] — the first 168 hours have insufficient prior context.
-
-    Returns an empty DataFrame (correct columns) if TimesFM is not available
-    or the metric has no stored context.
+    Returns an empty DataFrame if TimesFM is unavailable or metric has no context.
     """
     _empty = pd.DataFrame(columns=["ds", "yhat", "yhat_lower", "yhat_upper"])
     state = _require_state(node)
@@ -634,11 +697,7 @@ def _compute_timesfm_rolling_insample(metric: str, node: Optional[str] = None) -
 
 
 def _get_timesfm_insample_forecast(metric: str, node: Optional[str] = None) -> "pd.DataFrame":
-    """Return TimesFM rolling-CV in-sample predictions for `metric`, lazy-cached.
-
-    Mirrors _get_insample_forecast() — computes once per (node, metric) on first
-    call, then returns the cached result on subsequent calls.
-    """
+    """Return TimesFM rolling-CV in-sample predictions for `metric`, lazy-cached per node."""
     state = _require_state(node)
     cache = state["timesfm_insample_forecasts"]
     if metric not in cache:
@@ -698,7 +757,7 @@ def _lead_to_point(lead) -> InvestigationLeadPoint:
 
 @app.get("/health", response_model=HealthResponse, tags=["System"])
 def health():
-    """Service liveness and model readiness check."""
+    """Service liveness, model readiness, and ITU-T L.1801 compliance status."""
     state = _require_state()   # returns default node state
     return HealthResponse(
         status="ok",
@@ -706,6 +765,7 @@ def health():
         data_rows=state["data_rows"],
         models_ready=list(state["models"].keys()),
         nodes=list(_state.keys()),
+        l1801_compliance=_L1801_COMPLIANCE,
     )
 
 
@@ -737,6 +797,7 @@ def forecast_all(
 @app.get("/forecast/sci", response_model=ForecastResponse, tags=["Forecast", "Scheduler"])
 def forecast_sci(
     horizon: int = Query(1, ge=1, le=168, description="Hours ahead to forecast (default 1 = next 60 min)"),
+    include_breakdown: bool = Query(False, description="Include L.1801 carbon breakdown metadata in the response"),
     node: Optional[str] = Query(None, description="Node identifier (placeholder — per-node models pending Thanos integration)"),
 ):
     """
@@ -748,14 +809,69 @@ def forecast_sci(
     Uncertainty intervals are propagated from both component forecasts:
       yhat_lower = carbon_lower / max(request_upper, 1)   (best-case SCI)
       yhat_upper = carbon_upper / max(request_lower, 1)   (worst-case SCI)
+
+    Always includes `functional_unit_declaration` for L.1801 §4.3 transparency.
+    Use `?include_breakdown=true` to also include the SCI formula decomposition.
     """
-    return _build_sci_response(horizon, node=node)
+    return _build_sci_response(horizon, node=node, include_breakdown=include_breakdown)
+
+
+@app.get("/forecast/peak", response_model=PeakForecastResponse, tags=["Forecast", "Scheduler"])
+def forecast_peak(
+    metric: str = Query("consumption", description="Metric to forecast. Defaults to 'consumption' for HPA provisioning."),
+    horizon: int = Query(1, ge=1, le=168, description="Forecast window in hours. Peak yhat_upper across all hours is returned."),
+    node: Optional[str] = Query(None, description="Node identifier (placeholder — per-node models pending Thanos integration)"),
+):
+    """
+    Return the peak provisioning value (yhat_upper) for HPA/KEDA auto-scaling.
+
+    Scans the full forecast horizon and returns the hour with the maximum yhat_upper —
+    the conservative ceiling a Kubernetes HPA or KEDA ScaledObject should pre-provision
+    for. This eliminates brownout windows by provisioning ahead of demand peaks.
+
+    Response fields:
+      provision_for       — yhat_upper at the peak hour (set as HPA metric threshold)
+      expected            — yhat at the peak hour (Prophet best-estimate)
+      floor               — yhat_lower at the peak hour (minimum expected)
+      confidence_band_pct — (provision_for − floor) / expected × 100
+      peak_hour           — ISO 8601 timestamp when the peak is forecast to occur
+
+    Example KEDA ScaledObject uses ai_forecast_consumption_kwh_upper from
+    /metrics/prometheus as the trigger metric for the same effect.
+    """
+    r = _run_best_forecast(metric, horizon, node)
+    fc = r.data
+
+    # Find the hour within the forecast window with the highest yhat_upper
+    peak_idx = int(fc["yhat_upper"].idxmax())
+    peak_row = fc.loc[peak_idx]
+
+    provision_for = round(float(peak_row["yhat_upper"]), 6)
+    expected      = round(float(peak_row["yhat"]),       6)
+    floor         = round(float(peak_row["yhat_lower"]), 6)
+
+    band_pct = round((provision_for - floor) / expected * 100, 1) if expected > 0 else 0.0
+
+    return PeakForecastResponse(
+        node=node,
+        metric=metric,
+        unit=UNIT_MAP.get(metric, ""),
+        horizon_hours=horizon,
+        provision_for=provision_for,
+        expected=expected,
+        floor=floor,
+        confidence_band_pct=band_pct,
+        peak_hour=pd.Timestamp(peak_row["ds"]).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        model_used=r.model_used,
+        generated_at=datetime.utcnow().isoformat() + "Z",
+    )
 
 
 @app.get("/forecast/{metric}", response_model=ForecastResponse, tags=["Forecast", "Scheduler"])
 def forecast_metric(
     metric: str,
     horizon: int = Query(1, ge=1, le=168, description="Hours ahead to forecast (default 1 = next 60 min)"),
+    include_breakdown: bool = Query(False, description="Include L.1801 carbon breakdown metadata in the response"),
     node: Optional[str] = Query(None, description="Node identifier (placeholder — per-node models pending Thanos integration)"),
 ):
     """
@@ -766,9 +882,10 @@ def forecast_metric(
 
     For SCI (derived from two models) use /forecast/sci.
     For all metrics at once use /forecast/all.
+    Use `?include_breakdown=true` on carbonEmissions to get L.1801 formula metadata.
     """
     r = _run_best_forecast(metric, horizon, node)
-    return _to_response(metric, horizon, r.data, r.model_used, node=node)
+    return _to_response(metric, horizon, r.data, r.model_used, node=node, include_breakdown=include_breakdown)
 
 
 @app.get("/optimal-window", response_model=OptimalWindowResponse, tags=["Scheduling", "Scheduler"])
@@ -835,27 +952,10 @@ def ingest_data(
     node: Optional[str] = Query(None, description="Node identifier. Rows are stored under this node; a separate Prophet refit is scheduled for that node's dataset. Unknown nodes are initialised automatically."),
 ):
     """
-    Ingest new measurement rows from an external system (e.g. EVIDEN).
+    Ingest new measurement rows. Returns 202 immediately; Prophet refit runs async.
 
-    EVIDEN pushes measurements every 30-60 minutes. This endpoint receives
-    them, appends them to the live in-memory dataset, and immediately returns
-    202 Accepted. Prophet models are refit asynchronously — forecasts remain
-    available throughout using the previous models, which are atomically
-    replaced when the background refit completes (~2-3 min).
-
-    TimesFM context windows are updated synchronously (instant — no weights
-    reloaded). In-sample caches are flushed so anomaly detection reflects the
-    latest data on the next call.
-
-    Minimum required fields per row: `ds` (ISO 8601) and `consumption` (kWh/h).
-    All other schema fields are optional; missing columns are handled by
-    data_loader's graceful degradation logic.
-
-    Supplying ?node=<name> scopes the data and refit to that node. Forecast
-    endpoints with the same ?node= will use the node-specific models once the
-    refit completes. Unknown nodes are initialised with a copy of the default
-    node's models so forecasts are available immediately (using global data)
-    while the node-specific refit runs in the background.
+    Required fields: `ds` (ISO 8601) and `consumption` (kWh/h). All others optional.
+    Use `?node=<name>` to scope data and refit to a specific node.
     """
     node_key = node if node is not None else _DEFAULT_NODE
     default_state = _require_state()   # raises 503 if not ready
@@ -1013,23 +1113,10 @@ def investigation_leads_endpoint(
     node: Optional[str] = Query(None, description="Node identifier (placeholder — accepted for API consistency but not echoed; per-node patterns pending Thanos integration)"),
 ):
     """
-    Identify the top recurring energy/carbon anomaly patterns and surface actionable leads.
+    Rank the top recurring excess anomaly patterns with rescheduling savings estimates.
 
-    Scans `consumption` and `carbonEmissions` excess anomalies, groups them into
-    recurring patterns (same hour-of-day × weekday/weekend), and ranks by total
-    excess carbon impact. Each lead includes:
-
-    - The optimal low-carbon 4-hour window to reschedule the workload
-    - Estimated carbon saving (positive = you save by rescheduling) vs current anomaly window
-    - Estimated cost saving including any peak/off-peak tariff conflict
-
-    Carbon and cost impacts may point in opposite directions — both are surfaced so
-    the analyst can make an informed trade-off.
-
-    Note: `/anomalies` shows `confidence: "high"` for anomalies flagged by both
-    Prophet and TimesFM (consensus), giving independent second-opinion validation.
-
-    Example: GET /investigation-leads?lookback_days=30&top_n=5
+    Groups anomalies by (hour_of_day × weekday/weekend), ranks by total excess carbon.
+    Each lead includes the optimal low-carbon window and estimated carbon/cost savings.
     """
     state = _require_state(node)
     df = state["df"].copy()
@@ -1068,22 +1155,43 @@ def _metric_to_prometheus_block(
     fc: pd.DataFrame,
     node_label: str,
     model_used: _ModelKey,
+    horizon: int,
 ) -> str:
     """Build a Prometheus text-format block for a single metric's future forecast rows.
 
-    `fc` must contain only future rows (as returned by `_run_forecast`).
+    Emits three metric families: point forecast (yhat), upper bound (yhat_upper),
+    and lower bound (yhat_lower). This exposes the full confidence band so that
+    KEDA ScaledObjects can use yhat_upper as the HPA provisioning threshold.
+
     Each row becomes a separate time series with `forecast_ts` as a label so that
     future timestamps remain queryable even though Prometheus scraping uses wall time.
+    `horizon` encodes the forecast window length (e.g. "6h") for PromQL filtering.
     `model_used` is exposed as a label so dashboards can filter or alert by routing.
     """
-    lines = [f"# HELP {prom_name} {help_text}", f"# TYPE {prom_name} gauge"]
-    for _, row in fc.iterrows():
-        ts = pd.Timestamp(row["ds"]).strftime("%Y-%m-%dT%H:%M:%SZ")
-        lines.append(
-            f'{prom_name}{{node="{node_label}",forecast_ts="{ts}",model_used="{model_used}"}}'
-            f" {row['yhat']:.6f}"
-        )
-    return "\n".join(lines)
+    horizon_label = f"{horizon}h"
+
+    def _series_block(name: str, col: str, description_suffix: str) -> list[str]:
+        lines = [
+            f"# HELP {name} {help_text}{description_suffix}",
+            f"# TYPE {name} gauge",
+        ]
+        for _, row in fc.iterrows():
+            ts = pd.Timestamp(row["ds"]).strftime("%Y-%m-%dT%H:%M:%SZ")
+            lines.append(
+                f'{name}{{node="{node_label}",forecast_ts="{ts}",'
+                f'horizon="{horizon_label}",model_used="{model_used}"}}'
+                f" {row[col]:.6f}"
+            )
+        return lines
+
+    parts = (
+        _series_block(prom_name,              "yhat",       "")
+        + [""]
+        + _series_block(f"{prom_name}_upper", "yhat_upper", " (upper confidence bound — use as HPA threshold)")
+        + [""]
+        + _series_block(f"{prom_name}_lower", "yhat_lower", " (lower confidence bound)")
+    )
+    return "\n".join(parts)
 
 
 @app.get(
@@ -1118,7 +1226,7 @@ def prometheus_metrics(
         if metric not in state["models"]:
             continue
         r = _run_best_forecast(metric, horizon, node)   # honours formula→TimesFM→Prophet routing
-        block = _metric_to_prometheus_block(prom_name, help_text, r.data, node_label, r.model_used)
+        block = _metric_to_prometheus_block(prom_name, help_text, r.data, node_label, r.model_used, horizon)
         blocks.append(block)
 
     content = "\n\n".join(blocks) + "\n"

@@ -817,3 +817,192 @@ class TestPerNodeIsolation:
         r = client.get(f"/forecast/consumption?horizon=1&node={self._NODE}")
         assert r.status_code == 200
         assert r.json()["node"] == self._NODE
+
+
+# ── /forecast/peak ────────────────────────────────────────────────────────────
+
+PEAK_RESPONSE_FIELDS = [
+    "node", "metric", "unit", "horizon_hours",
+    "provision_for", "expected", "floor", "confidence_band_pct",
+    "peak_hour", "model_used", "generated_at",
+]
+
+
+class TestPeakForecastEndpoint:
+    """Contract tests for the scheduler-facing /forecast/peak endpoint."""
+
+    def test_status_ok(self, client):
+        r = client.get("/forecast/peak")
+        assert r.status_code == 200
+
+    def test_response_fields_present(self, client):
+        r = client.get("/forecast/peak?horizon=6")
+        data = r.json()
+        for field in PEAK_RESPONSE_FIELDS:
+            assert field in data, f"Missing field '{field}' in PeakForecastResponse"
+
+    def test_provision_for_geq_expected_geq_floor(self, client):
+        """Physical ordering: floor ≤ expected ≤ provision_for for every request."""
+        r = client.get("/forecast/peak?horizon=24")
+        data = r.json()
+        assert data["floor"] <= data["expected"] + 1e-9, (
+            f"floor ({data['floor']}) > expected ({data['expected']})"
+        )
+        assert data["expected"] <= data["provision_for"] + 1e-9, (
+            f"expected ({data['expected']}) > provision_for ({data['provision_for']})"
+        )
+
+    def test_confidence_band_pct_non_negative(self, client):
+        r = client.get("/forecast/peak?horizon=6")
+        assert r.json()["confidence_band_pct"] >= 0
+
+    def test_peak_hour_is_iso8601(self, client):
+        """peak_hour must use ISO 8601 format with T separator and Z suffix."""
+        r = client.get("/forecast/peak?horizon=6")
+        peak_hour = r.json()["peak_hour"]
+        assert "T" in peak_hour and peak_hour.endswith("Z"), (
+            f"peak_hour not in ISO 8601 format: {peak_hour}"
+        )
+
+    def test_carbon_emissions_metric_works(self, client):
+        r = client.get("/forecast/peak?metric=carbonEmissions&horizon=6")
+        assert r.status_code == 200
+        assert r.json()["metric"] == "carbonEmissions"
+        assert r.json()["unit"] == "kgCO2e/h"
+
+    def test_default_metric_is_consumption(self, client):
+        r = client.get("/forecast/peak")
+        assert r.json()["metric"] == "consumption"
+
+    def test_horizon_reflected(self, client):
+        r = client.get("/forecast/peak?horizon=12")
+        assert r.json()["horizon_hours"] == 12
+
+    def test_unknown_metric_returns_404(self, client):
+        r = client.get("/forecast/peak?metric=totalEnergyConsumption")
+        assert r.status_code == 404
+
+    def test_horizon_limit_enforced(self, client):
+        r = client.get("/forecast/peak?horizon=169")
+        assert r.status_code == 422
+
+    def test_generated_at_format(self, client):
+        r = client.get("/forecast/peak")
+        assert r.json()["generated_at"].endswith("Z")
+
+    def test_model_used_valid(self, client):
+        r = client.get("/forecast/peak")
+        assert r.json()["model_used"] in {"formula", "timesfm", "prophet"}
+
+
+# ── /metrics/prometheus — confidence bands ────────────────────────────────────
+
+class TestPrometheusConfidenceBands:
+    """Verify that /metrics/prometheus now exposes upper and lower confidence bounds."""
+
+    def test_consumption_upper_bound_present(self, client):
+        r = client.get("/metrics/prometheus?horizon=1")
+        assert r.status_code == 200
+        assert "ai_forecast_consumption_kwh_upper" in r.text
+
+    def test_consumption_lower_bound_present(self, client):
+        r = client.get("/metrics/prometheus?horizon=1")
+        assert "ai_forecast_consumption_kwh_lower" in r.text
+
+    def test_carbon_upper_bound_present(self, client):
+        r = client.get("/metrics/prometheus?horizon=1")
+        assert "ai_forecast_carbon_emissions_kgco2e_upper" in r.text
+
+    def test_carbon_lower_bound_present(self, client):
+        r = client.get("/metrics/prometheus?horizon=1")
+        assert "ai_forecast_carbon_emissions_kgco2e_lower" in r.text
+
+    def test_horizon_label_present(self, client):
+        r = client.get("/metrics/prometheus?horizon=6")
+        assert 'horizon="6h"' in r.text
+
+    def test_upper_bound_help_line_present(self, client):
+        r = client.get("/metrics/prometheus?horizon=1")
+        assert "# HELP ai_forecast_consumption_kwh_upper" in r.text
+
+    def test_original_point_metric_still_present(self, client):
+        """Backward-compat: the plain yhat metric must still exist alongside the bounds."""
+        r = client.get("/metrics/prometheus?horizon=1")
+        assert "# HELP ai_forecast_consumption_kwh " in r.text or \
+               r.text.startswith("# HELP ai_forecast_consumption_kwh\n") or \
+               "# HELP ai_forecast_consumption_kwh" in r.text
+
+
+# ── L.1801 compliance metadata ────────────────────────────────────────────────
+
+class TestL1801Compliance:
+    """Verify ITU-T L.1801 compliance metadata is surfaced in /health and forecasts."""
+
+    def test_health_has_l1801_compliance(self, client):
+        r = client.get("/health")
+        assert "l1801_compliance" in r.json(), "l1801_compliance block missing from /health"
+
+    def test_l1801_standard_name(self, client):
+        compliance = client.get("/health").json()["l1801_compliance"]
+        assert compliance["standard"] == "ITU-T L.1801"
+
+    def test_l1801_partial_compliance_is_true(self, client):
+        compliance = client.get("/health").json()["l1801_compliance"]
+        assert compliance["partial_compliance"] is True
+
+    def test_l1801_pending_gaps_non_empty(self, client):
+        """L.1801 §4.3: omissions must be declared — list must not be empty."""
+        compliance = client.get("/health").json()["l1801_compliance"]
+        assert len(compliance["pending_gaps"]) > 0, "pending_gaps must not be empty"
+
+    def test_l1801_implemented_non_empty(self, client):
+        compliance = client.get("/health").json()["l1801_compliance"]
+        assert len(compliance["implemented"]) > 0
+
+    def test_l1801_sci_standard_field(self, client):
+        compliance = client.get("/health").json()["l1801_compliance"]
+        assert "ISO/IEC 21031" in compliance["sci_standard"]
+
+
+class TestCarbonBreakdown:
+    """Verify the optional carbon_breakdown field and SCI functional_unit_declaration."""
+
+    def test_breakdown_absent_by_default(self, client):
+        r = client.get("/forecast/carbonEmissions?horizon=1")
+        assert r.status_code == 200
+        assert r.json()["carbon_breakdown"] is None
+
+    def test_breakdown_present_when_requested(self, client):
+        r = client.get("/forecast/carbonEmissions?horizon=1&include_breakdown=true")
+        assert r.status_code == 200
+        breakdown = r.json()["carbon_breakdown"]
+        assert breakdown is not None
+
+    def test_breakdown_has_required_fields(self, client):
+        r = client.get("/forecast/carbonEmissions?horizon=1&include_breakdown=true")
+        breakdown = r.json()["carbon_breakdown"]
+        for field in ("formula", "embodied_kgco2e_h", "sci_standard", "l1801_stage"):
+            assert field in breakdown, f"Missing field '{field}' in CarbonBreakdown"
+
+    def test_breakdown_embodied_is_0002(self, client):
+        r = client.get("/forecast/carbonEmissions?horizon=1&include_breakdown=true")
+        assert r.json()["carbon_breakdown"]["embodied_kgco2e_h"] == 0.002
+
+    def test_breakdown_absent_for_non_carbon_metrics(self, client):
+        """include_breakdown only has effect for carbonEmissions — other metrics return None."""
+        r = client.get("/forecast/consumption?horizon=1&include_breakdown=true")
+        assert r.json()["carbon_breakdown"] is None
+
+    def test_sci_always_has_functional_unit_declaration(self, client):
+        r = client.get("/forecast/sci?horizon=1")
+        assert r.status_code == 200
+        assert r.json()["functional_unit_declaration"] is not None
+        assert "req" in r.json()["functional_unit_declaration"]
+
+    def test_sci_breakdown_absent_by_default(self, client):
+        r = client.get("/forecast/sci?horizon=1")
+        assert r.json()["carbon_breakdown"] is None
+
+    def test_sci_breakdown_present_when_requested(self, client):
+        r = client.get("/forecast/sci?horizon=1&include_breakdown=true")
+        assert r.json()["carbon_breakdown"] is not None

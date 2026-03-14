@@ -1,7 +1,7 @@
 # Session Notes — Energy & Carbon Forecasting Pipeline
 
-**Last updated:** 2026-03-11
-**Status:** COMPLETE — 260 passed, 5 skipped (TimesFM-only tests, skipped in lightweight image)
+**Last updated:** 2026-03-14
+**Status:** COMPLETE — 293 passed, 5 skipped (TimesFM-only tests, skipped in lightweight image)
 
 ---
 
@@ -105,6 +105,36 @@ Formula first for `carbonEmissions` is validated. Routing `["formula", "timesfm"
 
 **`_fmt_pct` design:** 3-line helper using `math.isnan()` — defined in each analysis script independently (they are standalone scripts; a shared `utils.py` for one function would over-engineer). Demo blocks in model files use inline `math.isnan()` guard to avoid adding module-level symbols used only in `__main__`.
 
+### Pass 9 — HPA integration + L.1801 metadata (260 → 293 tests, +1 endpoint)
+
+Motivation: EVIDEN's core requirement is predictive scheduling. The critical gap was that `/metrics/prometheus` only exposed `yhat` (point forecast) — KEDA/HPA needed `yhat_upper` (conservative ceiling) to pre-provision before peaks arrive. Also surfaced ITU-T L.1801 compliance metadata as declared partial compliance.
+
+| # | Enhancement | Implementation |
+|---|------------|---------------|
+| 34 | `/metrics/prometheus` only emitted `yhat` — KEDA had no way to provision conservatively | Added `yhat_upper` (`*_upper`) and `yhat_lower` (`*_lower`) as named Prometheus GAUGE families + `horizon` label (e.g. `"6h"`) to `_metric_to_prometheus_block()` |
+| 35 | No scheduler-facing endpoint returning `yhat_upper` as primary provisioning value | Added `GET /forecast/peak` → `PeakForecastResponse` with `provision_for` (max `yhat_upper` across window), `expected`, `floor`, `confidence_band_pct`, `peak_hour` |
+| 36 | L.1801 standard referenced in session notes but not surfaced in any API response | Added `l1801_compliance: L1801Compliance` block to `GET /health` response — declares 6 `implemented` capabilities and 6 `pending_gaps` per L.1801 §4.3 transparency requirement |
+| 37 | No way for callers to audit the carbon formula being applied | Added optional `?include_breakdown=true` to `/forecast/carbonEmissions` and `/forecast/sci` → `carbon_breakdown: CarbonBreakdown` object in response |
+| 38 | `/forecast/sci` never declared its functional unit (R) — L.1801 gap | `functional_unit_declaration` field always present in SCI responses: `"req/h — requests per hour (the SCI denominator R in ISO/IEC 21031:2024)"` |
+
+**New Pydantic models:** `CarbonBreakdown`, `L1801Compliance`, `PeakForecastResponse`.
+**Updated models:** `ForecastResponse` (added `carbon_breakdown`, `functional_unit_declaration`), `HealthResponse` (added `l1801_compliance`).
+**Module-level constant:** `_L1801_COMPLIANCE` (static, defined once after Pydantic models) and `_CARBON_BREAKDOWN`, `_SCI_CARBON_BREAKDOWN`, `_SCI_FUNCTIONAL_UNIT`.
+**API version:** bumped `0.2.0` → `0.3.0`.
+**33 new tests** across 4 new test classes: `TestPeakForecastEndpoint` (12), `TestPrometheusConfidenceBands` (7), `TestL1801Compliance` (6), `TestCarbonBreakdown` (8).
+
+**KEDA integration pattern** (now unblocked):
+```yaml
+# ScaledObject trigger — scrapes yhat_upper directly
+triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://forecast-service:8000
+      metricName: ai_forecast_consumption_kwh_upper
+      query: ai_forecast_consumption_kwh_upper{horizon="1h",node="worker-01"}
+      threshold: "0.14"   # kWh/h threshold → triggers scale-up
+```
+
 ---
 
 ## Open Questions (requires EVIDEN answers)
@@ -131,16 +161,16 @@ Modules (11):
   ensemble_model.py        EnsembleForecaster (Prophet + TimesFM residual)
                            get_test_predictions() → public API for analysis scripts
   anomaly_detector.py      detect_point_anomalies(), find_recurring_patterns()
-  api.py                   FastAPI, 9 endpoints, per-node state isolation
+  api.py                   FastAPI, 10 endpoints, per-node state isolation, L.1801 metadata
   carbon_analysis.py       analysis script + formula vs TimesFM comparison table
                            _fmt_pct() helper for NaN-safe % display
   ensemble_analysis.py     3-way comparison script (Prophet / TimesFM / Ensemble)
                            _fmt_pct() helper; uses get_test_predictions() public API
 
-Tests (260 passed, 5 skipped):
+Tests (293 passed, 5 skipped):
   test_data.py             data contract (schema, value ranges, SCI identity)
   test_forecasting.py      chained Prophet regressor (zero-fill vs chained)
-  test_api.py              API contract + model_used field + per-node isolation
+  test_api.py              API contract + peak endpoint + Prometheus bands + L.1801 metadata
   test_anomaly.py          anomaly engine (Prophet-free, synthetic forecasts)
   test_physics.py          physics formula contract (8 tests)
   test_ensemble.py         ensemble pure functions (21 tests) + contract (5 skipped)
@@ -156,19 +186,20 @@ Docker images:
   Dockerfile.analysis      Analysis image (COPY *.py ./), uses requirements-analysis.txt
 ```
 
-## API Endpoints (9 total)
+## API Endpoints (10 total)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Liveness + model state + known nodes |
+| GET | `/health` | Liveness + model state + L.1801 compliance declaration |
 | POST | `/data` | Ingest rows, schedule refit (`?node=` scopes to node) |
 | GET | `/forecast/all` | All metrics in one response |
-| GET | `/forecast/sci` | SCI derived (kgCO2e/req) |
-| GET | `/forecast/{metric}` | Single metric, best model |
+| GET | `/forecast/sci` | SCI derived (kgCO2e/req) + functional unit declaration |
+| GET | `/forecast/peak` | Peak provisioning value (yhat_upper) for KEDA/HPA |
+| GET | `/forecast/{metric}` | Single metric, best model (`?include_breakdown=true` for L.1801 metadata) |
 | GET | `/optimal-window` | Best low-carbon scheduling windows |
 | GET | `/anomalies` | Point anomalies + dual-model confidence |
 | GET | `/investigation-leads` | Ranked recurring anomaly patterns |
-| GET | `/metrics/prometheus` | Prometheus text format for HPA |
+| GET | `/metrics/prometheus` | Prometheus text format with yhat/yhat_upper/yhat_lower bands |
 
 All forecast/anomaly endpoints accept `?node=<name>` for per-node isolation.
 
@@ -176,7 +207,7 @@ All forecast/anomaly endpoints accept `?node=<name>` for per-node isolation.
 
 ## Known Issues (not yet fixed)
 
-None outstanding. All previously identified issues resolved across Passes 1–8.
+None outstanding. All previously identified issues resolved across Passes 1–9.
 
 ---
 

@@ -1,35 +1,13 @@
 """
-Anomaly Detection Engine — pure analysis module.
+Anomaly Detection Engine — pure analysis module (no Prophet, no FastAPI).
 
-No Prophet imports. No FastAPI. Takes DataFrames, returns structured dataclasses.
+Three-stage pipeline:
+  detect_point_anomalies()    → flag hours where actual breaches yhat bounds
+  find_recurring_patterns()   → group anomalies by (hour_of_day, day_type)
+  build_investigation_leads() → rank patterns by carbon impact, add savings estimate
 
-Three-stage pipeline
---------------------
-1. detect_point_anomalies()    — flag individual hours where actual > yhat_upper
-                                 (or actual < yhat_lower for deficit mode)
-2. find_recurring_patterns()   — group anomalies by (hour_of_day, day_type);
-                                 surfaces "same excess, same time window" signals
-3. build_investigation_leads() — rank patterns by total excess carbon, add
-                                 savings estimate vs the optimal low-carbon window
-
-Caller responsibility
----------------------
-The in-sample Prophet forecast (yhat ± bounds for historical timestamps) is
-produced by the API/analysis layer and passed in as a DataFrame. Example:
-
-    # api.py or carbon_analysis.py
-    insample_fc = model.predict(periods=0, future_df=df)   # all historical rows
-    anomalies   = detect_point_anomalies(df, insample_fc, "consumption")
-    patterns    = find_recurring_patterns(anomalies, df, min_occurrences=3)
-    leads       = build_investigation_leads(patterns, df, top_n=5)
-
-This design keeps the engine fast and fully testable without Prophet.
-
-Graceful degradation
----------------------
-If `carbonIntensityFactor` or `cost` are absent from df_actual (real customer
-data may not have these), all carbon/cost fields default to 0.0 and
-carbon_context is "unknown". The anomaly shape detection still works.
+Missing carbonIntensityFactor/cost columns default to 0.0 — shape detection works
+without them.
 """
 from __future__ import annotations
 

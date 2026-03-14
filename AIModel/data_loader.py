@@ -1,45 +1,9 @@
 """
-Data Loader — Flexible ingestion layer for web service energy & carbon metrics.
+Data Loader — ingestion layer for web service energy & carbon metrics.
 
-Handles any CSV that has a 'ds' datetime column and at least 'consumption'.
-Auto-detects available metrics and regressors so the analysis pipeline degrades
-gracefully when columns are missing.
-
-Aligned with the Green Software Foundation's SCI (Software Carbon Intensity)
-framework. Forecast targets are `consumption` (energy) and `carbonEmissions`,
-with `softwareCarbonIntensity` derived as SCI = carbonEmissions / functionalUnit.
-
-Note on `functionalUnit` regressor: Prophet needs future regressor values when
-forecasting. carbon_analysis.py passes `future_df=df` (historical), so future
-rows receive `functionalUnit=0` (fillna(0) applied in prophet_model.py). This is
-acceptable for the initial implementation — treat forecasts as unconditional
-extrapolations.
-
-Supported data sources:
-  - Synthetic (data_generator.py)
-  - Real carbon intensity from Electricity Maps API
-  - Any custom CSV following the schema below
-
-Minimum required columns:
-  ds            datetime   hourly timestamps
-  consumption   float      kWh per hour
-
-Recommended optional columns (unlock more metrics / better accuracy):
-  carbonEmissions          float      kgCO2e per hour
-  functionalUnit           float      requests per hour
-  carbonIntensityFactor    float      kgCO2/kWh (grid carbon intensity)
-  softwareCarbonIntensity  float      kgCO2e per request (derived SCI)
-
-Usage:
-    from data_loader import load_and_validate, build_pipeline_config
-
-    df = load_and_validate("data/my_data.csv")
-    config = build_pipeline_config(df)
-
-    # config.metrics        — list of metrics to analyse
-    # config.regressor_map  — {metric: [regressors]} for Prophet
-    # config.fit_metrics    — metrics to fit directly (SCI derived separately)
-    # config.has_sci        — whether SCI can be derived from components
+Requires 'ds' (datetime) and 'consumption' columns; all others are optional.
+Auto-detects available metrics and regressors; pipeline degrades gracefully on
+missing columns. See CLAUDE.md for the full 15-column schema.
 """
 
 from __future__ import annotations
