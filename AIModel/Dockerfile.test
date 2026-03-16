@@ -1,33 +1,13 @@
-# ── Test image ──────────────────────────────────────────────────────────────────
-# Lightweight: service deps (Prophet + FastAPI) + pytest + httpx.
-# Does NOT include TimesFM/PyTorch — tests only cover the forecasting service.
-#
-# Usage:
-#   docker compose --profile test run --rm test            # all tests
-#   docker compose --profile test run --rm test pytest tests/test_data.py -v
-FROM python:3.11-slim
-
-# System deps required by Prophet (cmdstanpy needs a C++ compiler)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        gcc g++ make \
-    && rm -rf /var/lib/apt/lists/*
+FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install Python deps — service stack + test tools
-# Separate COPY so this layer is cached on code-only changes
 COPY requirements-service.txt requirements-test.txt ./
 RUN pip install --no-cache-dir -r requirements-service.txt -r requirements-test.txt
 
-# Pre-compile cmdstan so tests start fast (one-time cost at build)
-RUN python -c "import cmdstanpy; cmdstanpy.install_cmdstan(progress=False)"
-
-# Copy application source and test suite
-COPY api.py data_generator.py data_loader.py prophet_model.py anomaly_detector.py \
-     model_base.py model_registry.py physics_constraint.py ensemble_model.py ./
+COPY api.py cpu_power_model.py data_loader.py feature_engineering.py ./
 COPY tests/ ./tests/
 
-# Scratch directories used by tests and the app
-RUN mkdir -p data analysis_output
+RUN mkdir -p data
 
 CMD ["pytest", "tests/", "-v", "--tb=short"]

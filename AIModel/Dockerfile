@@ -1,32 +1,15 @@
-# ── Build stage ────────────────────────────────────────────────────────────────
-# Python 3.11 required — Prophet/TimesFM dependency constraint
-FROM python:3.11-slim
-
-# System deps required by Prophet (cmdstanpy needs a C++ compiler)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        gcc g++ make \
-    && rm -rf /var/lib/apt/lists/*
+FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install Python deps first (layer cache: only re-runs on requirements change)
 COPY requirements-service.txt .
 RUN pip install --no-cache-dir -r requirements-service.txt
 
-# Install TimesFM (API service only — not in test image which uses Dockerfile.test)
-RUN pip install --no-cache-dir "timesfm[torch]>=1.3.0"
+COPY api.py cpu_power_model.py data_loader.py ./
 
-# Pre-compile cmdstan so startup is fast (runs once at build time)
-RUN python -c "import cmdstanpy; cmdstanpy.install_cmdstan(progress=False)"
-
-# Copy application code
-COPY api.py data_generator.py data_loader.py prophet_model.py anomaly_detector.py timesfm_model.py \
-     model_base.py model_registry.py physics_constraint.py ./
-
-# Data directory — mount a volume here to persist / pre-load CSV
+# cpu_data.dat is bind-mounted from the host at runtime
 RUN mkdir -p data
 
 EXPOSE 8000
 
-# Uvicorn with a single worker (model state lives in-process)
 CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

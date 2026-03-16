@@ -1,1008 +1,131 @@
-"""
-Test 3: API Contract
-
-Uses FastAPI's TestClient (no running server required).
-The lifespan runs once per session (fits 7 Prophet models on the 720-row CSV
-set up in conftest.py — approximately 30-50s total).
-
-Verifies:
-  - /health returns status="ok" with 7 models ready
-  - /forecast/all?horizon=6 returns 8 metrics (7 direct + SCI), 6 predictions each
-  - /forecast/sci?horizon=6 returns ordered uncertainty intervals
-  - /forecast/{metric} works for each of the 7 directly-fit metrics
-  - /forecast/unknown_metric returns 404
-  - /optimal-window?horizon_days=3 returns 3 scheduling windows
-  - /optimal-window windows contain vs_daily_mean_pct showing relative carbon saving
-  - /anomalies contract: fields, validation, metric 404, direction enum
-  - /investigation-leads contract: fields, ranking, top_n cap, parameter reflection
-"""
-import pytest
-from fastapi.testclient import TestClient
-
-# api.py reads DATA_PATH from os.environ at import time.
-# conftest.py sets DATA_PATH to a small 30-day CSV before this module loads.
-from api import app
-
-ALL_DIRECT_METRICS = [
-    "consumption",
-    "carbonEmissions",
-    "carbonIntensityFactor",
-    "greenConsumptionPercentage",
-    "cpuUtilization",
-    "functionalUnit",
-    "cost",
-]
-
-EXPECTED_ALL_KEYS = ALL_DIRECT_METRICS + ["softwareCarbonIntensity"]
+"""API contract tests for the CPU Power Spike Prediction service."""
 
 
-@pytest.fixture(scope="session")
-def client():
-    """
-    Session-scoped TestClient — triggers lifespan once and reuses models.
-    Fitting 7 Prophet models on 720 rows takes ~30-50s on first access.
-    """
-    with TestClient(app) as c:
-        yield c
-
-
-class TestHealthEndpoint:
-
+class TestHealth:
     def test_status_ok(self, client):
         r = client.get("/health")
         assert r.status_code == 200
-        assert r.json()["status"] == "ok"
+        assert r.json()["status"] == "ready"
 
-    def test_models_ready_count(self, client):
+    def test_cpu_types_loaded(self, client):
         r = client.get("/health")
-        models = r.json()["models_ready"]
-        assert len(models) == 7, (
-            f"Expected 7 models ready, got {len(models)}: {models}"
-        )
-
-    def test_models_ready_names(self, client):
-        r = client.get("/health")
-        models = set(r.json()["models_ready"])
-        assert models == set(ALL_DIRECT_METRICS), (
-            f"Model name mismatch.\n  Got:      {models}\n"
-            f"  Expected: {set(ALL_DIRECT_METRICS)}"
-        )
-
-    def test_data_rows_count(self, client):
-        r = client.get("/health")
-        assert r.json()["data_rows"] == 720
-
-    def test_fitted_at_present(self, client):
-        r = client.get("/health")
-        assert "fitted_at" in r.json()
-        assert r.json()["fitted_at"].endswith("Z")
-
-
-class TestForecastAllEndpoint:
-
-    def test_returns_8_metrics(self, client):
-        r = client.get("/forecast/all?horizon=6")
-        assert r.status_code == 200
-        keys = set(r.json().keys())
-        assert keys == set(EXPECTED_ALL_KEYS), (
-            f"Key mismatch.\n  Got:      {keys}\n  Expected: {set(EXPECTED_ALL_KEYS)}"
-        )
-
-    def test_each_metric_has_correct_horizon(self, client):
-        r = client.get("/forecast/all?horizon=6")
-        payload = r.json()
-        for metric in EXPECTED_ALL_KEYS:
-            n = len(payload[metric]["predictions"])
-            assert n == 6, (
-                f"Metric '{metric}': expected 6 predictions, got {n}"
-            )
-
-    def test_prediction_fields_present(self, client):
-        r = client.get("/forecast/all?horizon=6")
-        first_pred = r.json()["consumption"]["predictions"][0]
-        for field in ["ds", "yhat", "yhat_lower", "yhat_upper"]:
-            assert field in first_pred, f"Missing field '{field}' in prediction"
-
-    def test_sci_metric_in_response(self, client):
-        r = client.get("/forecast/all?horizon=6")
-        sci = r.json().get("softwareCarbonIntensity")
-        assert sci is not None
-        assert sci["metric"] == "softwareCarbonIntensity"
-        assert sci["unit"] == "kgCO2e/req"
-
-    def test_horizon_limit_enforced(self, client):
-        r = client.get("/forecast/all?horizon=169")  # > 168 max
-        assert r.status_code == 422  # Unprocessable Entity
-
-
-class TestForecastSciEndpoint:
-
-    def test_status_ok(self, client):
-        r = client.get("/forecast/sci?horizon=6")
-        assert r.status_code == 200
-
-    def test_metric_and_unit(self, client):
-        r = client.get("/forecast/sci?horizon=6")
         data = r.json()
-        assert data["metric"] == "softwareCarbonIntensity"
-        assert data["unit"] == "kgCO2e/req"
-
-    def test_uncertainty_intervals_ordered(self, client):
-        """
-        SCI uncertainty propagation rule:
-          yhat_lower = carbon_lower / max(request_upper, 1)  — best-case SCI
-          yhat_upper = carbon_upper / max(request_lower, 1)  — worst-case SCI
-
-        Therefore: yhat_lower ≤ yhat ≤ yhat_upper for every point.
-        """
-        r = client.get("/forecast/sci?horizon=24")
-        predictions = r.json()["predictions"]
-        for i, p in enumerate(predictions):
-            assert p["yhat_lower"] <= p["yhat"] + 1e-9, (
-                f"SCI[{i}]: yhat_lower ({p['yhat_lower']}) > yhat ({p['yhat']})"
-            )
-            assert p["yhat"] <= p["yhat_upper"] + 1e-9, (
-                f"SCI[{i}]: yhat ({p['yhat']}) > yhat_upper ({p['yhat_upper']})"
-            )
-
-    def test_sci_values_are_positive(self, client):
-        r = client.get("/forecast/sci?horizon=24")
-        predictions = r.json()["predictions"]
-        for p in predictions:
-            assert p["yhat"] > 0, f"SCI yhat is non-positive: {p['yhat']}"
+        assert data["cpu_types_loaded"] >= 10
+        assert "unknown" in data["available_cpu_types"]
+        assert "intel-xeon-e5420" in data["available_cpu_types"]
 
 
-class TestForecastMetricEndpoint:
-
-    @pytest.mark.parametrize("metric", ALL_DIRECT_METRICS)
-    def test_each_direct_metric_returns_200(self, client, metric):
-        r = client.get(f"/forecast/{metric}?horizon=6")
-        assert r.status_code == 200, (
-            f"Metric '{metric}' returned {r.status_code}: {r.text}"
-        )
-
-    @pytest.mark.parametrize("metric", ALL_DIRECT_METRICS)
-    def test_correct_prediction_count(self, client, metric):
-        r = client.get(f"/forecast/{metric}?horizon=6")
-        n = len(r.json()["predictions"])
-        assert n == 6, f"Metric '{metric}': expected 6 predictions, got {n}"
-
-    @pytest.mark.parametrize("metric,expected_unit", [
-        ("consumption",               "kWh/h"),
-        ("carbonEmissions",           "kgCO2e/h"),
-        ("carbonIntensityFactor",     "kgCO2/kWh"),
-        ("greenConsumptionPercentage", "%"),
-        ("cpuUtilization",            "fraction"),
-        ("functionalUnit",            "req/h"),
-        ("cost",                      "EUR/h"),
-    ])
-    def test_metric_unit(self, client, metric, expected_unit):
-        r = client.get(f"/forecast/{metric}?horizon=1")
-        assert r.json()["unit"] == expected_unit, (
-            f"Metric '{metric}': expected unit '{expected_unit}', "
-            f"got '{r.json()['unit']}'"
-        )
-
-    def test_unknown_metric_returns_404(self, client):
-        r = client.get("/forecast/totalEnergyConsumption?horizon=6")
-        assert r.status_code == 404
-
-    def test_forecast_metric_name_in_response(self, client):
-        r = client.get("/forecast/carbonEmissions?horizon=6")
-        assert r.json()["metric"] == "carbonEmissions"
-
-    def test_consumption_regressor_values_realistic(self, client):
-        """
-        Chained forecasting: consumption forecast should predict realistic values
-        (not near-zero baseline from zero-fill). Expect yhat > 0.03 kWh/h.
-        """
-        r = client.get("/forecast/consumption?horizon=24")
-        yhats = [p["yhat"] for p in r.json()["predictions"]]
-        assert min(yhats) > 0.020, (
-            f"Consumption forecast too low (min={min(yhats):.4f} kWh/h). "
-            f"This may indicate zero-fill rather than chained forecasting."
-        )
-
-
-class TestOptimalWindowEndpoint:
-
-    def test_returns_correct_day_count(self, client):
-        r = client.get("/optimal-window?horizon_days=3")
+class TestPredict:
+    def test_returns_required_fields(self, client):
+        r = client.get("/predict", params={"cpu_pct": 50, "cpu_type": "intel-xeon-e5420"})
         assert r.status_code == 200
-        windows = r.json()["windows"]
-        assert len(windows) == 3, f"Expected 3 windows, got {len(windows)}"
+        for field in ("cpu_type", "cpu_pct", "power_w", "power_lower_w", "power_upper_w",
+                      "is_spike", "spike_threshold_w"):
+            assert field in r.json(), f"Missing field: {field}"
 
-    def test_window_fields_present(self, client):
-        r = client.get("/optimal-window?horizon_days=2&window_hours=4")
-        window = r.json()["windows"][0]
-        for field in ["date", "start_hour", "end_hour", "avg_predicted_carbon", "vs_daily_mean_pct", "unit"]:
-            assert field in window, f"Missing field '{field}' in scheduling window"
+    def test_power_positive(self, client):
+        r = client.get("/predict", params={"cpu_pct": 0, "cpu_type": "intel-xeon-e5420"})
+        assert r.json()["power_w"] > 0
 
-    def test_window_hours_correct(self, client):
-        r = client.get("/optimal-window?horizon_days=2&window_hours=4")
-        for w in r.json()["windows"]:
-            # end_hour uses % 24 (0–23), matching anomaly_detector convention.
-            # Use modular arithmetic to handle midnight-crossing windows correctly.
-            duration = (w["end_hour"] - w["start_hour"]) % 24
-            assert duration == 4, (
-                f"Window duration should be 4h, got {duration}h "
-                f"(start={w['start_hour']}, end={w['end_hour']})"
-            )
+    def test_power_lower_lte_mean_lte_upper(self, client):
+        r = client.get("/predict", params={"cpu_pct": 50, "cpu_type": "intel-xeon-e5420"})
+        d = r.json()
+        assert d["power_lower_w"] <= d["power_w"] <= d["power_upper_w"]
 
-    def test_carbon_unit_correct(self, client):
-        r = client.get("/optimal-window?horizon_days=2")
-        for w in r.json()["windows"]:
-            assert w["unit"] == "kgCO2e/h"
+    def test_idle_not_spike(self, client):
+        r = client.get("/predict", params={"cpu_pct": 0, "cpu_type": "intel-xeon-e5420"})
+        assert r.json()["is_spike"] is False
 
-    def test_response_metadata(self, client):
-        r = client.get("/optimal-window?horizon_days=3&window_hours=6")
-        data = r.json()
-        assert data["horizon_days"] == 3
-        assert data["window_hours"] == 6
-        assert "generated_at" in data
+    def test_full_load_is_spike(self, client):
+        r = client.get("/predict", params={"cpu_pct": 100, "cpu_type": "intel-xeon-e5420"})
+        assert r.json()["is_spike"] is True
 
-    def test_invalid_horizon_days(self, client):
-        r = client.get("/optimal-window?horizon_days=15")  # > 14 max
+    def test_unknown_cpu_type_falls_back(self, client):
+        r = client.get("/predict", params={"cpu_pct": 50, "cpu_type": "totally-unknown-cpu"})
+        assert r.status_code == 200
+        assert r.json()["cpu_type"] == "unknown"
+
+    def test_default_cpu_type_is_unknown(self, client):
+        r = client.get("/predict", params={"cpu_pct": 50})
+        assert r.status_code == 200
+        assert r.json()["cpu_type"] == "unknown"
+
+    def test_cpu_pct_below_zero_rejected(self, client):
+        r = client.get("/predict", params={"cpu_pct": -1})
         assert r.status_code == 422
 
-
-# ── /anomalies ────────────────────────────────────────────────────────────────
-
-ANOMALY_POINT_FIELDS = [
-    "ds", "actual", "expected", "upper_bound", "lower_bound",
-    "excess_pct", "direction", "hour_of_day", "is_weekend",
-    "carbon_intensity", "excess_carbon_kgco2e", "excess_cost_eur",
-    "timesfm_flagged", "confidence",
-]
-
-ANOMALY_RESPONSE_FIELDS = [
-    "node", "metric", "unit", "direction", "lookback_days", "total_anomalies",
-    "generated_at", "anomalies",
-]
-
-
-class TestAnomaliesEndpoint:
-
-    def test_status_ok(self, client):
-        r = client.get("/anomalies?metric=consumption")
-        assert r.status_code == 200
-
-    def test_response_fields_present(self, client):
-        r = client.get("/anomalies?metric=consumption")
-        data = r.json()
-        for field in ANOMALY_RESPONSE_FIELDS:
-            assert field in data, f"Missing top-level field '{field}'"
-
-    def test_metric_reflected(self, client):
-        r = client.get("/anomalies?metric=carbonEmissions")
-        assert r.json()["metric"] == "carbonEmissions"
-
-    def test_unit_correct(self, client):
-        r = client.get("/anomalies?metric=consumption")
-        assert r.json()["unit"] == "kWh/h"
-
-    def test_carbon_emissions_unit(self, client):
-        r = client.get("/anomalies?metric=carbonEmissions")
-        assert r.json()["unit"] == "kgCO2e/h"
-
-    def test_direction_default_is_excess(self, client):
-        r = client.get("/anomalies?metric=consumption")
-        assert r.json()["direction"] == "excess"
-
-    def test_direction_param_reflected(self, client):
-        for direction in ("excess", "deficit", "both"):
-            r = client.get(f"/anomalies?metric=consumption&direction={direction}")
-            assert r.status_code == 200, f"direction={direction} returned {r.status_code}"
-            assert r.json()["direction"] == direction
-
-    def test_invalid_direction_returns_422(self, client):
-        r = client.get("/anomalies?metric=consumption&direction=sideways")
+    def test_cpu_pct_above_100_rejected(self, client):
+        r = client.get("/predict", params={"cpu_pct": 101})
         assert r.status_code == 422
 
-    def test_lookback_days_reflected(self, client):
-        r = client.get("/anomalies?metric=consumption&lookback_days=14")
-        assert r.json()["lookback_days"] == 14
+    def test_all_cpu_types_return_predictions(self, client):
+        cpu_types = [m["cpu_type"] for m in client.get("/models").json()]
+        for ct in cpu_types:
+            r = client.get("/predict", params={"cpu_pct": 50, "cpu_type": ct})
+            assert r.status_code == 200
+            assert r.json()["power_w"] > 0
 
-    def test_lookback_too_large_returns_422(self, client):
-        r = client.get("/anomalies?metric=consumption&lookback_days=366")
-        assert r.status_code == 422
-
-    def test_unknown_metric_returns_404(self, client):
-        r = client.get("/anomalies?metric=totalEnergyConsumption")
-        assert r.status_code == 404
-
-    def test_total_anomalies_matches_list_length(self, client):
-        r = client.get("/anomalies?metric=consumption&lookback_days=30")
-        data = r.json()
-        assert data["total_anomalies"] == len(data["anomalies"]), (
-            f"total_anomalies={data['total_anomalies']} but anomalies list has "
-            f"{len(data['anomalies'])} items"
-        )
-
-    def test_anomaly_point_fields(self, client):
-        """Use full dataset (lookback_days=365) to maximise chance of finding anomalies."""
-        r = client.get("/anomalies?metric=consumption&lookback_days=365")
-        anomalies = r.json()["anomalies"]
-        if anomalies:
-            point = anomalies[0]
-            for field in ANOMALY_POINT_FIELDS:
-                assert field in point, f"Missing AnomalyPoint field '{field}'"
-
-    def test_anomaly_direction_values_valid(self, client):
-        """Every returned anomaly must have a valid direction string."""
-        r = client.get("/anomalies?metric=consumption&lookback_days=365&direction=both")
-        for point in r.json()["anomalies"]:
-            assert point["direction"] in ("excess", "deficit"), (
-                f"Unexpected direction value: {point['direction']}"
-            )
-
-    def test_hour_of_day_in_range(self, client):
-        r = client.get("/anomalies?metric=consumption&lookback_days=365")
-        for point in r.json()["anomalies"]:
-            assert 0 <= point["hour_of_day"] <= 23, (
-                f"hour_of_day out of range: {point['hour_of_day']}"
-            )
-
-    def test_excess_anomalies_have_positive_excess_pct(self, client):
-        """Excess anomalies must have actual > expected → excess_pct > 0."""
-        r = client.get("/anomalies?metric=consumption&lookback_days=365&direction=excess")
-        for point in r.json()["anomalies"]:
-            assert point["excess_pct"] > 0, (
-                f"Excess anomaly has non-positive excess_pct: {point['excess_pct']}"
-            )
-
-    def test_deficit_anomalies_have_negative_excess_pct(self, client):
-        """Deficit anomalies must have actual < expected → excess_pct < 0."""
-        r = client.get("/anomalies?metric=consumption&lookback_days=365&direction=deficit")
-        for point in r.json()["anomalies"]:
-            assert point["excess_pct"] < 0, (
-                f"Deficit anomaly has non-negative excess_pct: {point['excess_pct']}"
-            )
-
-    def test_generated_at_format(self, client):
-        r = client.get("/anomalies?metric=consumption")
-        assert r.json()["generated_at"].endswith("Z")
-
-    def test_in_sample_cache_reused(self, client):
-        """
-        Two calls for the same metric should both succeed (cache hit on second call).
-        Regression: ensures the cache key doesn't error on second access.
-        """
-        r1 = client.get("/anomalies?metric=carbonEmissions&lookback_days=30")
-        r2 = client.get("/anomalies?metric=carbonEmissions&lookback_days=14")
-        assert r1.status_code == 200
-        assert r2.status_code == 200
-
-    def test_anomaly_dual_model_fields_present(self, client):
-        """Both new dual-model fields must always be present regardless of TimesFM availability."""
-        r = client.get("/anomalies?metric=consumption&lookback_days=30")
-        assert r.status_code == 200
-        for a in r.json()["anomalies"]:
-            assert "timesfm_flagged" in a
-            assert "confidence" in a
-            assert isinstance(a["timesfm_flagged"], bool)
-            assert a["confidence"] in {"high", "prophet-only", "timesfm-only"}
-
-
-# ── /investigation-leads ──────────────────────────────────────────────────────
-
-LEAD_FIELDS = [
-    "rank", "metric", "unit", "pattern_summary", "occurrences",
-    "frequency_pct", "avg_excess_pct", "total_excess_carbon_kgco2e",
-    "total_excess_cost_eur", "optimal_window_start_hour",
-    "optimal_window_end_hour", "estimated_carbon_saving_pct",
-    "estimated_cost_saving_pct", "carbon_context", "example_timestamps",
-]
-
-LEADS_RESPONSE_FIELDS = ["lookback_days", "top_n", "generated_at", "leads"]
-
-
-class TestInvestigationLeadsEndpoint:
-
-    def test_status_ok(self, client):
-        r = client.get("/investigation-leads")
-        assert r.status_code == 200
-
-    def test_response_fields_present(self, client):
-        r = client.get("/investigation-leads")
-        data = r.json()
-        for field in LEADS_RESPONSE_FIELDS:
-            assert field in data, f"Missing top-level field '{field}'"
-
-    def test_default_lookback_days(self, client):
-        r = client.get("/investigation-leads")
-        assert r.json()["lookback_days"] == 30
-
-    def test_lookback_days_param_reflected(self, client):
-        r = client.get("/investigation-leads?lookback_days=14")
-        assert r.json()["lookback_days"] == 14
-
-    def test_default_top_n(self, client):
-        r = client.get("/investigation-leads")
-        data = r.json()
-        assert data["top_n"] == 5
-        assert len(data["leads"]) <= 5
-
-    def test_top_n_param_caps_leads(self, client):
-        r = client.get("/investigation-leads?top_n=2&lookback_days=365&min_occurrences=1")
-        data = r.json()
-        assert data["top_n"] == 2
-        assert len(data["leads"]) <= 2
-
-    def test_top_n_too_large_returns_422(self, client):
-        r = client.get("/investigation-leads?top_n=21")
-        assert r.status_code == 422
-
-    def test_leads_are_consecutively_ranked(self, client):
-        """Ranks must be 1, 2, 3, … with no gaps."""
-        r = client.get("/investigation-leads?lookback_days=365&min_occurrences=1")
-        leads = r.json()["leads"]
-        for i, lead in enumerate(leads):
-            assert lead["rank"] == i + 1, (
-                f"Lead at index {i} has rank {lead['rank']}, expected {i + 1}"
-            )
-
-    def test_lead_fields_present(self, client):
-        """Use full history + min_occurrences=1 to ensure at least one lead."""
-        r = client.get("/investigation-leads?lookback_days=365&min_occurrences=1")
-        leads = r.json()["leads"]
-        if leads:
-            lead = leads[0]
-            for field in LEAD_FIELDS:
-                assert field in lead, f"Missing InvestigationLead field '{field}'"
-
-    def test_lead_metric_is_tracked_column(self, client):
-        """Investigation leads should only reference the two scanned metrics."""
-        r = client.get("/investigation-leads?lookback_days=365&min_occurrences=1")
-        for lead in r.json()["leads"]:
-            assert lead["metric"] in ("consumption", "carbonEmissions"), (
-                f"Unexpected metric in lead: {lead['metric']}"
-            )
-
-    def test_optimal_window_hours_in_range(self, client):
-        r = client.get("/investigation-leads?lookback_days=365&min_occurrences=1")
-        for lead in r.json()["leads"]:
-            assert 0 <= lead["optimal_window_start_hour"] <= 23
-            assert 0 <= lead["optimal_window_end_hour"] <= 23
-
-    def test_carbon_context_valid_values(self, client):
-        r = client.get("/investigation-leads?lookback_days=365&min_occurrences=1")
-        valid = {"high-carbon", "low-carbon", "unknown"}
-        for lead in r.json()["leads"]:
-            assert lead["carbon_context"] in valid, (
-                f"Unexpected carbon_context: {lead['carbon_context']}"
-            )
-
-    def test_generated_at_format(self, client):
-        r = client.get("/investigation-leads")
-        assert r.json()["generated_at"].endswith("Z")
-
-    def test_empty_leads_on_strict_min_occurrences(self, client):
-        """min_occurrences=9999 → no pattern qualifies → leads list is empty."""
-        r = client.get("/investigation-leads?min_occurrences=9999")
-        assert r.status_code == 200
-        assert r.json()["leads"] == []
-
-
-# ── POST /data ─────────────────────────────────────────────────────────────────
-# These tests use the shared session-scoped client and run LAST so that the
-# rows they append don't affect the 720-row assertions in TestHealthEndpoint.
-
-MINIMAL_ROW = {"ds": "2026-01-01T00:00:00", "consumption": 0.15}
-FULL_ROW = {
-    "ds":                       "2026-01-01T01:00:00",
-    "consumption":              0.18,
-    "carbonEmissions":          0.072,
-    "carbonIntensityFactor":    0.40,
-    "functionalUnit":           450.0,
-    "cost":                     0.036,
-    "greenConsumptionPercentage": 30.0,
-    "cpuUtilization":           0.40,
-    "operationalEmissions":     0.070,
-    "embodiedEmissions":        0.002,
-}
-
-
-class TestDataIngestion:
-
-    def test_ingest_single_row_returns_202(self, client):
-        r = client.post("/data", json={"rows": [MINIMAL_ROW]})
-        assert r.status_code == 202
-
-    def test_ingest_response_fields_present(self, client):
-        r = client.post("/data", json={"rows": [MINIMAL_ROW]})
-        data = r.json()
-        for field in ("rows_accepted", "total_rows", "models_status"):
-            assert field in data, f"Missing field '{field}' in DataIngestionResponse"
-
-    def test_ingest_rows_accepted_count(self, client):
-        r = client.post("/data", json={"rows": [MINIMAL_ROW]})
-        assert r.json()["rows_accepted"] == 1
-
-    def test_ingest_multiple_rows(self, client):
-        rows = [
-            {"ds": "2026-02-01T00:00:00", "consumption": 0.10},
-            {"ds": "2026-02-01T01:00:00", "consumption": 0.12},
-            {"ds": "2026-02-01T02:00:00", "consumption": 0.11},
+    def test_power_increases_with_load(self, client):
+        powers = [
+            client.get("/predict", params={"cpu_pct": pct, "cpu_type": "intel-xeon-e5420"}).json()["power_w"]
+            for pct in [0, 25, 50, 75, 100]
         ]
-        r = client.post("/data", json={"rows": rows})
-        assert r.status_code == 202
-        assert r.json()["rows_accepted"] == 3
+        assert powers == sorted(powers), f"Power not monotone: {powers}"
 
-    def test_ingest_increases_data_rows(self, client):
-        """Each accepted row increments the dataset size reported by /health."""
-        initial = client.get("/health").json()["data_rows"]
-        r = client.post("/data", json={"rows": [{"ds": "2026-03-01T00:00:00", "consumption": 0.20}]})
-        assert r.status_code == 202
-        updated = client.get("/health").json()["data_rows"]
-        assert updated == initial + 1
-
-    def test_ingest_total_rows_increments_sequentially(self, client):
-        """Consecutive POSTs each add exactly the declared number of rows."""
-        before = client.post("/data", json={"rows": [{"ds": "2026-04-01T00:00:00", "consumption": 0.15}]}).json()["total_rows"]
-        after  = client.post("/data", json={"rows": [{"ds": "2026-04-01T01:00:00", "consumption": 0.16}]}).json()["total_rows"]
-        assert after == before + 1
-
-    def test_ingest_full_schema_row(self, client):
-        """All optional fields are accepted without error."""
-        r = client.post("/data", json={"rows": [FULL_ROW]})
-        assert r.status_code == 202
-
-    def test_models_status_is_refit_scheduled(self, client):
-        r = client.post("/data", json={"rows": [MINIMAL_ROW]})
-        assert r.json()["models_status"] == "refit_scheduled"
-
-    def test_missing_consumption_returns_422(self, client):
-        r = client.post("/data", json={"rows": [{"ds": "2026-05-01T00:00:00"}]})
-        assert r.status_code == 422
-
-    def test_missing_ds_returns_422(self, client):
-        r = client.post("/data", json={"rows": [{"consumption": 0.15}]})
-        assert r.status_code == 422
-
-    def test_empty_rows_list_returns_422(self, client):
-        """min_length=1 on the rows field — empty list must be rejected."""
-        r = client.post("/data", json={"rows": []})
-        assert r.status_code == 422
-
-    def test_negative_consumption_returns_422(self, client):
-        """consumption must be >= 0 (physical energy cannot be negative)."""
-        r = client.post("/data", json={"rows": [{"ds": "2026-05-01T01:00:00", "consumption": -1.0}]})
-        assert r.status_code == 422
-
-    def test_forecasts_still_work_after_ingest(self, client):
-        """Prophet models (possibly still refitting) must serve forecasts immediately."""
-        client.post("/data", json={"rows": [MINIMAL_ROW]})
-        r = client.get("/forecast/consumption?horizon=1")
-        assert r.status_code == 200
-        assert len(r.json()["predictions"]) == 1
-
-
-# ── ds format ─────────────────────────────────────────────────────────────────
-
-class TestDsTimestampFormat:
-
-    def test_forecast_ds_is_iso8601(self, client):
-        """ds timestamps must use T separator and Z suffix."""
-        r = client.get("/forecast/consumption?horizon=1")
-        assert r.status_code == 200
-        for p in r.json()["predictions"]:
-            assert "T" in p["ds"] and p["ds"].endswith("Z"), f"Bad ds format: {p['ds']}"
-
-    def test_forecast_sci_ds_is_iso8601(self, client):
-        r = client.get("/forecast/sci?horizon=1")
-        assert r.status_code == 200
-        for p in r.json()["predictions"]:
-            assert "T" in p["ds"] and p["ds"].endswith("Z"), f"Bad ds format: {p['ds']}"
-
-
-# ── node parameter ────────────────────────────────────────────────────────────
-
-class TestNodeParameter:
-
-    def test_forecast_node_echoed(self, client):
-        r = client.get("/forecast/consumption?horizon=1&node=node-42")
-        assert r.status_code == 200
-        assert r.json()["node"] == "node-42"
-
-    def test_forecast_node_null_when_absent(self, client):
-        r = client.get("/forecast/consumption?horizon=1")
-        assert r.json()["node"] is None
-
-    def test_anomaly_node_echoed(self, client):
-        r = client.get("/anomalies?metric=consumption&node=node-42")
-        assert r.status_code == 200
-        assert r.json()["node"] == "node-42"
-
-    def test_anomaly_node_null_when_absent(self, client):
-        r = client.get("/anomalies?metric=consumption")
-        assert r.json()["node"] is None
-
-    def test_optimal_window_node_echoed(self, client):
-        r = client.get("/optimal-window?horizon_days=1&node=node-42")
-        assert r.status_code == 200
-        assert r.json()["node"] == "node-42"
-
-    def test_optimal_window_node_null_when_absent(self, client):
-        r = client.get("/optimal-window?horizon_days=1")
-        assert r.json()["node"] is None
-
-    def test_investigation_leads_accepts_node_without_error(self, client):
-        """node param is accepted for API consistency but not echoed in the response."""
-        r = client.get("/investigation-leads?node=node-42")
-        assert r.status_code == 200
-        assert "node" not in r.json()
-
-
-# ── /metrics/prometheus ───────────────────────────────────────────────────────
-
-class TestPrometheusEndpoint:
-
-    def test_returns_text_plain(self, client):
-        r = client.get("/metrics/prometheus?horizon=1")
-        assert r.status_code == 200
-        assert "text/plain" in r.headers["content-type"]
-
-    def test_contains_consumption_metric(self, client):
-        r = client.get("/metrics/prometheus?horizon=1")
-        assert "ai_forecast_consumption_kwh" in r.text
-
-    def test_node_label_default(self, client):
-        r = client.get("/metrics/prometheus?horizon=1")
-        assert 'node="global"' in r.text
-
-    def test_node_label_custom(self, client):
-        r = client.get("/metrics/prometheus?horizon=1&node=test-node")
-        assert 'node="test-node"' in r.text
-
-    def test_forecast_ts_format(self, client):
-        import re
-        r = client.get("/metrics/prometheus?horizon=1")
-        assert re.search(r'forecast_ts="\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"', r.text)
-
-    def test_help_and_type_lines_present(self, client):
-        r = client.get("/metrics/prometheus?horizon=1")
-        assert "# HELP ai_forecast_consumption_kwh" in r.text
-        assert "# TYPE ai_forecast_consumption_kwh gauge" in r.text
-
-    def test_horizon_limit_enforced(self, client):
-        r = client.get("/metrics/prometheus?horizon=169")
-        assert r.status_code == 422
-
-
-_VALID_MODEL_KEYS = {"formula", "timesfm", "prophet"}
-
-
-class TestModelUsedField:
-    """model_used must be present on every ForecastResponse and OptimalWindowResponse."""
-
-    def test_forecast_model_used_present(self, client):
-        r = client.get("/forecast/consumption?horizon=1")
-        assert r.status_code == 200
-        assert "model_used" in r.json(), "model_used missing from ForecastResponse"
-
-    def test_forecast_model_used_valid_value(self, client):
-        r = client.get("/forecast/consumption?horizon=1")
-        assert r.json()["model_used"] in _VALID_MODEL_KEYS
-
-    def test_carbon_forecast_uses_formula(self, client):
-        """In the test env both component models are present, so formula must win."""
-        r = client.get("/forecast/carbonEmissions?horizon=1")
-        assert r.json()["model_used"] == "formula"
-
-    def test_optimal_window_model_used_present(self, client):
-        r = client.get("/optimal-window?horizon_days=1")
-        assert r.status_code == 200
-        data = r.json()
-        assert "model_used" in data, "model_used missing from OptimalWindowResponse"
-        assert data["model_used"] in _VALID_MODEL_KEYS
-
-    def test_forecast_all_every_metric_has_model_used(self, client):
-        r = client.get("/forecast/all?horizon=1")
-        assert r.status_code == 200
-        for metric, payload in r.json().items():
-            assert "model_used" in payload, f"model_used missing for '{metric}'"
-            assert payload["model_used"] in _VALID_MODEL_KEYS, (
-                f"Invalid model_used '{payload['model_used']}' for '{metric}'"
-            )
-
-
-class TestCarbonForecastContract:
-    """Physical constraints on carbon forecasts — model-agnostic (Prophet or TimesFM)."""
-
-    def test_carbon_forecast_positive(self, client):
-        """Carbon emissions must be non-negative."""
-        r = client.get("/forecast/carbonEmissions?horizon=24")
-        assert r.status_code == 200
-        for p in r.json()["predictions"]:
-            assert p["yhat"] >= 0, f"Negative carbon: {p['yhat']}"
-
-    def test_carbon_forecast_plausible_range(self, client):
-        """kgCO2e/h must be < 10 for a single service (synthetic data ~0.3–0.7)."""
-        r = client.get("/forecast/carbonEmissions?horizon=24")
-        assert r.status_code == 200
-        for p in r.json()["predictions"]:
-            assert p["yhat"] < 10, f"Implausibly high carbon: {p['yhat']}"
-
-    def test_carbon_forecast_has_uncertainty_interval(self, client):
-        """yhat_lower <= yhat <= yhat_upper must hold for every point."""
-        r = client.get("/forecast/carbonEmissions?horizon=24")
-        assert r.status_code == 200
-        for p in r.json()["predictions"]:
-            assert p["yhat_lower"] <= p["yhat"] <= p["yhat_upper"], (
-                f"Interval order violated: {p['yhat_lower']} <= {p['yhat']} <= {p['yhat_upper']}"
-            )
-
-    def test_forecast_all_includes_carbon(self, client):
-        """/forecast/all must include carbonEmissions."""
-        r = client.get("/forecast/all?horizon=1")
-        assert r.status_code == 200
-        assert "carbonEmissions" in r.json()
-
-    def test_carbon_ds_iso8601(self, client):
-        """ds timestamps in carbon forecast must be ISO 8601 with T and Z."""
-        r = client.get("/forecast/carbonEmissions?horizon=1")
-        assert r.status_code == 200
-        for p in r.json()["predictions"]:
-            assert "T" in p["ds"] and p["ds"].endswith("Z"), f"Bad ds: {p['ds']}"
-
-
-class TestPerNodeIsolation:
-    """
-    Verify that the ?node= query param is handled correctly across endpoints.
-
-    All state is shared within the session-scoped client — tests use a
-    deliberately unusual node name ("_test_node_xyz") to avoid colliding
-    with fixtures created by other test classes.
-    """
-
-    _NODE = "_test_node_xyz"
-
-    def test_health_shows_default_node(self, client):
-        """On startup only _default exists; health must list it."""
-        r = client.get("/health")
-        assert r.status_code == 200
-        assert "_default" in r.json()["nodes"]
-
-    def test_health_includes_nodes_field(self, client):
-        r = client.get("/health")
-        assert "nodes" in r.json(), "HealthResponse missing 'nodes' field"
-        assert isinstance(r.json()["nodes"], list)
-
-    def test_forecast_unknown_node_falls_back_to_default(self, client):
-        """A ?node= that has never pushed data falls back to default models."""
-        r_default = client.get("/forecast/consumption?horizon=1")
-        r_unknown = client.get("/forecast/consumption?horizon=1&node=never_seen_node")
-        assert r_unknown.status_code == 200
-        # Both should return valid forecasts (same model, same data)
-        assert "predictions" in r_unknown.json()
-        assert len(r_unknown.json()["predictions"]) == len(r_default.json()["predictions"])
-
-    def test_post_data_with_node_returns_202(self, client):
-        """POST /data?node=<name> must be accepted."""
-        payload = {
-            "rows": [{"ds": "2024-06-01T12:00:00", "consumption": 0.12}]
+    def test_spike_threshold_consistent(self, client):
+        thresholds = {
+            client.get("/predict", params={"cpu_pct": pct, "cpu_type": "intel-xeon-e5420"}).json()["spike_threshold_w"]
+            for pct in [0, 50, 100]
         }
-        r = client.post(f"/data?node={self._NODE}", json=payload)
-        assert r.status_code == 202
-        assert r.json()["models_status"] == "refit_scheduled"
+        assert len(thresholds) == 1
 
-    def test_post_data_with_node_registers_node(self, client):
-        """After POST /data?node=<name>, health must list that node."""
-        # Depends on test_post_data_with_node_returns_202 having run first
-        # (session-scoped client preserves state between tests)
-        r = client.get("/health")
-        assert self._NODE in r.json()["nodes"], (
-            f"Node '{self._NODE}' not in nodes after POST /data"
-        )
 
-    def test_forecast_for_new_node_uses_default_models(self, client):
-        """
-        Immediately after POST /data?node=<name>, forecast returns valid data.
-        The background refit hasn't finished yet, so default models are used.
-        """
-        r = client.get(f"/forecast/consumption?horizon=1&node={self._NODE}")
+class TestBatchPredict:
+    def test_returns_list(self, client):
+        r = client.post("/predict/batch", json={"predictions": [
+            {"cpu_pct": 30, "cpu_type": "intel-xeon-e5420"},
+            {"cpu_pct": 90, "cpu_type": "amd-opteron-2214"},
+        ]})
         assert r.status_code == 200
-        assert "predictions" in r.json()
-        assert len(r.json()["predictions"]) == 1
+        assert len(r.json()) == 2
 
-    def test_node_param_on_optimal_window(self, client):
-        """?node= is threaded through to /optimal-window without error."""
-        r = client.get(f"/optimal-window?horizon_days=1&node={self._NODE}")
-        assert r.status_code == 200
-        assert "windows" in r.json()
+    def test_batch_spike_flags_correct(self, client):
+        r = client.post("/predict/batch", json={"predictions": [
+            {"cpu_pct": 0,   "cpu_type": "intel-xeon-e5420"},
+            {"cpu_pct": 100, "cpu_type": "intel-xeon-e5420"},
+        ]})
+        results = r.json()
+        assert results[0]["is_spike"] is False
+        assert results[1]["is_spike"] is True
 
-    def test_node_echoed_in_forecast_response(self, client):
-        """The ?node= value must appear in the response body."""
-        r = client.get(f"/forecast/consumption?horizon=1&node={self._NODE}")
-        assert r.status_code == 200
-        assert r.json()["node"] == self._NODE
-
-
-# ── /forecast/peak ────────────────────────────────────────────────────────────
-
-PEAK_RESPONSE_FIELDS = [
-    "node", "metric", "unit", "horizon_hours",
-    "provision_for", "expected", "floor", "confidence_band_pct",
-    "peak_hour", "model_used", "generated_at",
-]
-
-
-class TestPeakForecastEndpoint:
-    """Contract tests for the scheduler-facing /forecast/peak endpoint."""
-
-    def test_status_ok(self, client):
-        r = client.get("/forecast/peak")
-        assert r.status_code == 200
-
-    def test_response_fields_present(self, client):
-        r = client.get("/forecast/peak?horizon=6")
-        data = r.json()
-        for field in PEAK_RESPONSE_FIELDS:
-            assert field in data, f"Missing field '{field}' in PeakForecastResponse"
-
-    def test_provision_for_geq_expected_geq_floor(self, client):
-        """Physical ordering: floor ≤ expected ≤ provision_for for every request."""
-        r = client.get("/forecast/peak?horizon=24")
-        data = r.json()
-        assert data["floor"] <= data["expected"] + 1e-9, (
-            f"floor ({data['floor']}) > expected ({data['expected']})"
-        )
-        assert data["expected"] <= data["provision_for"] + 1e-9, (
-            f"expected ({data['expected']}) > provision_for ({data['provision_for']})"
-        )
-
-    def test_confidence_band_pct_non_negative(self, client):
-        r = client.get("/forecast/peak?horizon=6")
-        assert r.json()["confidence_band_pct"] >= 0
-
-    def test_peak_hour_is_iso8601(self, client):
-        """peak_hour must use ISO 8601 format with T separator and Z suffix."""
-        r = client.get("/forecast/peak?horizon=6")
-        peak_hour = r.json()["peak_hour"]
-        assert "T" in peak_hour and peak_hour.endswith("Z"), (
-            f"peak_hour not in ISO 8601 format: {peak_hour}"
-        )
-
-    def test_carbon_emissions_metric_works(self, client):
-        r = client.get("/forecast/peak?metric=carbonEmissions&horizon=6")
-        assert r.status_code == 200
-        assert r.json()["metric"] == "carbonEmissions"
-        assert r.json()["unit"] == "kgCO2e/h"
-
-    def test_default_metric_is_consumption(self, client):
-        r = client.get("/forecast/peak")
-        assert r.json()["metric"] == "consumption"
-
-    def test_horizon_reflected(self, client):
-        r = client.get("/forecast/peak?horizon=12")
-        assert r.json()["horizon_hours"] == 12
-
-    def test_unknown_metric_returns_404(self, client):
-        r = client.get("/forecast/peak?metric=totalEnergyConsumption")
-        assert r.status_code == 404
-
-    def test_horizon_limit_enforced(self, client):
-        r = client.get("/forecast/peak?horizon=169")
+    def test_batch_invalid_cpu_pct_rejected(self, client):
+        r = client.post("/predict/batch", json={"predictions": [
+            {"cpu_pct": 150, "cpu_type": "intel-xeon-e5420"},
+        ]})
         assert r.status_code == 422
 
-    def test_generated_at_format(self, client):
-        r = client.get("/forecast/peak")
-        assert r.json()["generated_at"].endswith("Z")
-
-    def test_model_used_valid(self, client):
-        r = client.get("/forecast/peak")
-        assert r.json()["model_used"] in {"formula", "timesfm", "prophet"}
-
-
-# ── /metrics/prometheus — confidence bands ────────────────────────────────────
-
-class TestPrometheusConfidenceBands:
-    """Verify that /metrics/prometheus now exposes upper and lower confidence bounds."""
-
-    def test_consumption_upper_bound_present(self, client):
-        r = client.get("/metrics/prometheus?horizon=1")
+    def test_batch_empty_list(self, client):
+        r = client.post("/predict/batch", json={"predictions": []})
         assert r.status_code == 200
-        assert "ai_forecast_consumption_kwh_upper" in r.text
-
-    def test_consumption_lower_bound_present(self, client):
-        r = client.get("/metrics/prometheus?horizon=1")
-        assert "ai_forecast_consumption_kwh_lower" in r.text
-
-    def test_carbon_upper_bound_present(self, client):
-        r = client.get("/metrics/prometheus?horizon=1")
-        assert "ai_forecast_carbon_emissions_kgco2e_upper" in r.text
-
-    def test_carbon_lower_bound_present(self, client):
-        r = client.get("/metrics/prometheus?horizon=1")
-        assert "ai_forecast_carbon_emissions_kgco2e_lower" in r.text
-
-    def test_horizon_label_present(self, client):
-        r = client.get("/metrics/prometheus?horizon=6")
-        assert 'horizon="6h"' in r.text
-
-    def test_upper_bound_help_line_present(self, client):
-        r = client.get("/metrics/prometheus?horizon=1")
-        assert "# HELP ai_forecast_consumption_kwh_upper" in r.text
-
-    def test_original_point_metric_still_present(self, client):
-        """Backward-compat: the plain yhat metric must still exist alongside the bounds."""
-        r = client.get("/metrics/prometheus?horizon=1")
-        assert "# HELP ai_forecast_consumption_kwh " in r.text or \
-               r.text.startswith("# HELP ai_forecast_consumption_kwh\n") or \
-               "# HELP ai_forecast_consumption_kwh" in r.text
+        assert r.json() == []
 
 
-# ── L.1801 compliance metadata ────────────────────────────────────────────────
-
-class TestL1801Compliance:
-    """Verify ITU-T L.1801 compliance metadata is surfaced in /health and forecasts."""
-
-    def test_health_has_l1801_compliance(self, client):
-        r = client.get("/health")
-        assert "l1801_compliance" in r.json(), "l1801_compliance block missing from /health"
-
-    def test_l1801_standard_name(self, client):
-        compliance = client.get("/health").json()["l1801_compliance"]
-        assert compliance["standard"] == "ITU-T L.1801"
-
-    def test_l1801_partial_compliance_is_true(self, client):
-        compliance = client.get("/health").json()["l1801_compliance"]
-        assert compliance["partial_compliance"] is True
-
-    def test_l1801_pending_gaps_non_empty(self, client):
-        """L.1801 §4.3: omissions must be declared — list must not be empty."""
-        compliance = client.get("/health").json()["l1801_compliance"]
-        assert len(compliance["pending_gaps"]) > 0, "pending_gaps must not be empty"
-
-    def test_l1801_implemented_non_empty(self, client):
-        compliance = client.get("/health").json()["l1801_compliance"]
-        assert len(compliance["implemented"]) > 0
-
-    def test_l1801_sci_standard_field(self, client):
-        compliance = client.get("/health").json()["l1801_compliance"]
-        assert "ISO/IEC 21031" in compliance["sci_standard"]
-
-
-class TestCarbonBreakdown:
-    """Verify the optional carbon_breakdown field and SCI functional_unit_declaration."""
-
-    def test_breakdown_absent_by_default(self, client):
-        r = client.get("/forecast/carbonEmissions?horizon=1")
+class TestModels:
+    def test_returns_list(self, client):
+        r = client.get("/models")
         assert r.status_code == 200
-        assert r.json()["carbon_breakdown"] is None
+        assert len(r.json()) >= 10
 
-    def test_breakdown_present_when_requested(self, client):
-        r = client.get("/forecast/carbonEmissions?horizon=1&include_breakdown=true")
-        assert r.status_code == 200
-        breakdown = r.json()["carbon_breakdown"]
-        assert breakdown is not None
+    def test_model_fields(self, client):
+        for m in client.get("/models").json():
+            for field in ("cpu_type", "idle_w", "full_w", "spike_threshold_w", "mean_std_w"):
+                assert field in m, f"Missing field: {field}"
 
-    def test_breakdown_has_required_fields(self, client):
-        r = client.get("/forecast/carbonEmissions?horizon=1&include_breakdown=true")
-        breakdown = r.json()["carbon_breakdown"]
-        for field in ("formula", "embodied_kgco2e_h", "sci_standard", "l1801_stage"):
-            assert field in breakdown, f"Missing field '{field}' in CarbonBreakdown"
+    def test_full_load_gt_idle(self, client):
+        for m in client.get("/models").json():
+            assert m["full_w"] > m["idle_w"], f"{m['cpu_type']}: full_w <= idle_w"
 
-    def test_breakdown_embodied_is_0002(self, client):
-        r = client.get("/forecast/carbonEmissions?horizon=1&include_breakdown=true")
-        assert r.json()["carbon_breakdown"]["embodied_kgco2e_h"] == 0.002
-
-    def test_breakdown_absent_for_non_carbon_metrics(self, client):
-        """include_breakdown only has effect for carbonEmissions — other metrics return None."""
-        r = client.get("/forecast/consumption?horizon=1&include_breakdown=true")
-        assert r.json()["carbon_breakdown"] is None
-
-    def test_sci_always_has_functional_unit_declaration(self, client):
-        r = client.get("/forecast/sci?horizon=1")
-        assert r.status_code == 200
-        assert r.json()["functional_unit_declaration"] is not None
-        assert "req" in r.json()["functional_unit_declaration"]
-
-    def test_sci_breakdown_absent_by_default(self, client):
-        r = client.get("/forecast/sci?horizon=1")
-        assert r.json()["carbon_breakdown"] is None
-
-    def test_sci_breakdown_present_when_requested(self, client):
-        r = client.get("/forecast/sci?horizon=1&include_breakdown=true")
-        assert r.json()["carbon_breakdown"] is not None
+    def test_spike_threshold_between_idle_and_full(self, client):
+        for m in client.get("/models").json():
+            assert m["idle_w"] < m["spike_threshold_w"] < m["full_w"], \
+                f"{m['cpu_type']}: spike_threshold not between idle and full"

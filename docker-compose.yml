@@ -1,107 +1,37 @@
-# Energy & Carbon Forecasting — Docker Compose
+# CPU Power Spike Prediction — Docker Compose
 #
-# Three modes:
-#
-#   Test suite  (data contract + chained forecasting + API contract + anomaly detection):
+#   Test suite:
 #     docker compose --profile test run --rm test
 #
-#   Analysis pipeline  (generate data + all forecast charts):
-#     docker compose --profile analysis up --build
-#
-#   Forecasting API  (long-running REST service):
+#   API service:
 #     docker compose up --build
-#
-# Host-visible output:
-#   AIModel/data/                — generated CSV (bind-mounted)
-#   AIModel/analysis_output/     — PNG charts   (bind-mounted)
-#
-# Named volumes:
-#   hf-cache  — HuggingFace model weights (~925 MB, downloaded once, reused)
 
 services:
-
-  # ── Test suite ────────────────────────────────────────────────────────────────
-  # Run with:  docker compose --profile test run --rm test
-  # Runs 6 test groups: data contract, chained forecasting, API contract, anomaly detection,
-  # physics formula, ensemble pure functions (5 TimesFM integration tests skipped).
-  # Uses a 30-day (720-row) dataset for fast Prophet fitting (~60-90s total).
-  # Exit code 0 = all tests passed.
 
   test:
     build:
       context: ./AIModel
       dockerfile: Dockerfile.test
-    container_name: energy-test
+    container_name: cpu-power-test
+    volumes:
+      - ./AIModel/data:/app/data
     profiles: [test]
-
-  # ── Analysis pipeline ────────────────────────────────────────────────────────
-  # Run with:  docker compose --profile analysis up --build
-  # Execution order: generate → (analyse + ensemble in parallel)
-
-  generate:
-    build:
-      context: ./AIModel
-      dockerfile: Dockerfile.analysis
-    container_name: energy-generate
-    command: python data_generator.py
-    volumes:
-      - ./AIModel/data:/app/data
-    profiles: [analysis]
-
-  analyse:
-    build:
-      context: ./AIModel
-      dockerfile: Dockerfile.analysis
-    container_name: energy-analyse
-    command: python carbon_analysis.py
-    volumes:
-      - ./AIModel/data:/app/data
-      - ./AIModel/analysis_output:/app/analysis_output
-      - hf-cache:/root/.cache/huggingface
-    depends_on:
-      generate:
-        condition: service_completed_successfully
-    profiles: [analysis]
-
-  ensemble:
-    build:
-      context: ./AIModel
-      dockerfile: Dockerfile.analysis
-    container_name: energy-ensemble
-    command: python ensemble_analysis.py
-    volumes:
-      - ./AIModel/data:/app/data
-      - ./AIModel/analysis_output:/app/analysis_output
-      - hf-cache:/root/.cache/huggingface
-    depends_on:
-      generate:
-        condition: service_completed_successfully
-    profiles: [analysis]
-
-  # ── Forecasting API ──────────────────────────────────────────────────────────
-  # Run with:  docker compose up --build
-  # Fits 7 Prophet models on startup (~2–3 min). Ready when you see:
-  #   INFO  Service ready — 8760 rows, models: [...]
 
   api:
     build:
       context: ./AIModel
       dockerfile: Dockerfile
-    container_name: energy-forecasting
+    container_name: cpu-power-api
     ports:
       - "8000:8000"
     volumes:
       - ./AIModel/data:/app/data
-      - hf-cache:/root/.cache/huggingface
     environment:
-      DATA_PATH: data/sample_energy_data.csv
+      DATA_PATH: data/cpu_data.dat
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 180s   # 7 Prophet models × ~15s each on startup
-
-volumes:
-  hf-cache:   # Persists HuggingFace model weights (~925 MB, downloaded once)
+      start_period: 30s
