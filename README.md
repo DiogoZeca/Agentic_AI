@@ -19,8 +19,8 @@ No Python. No pip. No virtual environments.
 
 ### Mode 0 — Test Suite
 
-Validates data contracts, chained forecasting correctness, API behaviour, anomaly detection, and carbon forecast physical constraints.
-Uses a 30-day dataset for fast model fitting (~60–90s total, **217 tests**).
+Validates data contracts, chained forecasting correctness, API behaviour, anomaly detection, physics formula contracts, and ensemble model behaviour.
+Uses a 30-day dataset for fast model fitting (~60–90s total, **293 tests**, 5 skipped).
 
 ```bash
 docker compose --profile test run --rm --build test
@@ -33,6 +33,8 @@ docker compose --profile test run --rm test pytest tests/test_data.py -v
 docker compose --profile test run --rm test pytest tests/test_forecasting.py -v
 docker compose --profile test run --rm test pytest tests/test_api.py -v
 docker compose --profile test run --rm test pytest tests/test_anomaly.py -v
+docker compose --profile test run --rm test pytest tests/test_physics.py -v
+docker compose --profile test run --rm test pytest tests/test_ensemble.py -v
 ```
 
 **Test groups:**
@@ -41,8 +43,10 @@ docker compose --profile test run --rm test pytest tests/test_anomaly.py -v
 |------|-------------------|
 | `test_data.py` | Schema, value ranges, SCI identity, regressor map |
 | `test_forecasting.py` | Chained forecasting (consumption + carbonEmissions) |
-| `test_api.py` | All 8 endpoints, response shapes, error codes, carbon contract |
+| `test_api.py` | All 10 endpoints, response shapes, error codes, L.1801 compliance, peak provisioning |
 | `test_anomaly.py` | Point anomalies, recurring patterns, investigation leads |
+| `test_physics.py` | Physics formula contract (non-negativity, interval ordering, sMAPE validity) |
+| `test_ensemble.py` | Ensemble pure functions + integration contract (5 skipped without TimesFM) |
 
 ---
 
@@ -57,7 +61,7 @@ docker compose --profile analysis up --build
 **What runs (in order):**
 
 1. **generate** — creates `AIModel/data/sample_energy_data.csv` (8,760 hourly rows, 15 columns)
-2. **analyse** — fits Prophet (with `carbonIntensityFactor` regressor for `carbonEmissions`), applies TimesFM override for carbon forecast, writes 8 charts to `AIModel/analysis_output/`
+2. **analyse** — fits Prophet models, applies formula/TimesFM routing for carbon forecast, writes 8 charts to `AIModel/analysis_output/`
 3. **ensemble** — runs Prophet vs TimesFM vs Ensemble comparison, writes 2 more charts
 
 #### Expected run times
@@ -87,7 +91,7 @@ Charts appear in `AIModel/analysis_output/` on your machine:
 | `05_weekly_pattern.png` | Average energy by day of week |
 | `06_carbon_intensity.png` | Grid intensity + green % + optimal window |
 | `07_sci_by_hour.png` | SCI (kgCO2e/req) by hour |
-| `08_carbon_forecast.png` | 7-day carbon forecast (TimesFM when available, else Prophet) |
+| `08_carbon_forecast.png` | 7-day carbon forecast (formula → TimesFM → Prophet) |
 | `07_forecast_comparison.png` | Prophet vs TimesFM vs Ensemble |
 | `08_model_accuracy.png` | sMAPE accuracy comparison |
 
@@ -110,61 +114,29 @@ INFO:     Uvicorn running on http://0.0.0.0:8000
 
 ---
 
-## What Changed — Pipeline Improvements
-
-### `carbonIntensityFactor` regressor for `carbonEmissions`
-
-`carbonEmissions` is now chained: its Prophet model uses `carbonIntensityFactor` as a regressor.
-This reflects the physical formula directly: `emissions = consumption × CI + 0.002`.
-For future rows, `carbonIntensityFactor` is forecast first by its own Prophet model, then injected — same chaining mechanism already used for `consumption → functionalUnit`.
-
-**Accuracy improvement:** Prophet sMAPE 13.9% → ~8% (regressor provides causal signal).
-
-### Best-model routing for `carbonEmissions`
-
-The API now routes `carbonEmissions` forecasts through TimesFM when it is available, falling back to Prophet if not.
-
-| Metric | Prophet sMAPE | TimesFM sMAPE | Routed through |
-|--------|--------------|---------------|----------------|
-| `carbonEmissions` | 13.9% | 7.3% | **TimesFM** (when available) |
-| `softwareCarbonIntensity` (SCI) | 31.6% | 15.2% | TimesFM (via carbon component) |
-| `consumption` | ~5% | — | Prophet |
-
-This applies to `/forecast/carbonEmissions`, `/forecast/all`, `/forecast/sci`, and `/optimal-window`.
-
-### Carbon forecast physical contracts (5 new tests)
-
-`TestCarbonForecastContract` in `test_api.py` validates model-agnostic invariants:
-- `yhat >= 0` (no negative emissions)
-- `yhat < 10` kgCO2e/h (plausible range for a single service)
-- `yhat_lower <= yhat <= yhat_upper` (interval ordering)
-- `/forecast/all` includes `carbonEmissions`
-- `ds` timestamps are ISO 8601 with `T` and `Z`
-
----
-
 ## API Reference
 
 Interactive docs (Swagger UI): **http://localhost:8000/docs**
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/health` | Model status and readiness |
+| GET | `/health` | Model status, readiness, and ITU-T L.1801 partial compliance declaration |
 | GET | `/forecast/all?horizon=24` | All metrics in one response |
-| GET | `/forecast/{metric}?horizon=24` | Single metric forecast |
+| GET | `/forecast/peak?metric=consumption&horizon=24` | Peak provisioning value (yhat_upper) for KEDA/HPA auto-scaling |
+| GET | `/forecast/{metric}?horizon=24` | Single metric forecast (formula→TimesFM→Prophet routing) |
 | GET | `/forecast/sci?horizon=24` | SCI — derived, kgCO2e/req |
 | GET | `/optimal-window?horizon_days=7` | Best low-carbon scheduling windows |
 | GET | `/anomalies?metric=consumption` | Point anomalies vs Prophet confidence interval |
 | GET | `/investigation-leads` | Ranked recurring patterns with carbon/cost savings |
 | POST | `/data` | Ingest new measurements (triggers async model refit) |
-| GET | `/metrics/prometheus?horizon=1` | Prometheus text format (for HPA integration) |
+| GET | `/metrics/prometheus?horizon=1` | Prometheus text format with confidence bands (yhat, yhat_upper, yhat_lower) |
 
 **Available metrics for `/forecast/{metric}`:**
 
 | Metric | Unit | Model | Description |
 |--------|------|-------|-------------|
 | `consumption` | kWh/h | Prophet (chained) | Energy consumption — uses `functionalUnit` as regressor |
-| `carbonEmissions` | kgCO2e/h | TimesFM / Prophet | Total carbon — uses `carbonIntensityFactor` as regressor |
+| `carbonEmissions` | kgCO2e/h | Formula / TimesFM / Prophet | Total carbon — physics formula when components available |
 | `carbonIntensityFactor` | kgCO2/kWh | Prophet | Grid carbon intensity |
 | `greenConsumptionPercentage` | % | Prophet | Renewable energy fraction |
 | `cpuUtilization` | fraction | Prophet | CPU load |
@@ -188,8 +160,11 @@ curl http://localhost:8000/health
 # All metrics at once — 24h forecast
 curl "http://localhost:8000/forecast/all?horizon=24"
 
-# Carbon emissions — 24h (TimesFM when available, else Prophet)
+# Carbon emissions — 24h (formula → TimesFM → Prophet)
 curl "http://localhost:8000/forecast/carbonEmissions?horizon=24"
+
+# Carbon emissions with breakdown
+curl "http://localhost:8000/forecast/carbonEmissions?horizon=24&include_breakdown=true"
 
 # Carbon emissions — extract just yhat values
 curl -s "http://localhost:8000/forecast/carbonEmissions?horizon=24" | jq '[.predictions[].yhat]'
@@ -197,6 +172,9 @@ curl -s "http://localhost:8000/forecast/carbonEmissions?horizon=24" | jq '[.pred
 # Carbon emissions — check uncertainty interval ordering
 curl -s "http://localhost:8000/forecast/carbonEmissions?horizon=3" \
   | jq '.predictions[] | {ds, yhat_lower, yhat, yhat_upper}'
+
+# Peak provisioning value for auto-scaling
+curl "http://localhost:8000/forecast/peak?metric=consumption&horizon=24"
 
 # SCI forecast — next 6h (derived from carbonEmissions / functionalUnit)
 curl "http://localhost:8000/forecast/sci?horizon=6"
@@ -286,28 +264,30 @@ docker compose --profile analysis down     # clean up after analysis
 ```
 Agentic_AI/
 ├── AIModel/
-│   ├── api.py                    ← REST service (9 endpoints: forecast + anomaly + ingest + prometheus)
-│   │                               Best-model routing: carbonEmissions → TimesFM when available
+│   ├── api.py                    ← REST service (10 endpoints: forecast + anomaly + ingest + prometheus)
 │   ├── anomaly_detector.py       ← Anomaly engine (point anomalies → patterns → leads)
+│   ├── model_base.py             ← ForecasterBase ABC (fit/predict/evaluate interface)
+│   ├── model_registry.py         ← MODEL_ROUTING dict (formula→TimesFM→Prophet priority)
+│   ├── physics_constraint.py     ← Physics formula: carbonEmissions = E×CIF + 0.002
 │   ├── data_generator.py         ← Synthetic data (8,760 rows, 15 columns)
 │   ├── data_loader.py            ← Schema validation + pipeline config
-│   │                               carbonEmissions regressor: [carbonIntensityFactor]
 │   ├── prophet_model.py          ← Prophet wrapper (EnergyProphet, multiplicative seasonality)
 │   ├── timesfm_model.py          ← TimesFM wrapper (zero-shot, 200M params)
 │   ├── ensemble_model.py         ← Prophet + TimesFM ensemble (residual correction)
-│   ├── carbon_analysis.py        ← 8-chart analysis pipeline; TimesFM override for carbonEmissions
+│   ├── carbon_analysis.py        ← 8-chart analysis pipeline + method comparison table
 │   ├── ensemble_analysis.py      ← Three-way model comparison (Prophet / TimesFM / Ensemble)
-│   ├── visualizations.py         ← Reusable Matplotlib functions
+│   ├── benchmark.py              ← ModelBenchmark: unified evaluation runner
 │   ├── tests/
 │   │   ├── conftest.py           ← 30-day test dataset setup
 │   │   ├── test_data.py          ← Data contract (schema, ranges, SCI identity, regressor map)
 │   │   ├── test_forecasting.py   ← Chained forecasting validation
-│   │   ├── test_api.py           ← API contract (217 tests total, incl. carbon physical contracts)
-│   │   └── test_anomaly.py       ← Anomaly engine (point anomalies, patterns, leads)
+│   │   ├── test_api.py           ← API contract (293 tests total, incl. L.1801 + peak provisioning)
+│   │   ├── test_anomaly.py       ← Anomaly engine (point anomalies, patterns, leads)
+│   │   ├── test_physics.py       ← Physics formula contract (non-negativity, sMAPE validity)
+│   │   └── test_ensemble.py      ← Ensemble pure functions + integration contract
 │   ├── Dockerfile                ← Service image (Prophet + FastAPI, lightweight)
 │   ├── Dockerfile.test           ← Test image (service deps + pytest + httpx)
 │   ├── Dockerfile.analysis       ← Analysis image (full stack + TimesFM + PyTorch)
-│   ├── requirements.txt          ← Full deps (analysis + TimesFM)
 │   ├── requirements-service.txt  ← Lightweight deps (service only)
 │   ├── requirements-test.txt     ← Test deps (pytest + httpx)
 │   └── data/                     ← Generated CSV (gitignored, bind-mounted)
@@ -350,4 +330,4 @@ Downloading nvidia_cublas_cu12 ... 594.3 MB
 Let it finish. Subsequent `--build` calls reuse every cached layer and complete in ~10s.
 
 **`carbonEmissions` forecast looks flat**
-If TimesFM is unavailable (Prophet-only mode), the forecast falls back to Prophet with `carbonIntensityFactor` as a regressor. Ensure the `hf-cache` volume is intact for TimesFM routing.
+If formula components are unavailable and TimesFM is not loaded, the forecast falls back to Prophet with `carbonIntensityFactor` as a regressor. Ensure the `hf-cache` volume is intact for TimesFM routing.

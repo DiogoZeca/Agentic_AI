@@ -26,7 +26,6 @@ AIModel/analysis_output/
 
 # ─── Claude Code local settings ──────────────────────────────────────────────
 .claude/
-CLAUDE.md
 
 # ─── Environment / secrets ───────────────────────────────────────────────────
 .env
