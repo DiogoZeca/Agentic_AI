@@ -1,7 +1,7 @@
 """CPU Power Spike Prediction API.
 
-Loads cpu_data.dat at startup, fits a quadratic power model per CPU type,
-and serves spike predictions: given CPU% → predicted Power (W) + is_spike flag.
+Loads a pre-trained artefact at startup and serves spike predictions:
+given CPU% → predicted Power (W) + is_spike flag via O(1) lookup table.
 """
 from __future__ import annotations
 
@@ -14,12 +14,11 @@ from fastapi import FastAPI, Query
 from pydantic import BaseModel, Field
 
 from cpu_power_model import CpuPowerModel
-from data_loader import load_cpu_power_data
 
 log = logging.getLogger("cpu_power_api")
 logging.basicConfig(level=logging.INFO, format="%(levelname)-8s %(message)s")
 
-DATA_PATH = os.environ.get("DATA_PATH", "data/cpu_data.dat")
+MODELS_PATH = os.environ.get("MODELS_PATH", "models/winner.json")
 
 _model: Optional[CpuPowerModel] = None
 
@@ -35,8 +34,7 @@ def _require_model() -> CpuPowerModel:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _model
-    df = load_cpu_power_data(DATA_PATH)
-    _model = CpuPowerModel().fit(df)
+    _model = CpuPowerModel.load(MODELS_PATH)
     log.info("Model ready — %d CPU types", len(_model.available_types()))
     yield
 

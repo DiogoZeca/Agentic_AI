@@ -1,0 +1,79 @@
+{
+  "amd-opteron-2214": {
+    "idle_w": 187.78,
+    "full_w": 239.166,
+    "dynamic_range_w": 51.386,
+    "spike_threshold_w": 226.32,
+    "mean_std_w": 3.515
+  },
+  "intel-xeon": {
+    "idle_w": 156.67,
+    "full_w": 280.968,
+    "dynamic_range_w": 124.298,
+    "spike_threshold_w": 249.893,
+    "mean_std_w": 11.515
+  },
+  "intel-xeon-e5420": {
+    "idle_w": 145.02,
+    "full_w": 226.593,
+    "dynamic_range_w": 81.573,
+    "spike_threshold_w": 206.2,
+    "mean_std_w": 16.524
+  },
+  "intel-xeon-e5420-disk-raid0": {
+    "idle_w": 151.74,
+    "full_w": 236.0,
+    "dynamic_range_w": 84.26,
+    "spike_threshold_w": 214.935,
+    "mean_std_w": 7.487
+  },
+  "intel-xeon-e5420-ssd-noraid": {
+    "idle_w": 144.86,
+    "full_w": 219.146,
+    "dynamic_range_w": 74.286,
+    "spike_threshold_w": 200.574,
+    "mean_std_w": 10.37
+  },
+  "intel-xeon-e5420-ssd-raid0": {
+    "idle_w": 151.12,
+    "full_w": 229.33,
+    "dynamic_range_w": 78.21,
+    "spike_threshold_w": 209.778,
+    "mean_std_w": 9.745
+  },
+  "intel-xeon-e5520": {
+    "idle_w": 114.08,
+    "full_w": 211.49,
+    "dynamic_range_w": 97.41,
+    "spike_threshold_w": 187.137,
+    "mean_std_w": 18.831
+  },
+  "intel-xeon-x5355": {
+    "idle_w": 231.48,
+    "full_w": 368.29,
+    "dynamic_range_w": 136.81,
+    "spike_threshold_w": 334.087,
+    "mean_std_w": 12.866
+  },
+  "intel-xeon-x5550": {
+    "idle_w": 122.12,
+    "full_w": 235.009,
+    "dynamic_range_w": 112.889,
+    "spike_threshold_w": 206.786,
+    "mean_std_w": 21.302
+  },
+  "intel-xeon-x5650": {
+    "idle_w": 123.88,
+    "full_w": 258.618,
+    "dynamic_range_w": 134.738,
+    "spike_threshold_w": 224.934,
+    "mean_std_w": 12.797
+  },
+  "unknown": {
+    "idle_w": 116.12,
+    "full_w": 220.91,
+    "dynamic_range_w": 104.79,
+    "spike_threshold_w": 194.713,
+    "mean_std_w": 13.116
+  }
+}

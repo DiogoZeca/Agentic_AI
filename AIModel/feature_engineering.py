@@ -77,11 +77,20 @@ def build_features(
         dynamic_range_w   = full_w - idle_w
         spike_threshold_w = idle_w + _SPIKE_FRACTION * dynamic_range_w
 
+        # Weighted mean per-bucket std dev recovered from SUM2 (population variance).
+        # Used by cpu_power_model.py for ±2σ prediction intervals.
+        npts_arr  = group["NPTS"].values.astype(float)
+        avgs_arr  = group["AVGPOWER"].values.astype(float)
+        variance  = group["SUM2"].values / npts_arr - avgs_arr ** 2
+        std_devs  = np.sqrt(np.maximum(0.0, variance))
+        mean_std_w = float(np.average(std_devs, weights=npts_arr))
+
         metadata[cpu_type] = {
             "idle_w":            round(idle_w, 3),
             "full_w":            round(full_w, 3),
             "dynamic_range_w":   round(dynamic_range_w, 3),
             "spike_threshold_w": round(spike_threshold_w, 3),
+            "mean_std_w":        round(mean_std_w, 3),
         }
         df.loc[group.index, "idle_w"]          = idle_w
         df.loc[group.index, "dynamic_range_w"] = dynamic_range_w

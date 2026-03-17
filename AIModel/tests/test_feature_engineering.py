@@ -72,7 +72,7 @@ class TestOutputShapes:
         assert len(metadata) == 11
 
     def test_metadata_keys(self, metadata):
-        required_keys = {"idle_w", "full_w", "dynamic_range_w", "spike_threshold_w"}
+        required_keys = {"idle_w", "full_w", "dynamic_range_w", "spike_threshold_w", "mean_std_w"}
         for cpu_type, meta in metadata.items():
             assert set(meta.keys()) == required_keys, f"{cpu_type} missing keys"
 

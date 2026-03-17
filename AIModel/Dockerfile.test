@@ -5,7 +5,8 @@ WORKDIR /app
 COPY requirements-service.txt requirements-test.txt ./
 RUN pip install --no-cache-dir -r requirements-service.txt -r requirements-test.txt
 
-COPY api.py cpu_power_model.py data_loader.py feature_engineering.py ./
+COPY api.py cpu_power_model.py data_loader.py feature_engineering.py model_trainer.py train.py ./
+COPY models/ ./models/
 COPY tests/ ./tests/
 
 RUN mkdir -p data

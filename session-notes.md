@@ -1,7 +1,33 @@
-# Session Notes — Energy & Carbon Forecasting Pipeline
+# Session Notes — AI Forecasting Model for Predictive Scheduling
 
-**Last updated:** 2026-03-14
-**Status:** COMPLETE — 293 passed, 5 skipped (TimesFM-only tests, skipped in lightweight image)
+**Last updated:** 2026-03-16 (Pass 13)
+**Status:** Pivot complete — spike classifier is the primary goal, power model is legacy
+
+---
+
+## Project Purpose
+
+Build an AI model that **predicts CPU spikes before they happen** so a scheduler can act on future state rather than current state. The scheduler itself is out of scope — our job ends at producing good predictions.
+
+**Core goal:**
+Given a time series of real machine CPU usage, **predict when a CPU spike will occur** so a scheduler can act before it happens. Binary classification: *will there be a spike in the next N minutes?*
+
+**Training data:**
+- `cluster_cpu_data.csv` (Google Cluster Traces 2011) — **replaces `cpu_data.dat` as the primary dataset**
+  - 278M rows, 160 hours, 12,498 real datacenter machines, zero nulls
+  - Columns: start_time, end_time, machine_id, cpu_rate, max_cpu_rate, canonical_mem_usage, max_mem_usage, mean_disk_io_time, sample_portion
+- `cpu_data.dat` (SPECpower) — still exists, still used by the legacy power model only
+
+**Architecture decision (Pass 12):**
+- `cluster_cpu_data.csv` **replaces** `cpu_data.dat` as the primary training source for the new direction
+- The old power pipeline (data_loader, feature_engineering, model_trainer, train.py, cpu_power_model) is **legacy** — it answers "how many Watts at this CPU%?" which is not the scheduler's question. It stays intact but is not actively developed.
+- The spike classifier answers the actual question: "will this machine spike in the next N minutes?"
+- When the spike classifier is complete and deployed, the power pipeline will be retired
+
+**What is NOT our concern:**
+- The scheduler logic or its policies
+- Observability framework integration (Prometheus format is an optional convenience, not the goal)
+- Push/pull protocol to EVIDEN's stack (depends on answers they have not yet provided)
 
 ---
 
@@ -105,9 +131,9 @@ Formula first for `carbonEmissions` is validated. Routing `["formula", "timesfm"
 
 **`_fmt_pct` design:** 3-line helper using `math.isnan()` — defined in each analysis script independently (they are standalone scripts; a shared `utils.py` for one function would over-engineer). Demo blocks in model files use inline `math.isnan()` guard to avoid adding module-level symbols used only in `__main__`.
 
-### Pass 9 — HPA integration + L.1801 metadata (260 → 293 tests, +1 endpoint)
+### Pass 9 — Peak endpoint + L.1801 metadata (260 → 293 tests, +1 endpoint)
 
-Motivation: EVIDEN's core requirement is predictive scheduling. The critical gap was that `/metrics/prometheus` only exposed `yhat` (point forecast) — KEDA/HPA needed `yhat_upper` (conservative ceiling) to pre-provision before peaks arrive. Also surfaced ITU-T L.1801 compliance metadata as declared partial compliance.
+Added `/forecast/peak` returning `yhat_upper` as a conservative provisioning ceiling, confidence band, and peak hour — useful for any scheduler that needs a worst-case forecast. Also added ITU-T L.1801 compliance metadata to `/health` as a transparency declaration. Prometheus confidence bands (`yhat_upper`/`yhat_lower`) added alongside the existing `yhat`.
 
 | # | Enhancement | Implementation |
 |---|------------|---------------|
@@ -123,67 +149,317 @@ Motivation: EVIDEN's core requirement is predictive scheduling. The critical gap
 **API version:** bumped `0.2.0` → `0.3.0`.
 **33 new tests** across 4 new test classes: `TestPeakForecastEndpoint` (12), `TestPrometheusConfidenceBands` (7), `TestL1801Compliance` (6), `TestCarbonBreakdown` (8).
 
-**KEDA integration pattern** (now unblocked):
-```yaml
-# ScaledObject trigger — scrapes yhat_upper directly
-triggers:
-  - type: prometheus
-    metadata:
-      serverAddress: http://forecast-service:8000
-      metricName: ai_forecast_consumption_kwh_upper
-      query: ai_forecast_consumption_kwh_upper{horizon="1h",node="worker-01"}
-      threshold: "0.14"   # kWh/h threshold → triggers scale-up
+---
+
+### Pass 10 — CPU Power Spike ML Pipeline (Sub-system A, 0 → 109 tests)
+
+Built a complete 5-step ML pipeline for CPU power spike prediction using `cpu_data.dat` (SPECpower-style, 11 CPU types).
+
+| Step | Module | What it does |
+|------|--------|-------------|
+| 1 | `data_loader.py` | Validates cpu_data.dat schema (CPUTYPE, CPUPCT, NPTS, SUM, SUM2, AVGPOWER) |
+| 2 | `feature_engineering.py` | Isotonic smoothing per CPU type; computes idle_w, full_w, dynamic_range_w, spike_threshold_w, mean_std_w; 7 numeric features + CPUTYPE |
+| 3 | `model_trainer.py` | XGBoostPowerTrainer + MLPPowerTrainer; cv_interpolation (5-fold) + cv_loco (leave-one-CPU-out) |
+| 4 | `train.py` | CLI: trains both models, compares by interpolation RMSE, saves winner artefacts to `models/` |
+| 5 | `cpu_power_model.py` | `CpuPowerModel.load()` — 1,111-entry lookup table (11×101), isotonic post-processing, O(1) predict |
+
+**Key design decisions:**
+- XGBoost wins on interpolation RMSE (6.8 W vs MLP 21.4 W) — used as winner
+- MLP actually wins LOCO (26.2 W vs XGBoost 34.2 W) — XGBoost memorises CPU-type splits, MLP falls back to physics features
+- Full-batch gradient descent for MLP — avoids NPTS weight ratio issues (up to 2,587×)
+- Inference is a pre-computed lookup — no model forward pass at request time
+- `models/` artefacts committed to git; Docker COPY at build time (Option A)
+
+**Tests: 109 passed** across test_api.py (22), test_feature_engineering.py (55), test_model_trainer.py (90 module-wide), test_train.py (22).
+
+---
+
+### Pass 11 — Spike Classification Direction (pivot from LSTM)
+
+**Decision log:**
+- LSTM was built (cpu_forecaster.py) but rejected: too complex, sensitive to synthetic vs real data mismatch, doesn't directly answer the scheduler's question
+- The real question is binary: *will a spike occur in the next N minutes?* → classification, not regression
+- XGBoost classifier (already in codebase) is the right tool: handles tabular features, fast inference, interpretable, no GPU needed
+
+**Dataset: Google Cluster Traces 2011**
+
+Real CPU usage data from Google datacenters.
+
+- **Format:** `task_usage` table — one row per task per machine per ~5-minute window
+- **Columns used:** `start_time` (µs), `end_time` (µs), `job_id`, `task_index`, `machine_id`, `cpu_rate` (fraction of 1 CPU core, 0–1)
+- **Local sample:** `AIModel/data/part-00000-of-00500.csv.gz` (1 of 500 files, ~83 min of data, ~364 MB uncompressed)
+  - Download: `curl -O https://storage.googleapis.com/clusterdata-2011-2/task_usage/part-00000-of-00500.csv.gz`
+- **Full dataset (29 days):** available via Google BigQuery — practical for training, no local storage needed
+
+**BigQuery access (full trace):**
+```sql
+SELECT start_time, end_time, job_id, task_index, machine_id, cpu_rate
+FROM `google.com:google-cluster-data.clusterdata_2011_2.task_usage`
+WHERE start_time >= [START] AND end_time <= [END]
+LIMIT 1000
 ```
+
+**What the data looks like after aggregation:**
+- `cpu_rate` is per-task per machine — sum across all tasks per machine per minute → machine-level total CPU load
+- Values in [0, 1] range (fraction of a single core; multi-core machines can have totals > 1)
+- Spike threshold: ~90th percentile per machine (configurable)
+- 1 file = 12,478 unique machines, avg ~27 min coverage each
+
+**Planned approach (not yet implemented):**
+1. Load data (BigQuery or local files) → aggregate `cpu_rate` per machine per minute
+2. Define spike: `total_cpu > threshold` (configurable — e.g., per-machine 90th percentile)
+3. Build sliding-window features per machine time series:
+   - Lag values (last 5, 10, 15, 30 min)
+   - Rolling mean and std (5-min, 15-min windows)
+   - Rate of change (delta from prev minute)
+   - Time-of-day features (hour, day-of-week — cyclic encoding)
+4. Label: `spike_in_next_N_min` = 1 if any reading in [t+1, t+N] exceeds threshold
+5. Train XGBoost classifier — precision/recall tradeoff tunable via threshold on probability output
+6. Evaluate: recall is the primary metric (better to over-warn the scheduler than miss a spike)
+
+### Pass 13 — Prediction horizon + re-prediction interval decision
+
+**Decision: 60-minute prediction horizon, 30-minute re-prediction interval**
+
+| Parameter | Previous plan | Confirmed |
+|-----------|--------------|-----------|
+| Prediction horizon | 15 min (3 windows) | **60 min (12 windows)** |
+| Re-prediction interval | unspecified | **30 min (6 windows)** — my recommendation |
+| Lookback window | 1h (12 windows) | **2h (24 windows)** — 2× the horizon |
+| Label column | `spike_next_3` | **`spike_next_12`** |
+
+**Why 30-min re-prediction (not 60):**
+- 60-min re-predict with 60-min horizon = zero overlap. A spike forming at t+31 is invisible until it's already happening.
+- 30-min re-predict = 50% overlap. Any spike is always within the horizon of the most recent prediction, with at least 0–30 min lead time remaining.
+- Inference cost is negligible for XGBoost on tabular data.
+- Confirmed by literature: AWS/GCP/Azure autoscalers all re-predict at ≤ 50% of their horizon.
+
+**Why 2h lookback:**
+- Rule of thumb: lookback = 2× prediction horizon (common in time-series classification literature).
+- Captures slower-forming trends (job queue depth rising over 90 min before triggering a burst).
+- Extends lag features from t-5 to t-12, adds 24-window rolling stats.
+
+**Spike rate changes at 60-min horizon (important for `scale_pos_weight`):**
+- Single window rate at p90: ~10%
+- 12-window "any spike" rate: estimated **25-35%** (autocorrelation dampens the naive `1-0.9^12=72%`)
+- `scale_pos_weight` drops from ~9 to ~**2-3** — must be measured from actual data post-aggregation
+- Lower imbalance also means precision will be higher (less false-alarm pressure)
+
+**Literature precedent at 60-min binary classification:**
+- *Kraken (Google, 2020)*: resource spike prediction 1h ahead, gradient boosting + 2h lookback on Google cluster traces
+- *Protean (Microsoft Research, 2020)*: 1h-ahead peak CPU classification on Azure traces, Random Forest, recall-primary — achieves ~78% recall
+- *Autopilot (Google, 2020)*: workload prediction 60-min horizon, re-scheduled every 10 min
+
+Target: **Recall > 85%, Precision > 50%** on the test set.
+
+---
+
+### Pass 12 — Dataset confirmed + full implementation plan
+
+**Data confirmed (deep analysis of cluster_cpu_data.csv):**
+- 278,615,849 rows · 9 columns · zero nulls
+- Temporal coverage: 0.17 h → 160.0 h (exactly 160 hours = 6.7 days)
+- 12,498 unique machines — all with ≥ 20 five-minute windows (100%)
+- After aggregation: ~24M (machine, 5-min window) observations
+- Window duration: 89.2% are exactly 300s; 10.8% are short (1–16s) — task boundary artefacts, harmless
+- `sample_portion` = 0.0 for every row → drop this column entirely (no information content)
+- Corrupted rows: 194 with `cpu_rate > 1.0`, 922 with `max_cpu_rate > 10.0` → filter before aggregation
+
+**Dataset role clarified:**
+- `cluster_cpu_data.csv` **replaces `cpu_data.dat`** as the primary training source
+- The power pipeline (cpu_data.dat → XGBoost Watts predictor) is now **legacy**
+- All new development targets the spike classifier
+
+**Spike statistics at machine level (post-aggregation):**
+
+| Threshold | Spike rate |
+|-----------|-----------|
+| total_cpu > 0.5 | 1.42% |
+| p90 per machine (≈ 0.33) | 10.0% |
+| p95 per machine (≈ 0.41) | 5.0% |
+| p99 per machine (≈ 0.54) | 1.0% |
+
+Recommended: **p90 per machine** → 10% spike rate, manageable class imbalance (`scale_pos_weight=9`)
+
+---
+
+## Implementation Plan — Spike Classifier Pipeline
+
+### Files to create (4 modules + 1 CLI + 2 test files)
+
+| File | Role |
+|------|------|
+| `spike_preprocessor.py` | Reads raw CSV in chunks → aggregates to (machine, 5-min window) → writes clean parquet/CSV |
+| `spike_feature_engineer.py` | Builds sliding-window features + labels from aggregated data |
+| `spike_classifier.py` | XGBoost binary classifier wrapper (fit, predict_proba, evaluate, save, load) |
+| `train_spike_classifier.py` | CLI orchestrating all three steps end-to-end |
+| `tests/test_spike_preprocessor.py` | Unit tests for preprocessor |
+| `tests/test_spike_classifier.py` | Unit tests for classifier (fit/predict/save/load/evaluate) |
+
+---
+
+### Step 1 — `spike_preprocessor.py`
+
+**Input:** `data/cluster_cpu_data.csv` (278M rows, task-level)
+
+**What it does (chunk by chunk, never loads full file):**
+1. Drop `sample_portion` column (zero information)
+2. Filter corrupted rows: `cpu_rate <= 1.0` AND `max_cpu_rate <= 10.0`
+3. Assign 5-min bucket: `bucket = floor(start_time / 300_000_000)`
+4. Aggregate per `(machine_id, bucket)`:
+   - `sum(cpu_rate)` → `total_cpu` — total machine CPU load
+   - `max(max_cpu_rate)` → `peak_cpu` — worst single task in window
+   - `sum(canonical_mem_usage)` → `total_mem` — total memory pressure
+   - `max(max_mem_usage)` → `peak_mem` — peak memory pressure
+   - `mean(mean_disk_io_time)` → `disk_io` — I/O pressure
+   - `count()` → `n_tasks` — active task count (diversity signal)
+5. Convert bucket back to `time_us = bucket × 300_000_000` for interpretability
+
+**Output:** `data/cluster_agg.parquet` (~few hundred MB, fits in RAM for feature engineering)
+
+---
+
+### Step 2 — `spike_feature_engineer.py`
+
+**Input:** aggregated parquet from Step 1
+
+**Per-machine processing:**
+1. Sort by time bucket
+2. Compute per-machine p90 of `total_cpu` → this machine's spike threshold
+3. For each window at time t, build feature vector from the previous **24 windows (2h lookback)**:
+
+| Feature group | Features |
+|--------------|---------|
+| CPU lags | `total_cpu` at t-1 through t-12 (every 5-min step for 1h) |
+| CPU rolling | mean, std, max over last 3, 6, 12, **24** windows |
+| CPU trend | rate of change (t-1 minus t-2), linear slope over **12** windows |
+| Distance to threshold | `total_cpu[t-1] / machine_p90` — relative proximity to spike boundary |
+| Memory | `total_mem` at t-1, rolling mean/std over 6 and **12** windows |
+| Disk I/O | `disk_io` at t-1, rolling mean over 6 windows |
+| Task count | `n_tasks` at t-1 |
+| Time | hour-of-day as sin/cos, day-of-week as sin/cos |
+
+4. **Label:** `spike_next_12 = 1` if `total_cpu > threshold` at ANY of [t+1 … t+12] → **60 min advance warning**
+   - Re-prediction every **30 min** (6 windows): ensures 50% overlap, always a fresh prediction in scope
+5. Drop first **24** and last **12** rows per machine (insufficient lookback history or unlabellable)
+
+**Train/val/test split: by time, not randomly**
+- First 70% of time buckets → train
+- Next 15% → validation
+- Last 15% → test
+- Prevents future leakage: model never trains on data from a time it should not have seen
+
+**Output:** `(X_train, y_train, X_val, y_val, X_test, y_test)` as numpy arrays or parquet files
+
+---
+
+### Step 3 — `spike_classifier.py`
+
+XGBoost binary classifier, same design pattern as `model_trainer.py`:
+
+**Key parameters:**
+- `scale_pos_weight = ?` — measured from data after aggregation (60-min horizon spike rate ~25-35% → expected ~2-3, vs 9 at 15-min)
+- `eval_metric = ["logloss", "auc"]`
+- Early stopping on validation AUC
+- Probability threshold at inference: **default 0.4** (tunable — lower = more recall)
+- Target: **Recall > 85%, Precision > 50%** on held-out test set
+
+**`evaluate()` returns:**
+
+| Metric | Why |
+|--------|-----|
+| AUC-ROC | threshold-independent overall quality |
+| Precision @ 0.4 | fraction of alarms that are real spikes |
+| Recall @ 0.4 | fraction of spikes that were caught (**primary metric**) |
+| F1 @ 0.4 | balance |
+| Alarms/day | operational cost to the scheduler |
+
+**`save()` / `load()`:** writes `spike_model.json` (XGBoost booster) + `spike_config.json` (threshold, feature names, training metadata)
+
+---
+
+### Step 4 — `train_spike_classifier.py` (CLI)
+
+```
+python train_spike_classifier.py
+python train_spike_classifier.py --fast           # 10% sample, for iteration
+python train_spike_classifier.py --threshold 0.4  # recall/precision tradeoff
+```
+
+**Fixed parameters (not CLI flags — decided and documented):**
+- Horizon: 12 windows (60 min)
+- Re-prediction interval: 6 windows (30 min)
+- Lookback: 24 windows (2h)
+
+Orchestrates Steps 1–3, prints comparison table, saves artefact to `models/spike/`.
 
 ---
 
 ## Open Questions (requires EVIDEN answers)
 
-- Which observability framework? (Prometheus? Grafana? Custom?)
-- Push format/protocol? (HTTP POST? Prometheus remote-write? OTLP?)
-- What metrics and granularity are collected at their end?
-- Real data connector: currently reads synthetic CSV — no live telemetry ingestion path
+- What format/protocol does EVIDEN expect predictions in?
+- What metrics and granularity does Thanos collect at their end?
+- What does "deploy the model elsewhere" look like — same API container, library import, or something else?
+- Is there a required latency budget for predictions (real-time inference vs pre-computed)?
 
 ---
 
 ## Architecture Snapshot (current)
 
+Two independent sub-systems in `AIModel/`:
+
+### Sub-system A — CPU Power Spike Prediction (XGBoost + MLP)
+
+Predicts instantaneous CPU power (Watts) and flags spikes given CPU%.
+Training data: `cpu_data.dat` (SPECpower-style, 11 CPU types, 1,002 rows).
+Model artefacts committed to `models/` — loaded at API startup, no training at runtime.
+
+```
+Pipeline (5 steps):
+  data_loader.py           schema validation for cpu_data.dat
+  feature_engineering.py   isotonic smoothing, per-CPU constants, 7 numeric features
+  model_trainer.py         XGBoostPowerTrainer + MLPPowerTrainer, cv_interpolation, cv_loco
+  train.py                 CLI: trains both models, picks winner by interpolation RMSE
+  cpu_power_model.py       CpuPowerModel.load() — O(1) lookup table (11×101 pre-computed)
+
+API (4 endpoints, FastAPI):
+  GET /health              liveness + available CPU types
+  GET /predict             (cpu_pct, cpu_type) → power_w, is_spike, bounds
+  POST /predict/batch      batch variant
+  GET /models              per-CPU-type constants
+
+Tests (109 passed):
+  test_api.py              API contract (22 tests)
+  test_feature_engineering.py  feature pipeline (55 tests)
+  test_model_trainer.py    trainer + CV (90 tests)  [actually 90 in module]
+  test_train.py            CLI smoke tests (22 tests)
+
+Current winner: XGBoost  (6.8 W RMSE interpolation CV)
+```
+
+### Sub-system B — Energy & Carbon Forecasting (Prophet + TimesFM)
+
+Forecasts time-series metrics (kWh/h, kgCO2e/h, SCI) up to 168 h ahead.
+Training data: synthetic CSV (8,760 hourly rows, 15 columns) — will be replaced by Thanos feed.
+Detects anomalies and finds optimal low-carbon scheduling windows.
+
 ```
 Modules (11):
-  data_generator.py        synthetic CSV (8,760 rows, 15 columns)
+  data_generator.py        synthetic CSV
   data_loader.py           schema validation + PipelineConfig
-                           raises FileNotFoundError / ValueError (not sys.exit)
   model_base.py            ForecasterBase ABC
   prophet_model.py         EnergyProphet(ForecasterBase)
   timesfm_model.py         EnergyTimesFM(ForecasterBase)
-  physics_constraint.py    derive_carbon_emissions(), evaluate_formula_accuracy()
-  model_registry.py        MODEL_ROUTING, get_best_model_key()
-  ensemble_model.py        EnsembleForecaster (Prophet + TimesFM residual)
-                           get_test_predictions() → public API for analysis scripts
+  physics_constraint.py    carbonEmissions = E × CIF + 0.002
+  model_registry.py        MODEL_ROUTING — formula → TimesFM → Prophet
+  ensemble_model.py        EnsembleForecaster (Prophet + TimesFM residual correction)
   anomaly_detector.py      detect_point_anomalies(), find_recurring_patterns()
-  api.py                   FastAPI, 10 endpoints, per-node state isolation, L.1801 metadata
-  carbon_analysis.py       analysis script + formula vs TimesFM comparison table
-                           _fmt_pct() helper for NaN-safe % display
-  ensemble_analysis.py     3-way comparison script (Prophet / TimesFM / Ensemble)
-                           _fmt_pct() helper; uses get_test_predictions() public API
+  api.py                   FastAPI, 10 endpoints, per-node state isolation
+  carbon_analysis.py / ensemble_analysis.py   analysis + comparison scripts
 
 Tests (293 passed, 5 skipped):
-  test_data.py             data contract (schema, value ranges, SCI identity)
-  test_forecasting.py      chained Prophet regressor (zero-fill vs chained)
-  test_api.py              API contract + peak endpoint + Prometheus bands + L.1801 metadata
-  test_anomaly.py          anomaly engine (Prophet-free, synthetic forecasts)
-  test_physics.py          physics formula contract (8 tests)
-  test_ensemble.py         ensemble pure functions (21 tests) + contract (5 skipped)
-
-Requirements:
-  requirements-service.txt  prophet, pandas, numpy, fastapi, uvicorn
-  requirements-test.txt     pytest, httpx
-  requirements-analysis.txt prophet + timesfm + matplotlib + plotly (analysis image only)
-
-Docker images:
-  Dockerfile               API service (Prophet + TimesFM + all 11 modules)
-  Dockerfile.test          Lightweight test image (no TimesFM/PyTorch)
-  Dockerfile.analysis      Analysis image (COPY *.py ./), uses requirements-analysis.txt
+  test_data.py / test_forecasting.py / test_api.py
+  test_anomaly.py / test_physics.py / test_ensemble.py
 ```
 
 ## API Endpoints (10 total)

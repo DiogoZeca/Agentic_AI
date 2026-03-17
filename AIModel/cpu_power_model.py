@@ -1,21 +1,27 @@
-"""CPU power model — quadratic regression trained on cpu_data.dat.
+"""CPU power model — loads a trained ML artefact and serves predictions via O(1) lookup.
 
-Maps (cpu_type, cpu_pct) → Power (Watts) with spike detection.
-Falls back to the 'unknown' model when an unrecognised CPU type is given.
+At startup, CpuPowerModel.load() reads the winner manifest, loads the winning
+trainer artefact (XGBoost or MLP), pre-computes all 1 111 predictions
+(11 CPU types × 101 cpu_pct values), applies isotonic post-processing to enforce
+physical monotonicity, and stores everything in an in-memory dict.
+
+Request-time prediction is a pure dict lookup — no model forward pass overhead.
 """
 from __future__ import annotations
 
+import json
+import math
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LinearRegression
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import PolynomialFeatures
+from sklearn.isotonic import IsotonicRegression
 
-# A reading is a spike when its predicted power is in the top 25% of the
-# CPU's dynamic range (idle → full load).
-_SPIKE_FRACTION = 0.75
+from model_trainer import MLPPowerTrainer, XGBoostPowerTrainer
+
+# Lookup grid: integer cpu_pct values that match the training data resolution.
+_PCT_GRID: list[int] = list(range(101))   # 0, 1, 2, ..., 100
 
 
 @dataclass(frozen=True)
@@ -30,81 +36,156 @@ class PowerPrediction:
 
 
 class CpuPowerModel:
-    """Per-CPU-type quadratic model: Power(W) = f(CPU%).
+    """Inference-only CPU power model loaded from a trained artefact.
 
-    Fit using NPTS as sample weights so high-observation buckets
-    (e.g. idle and full-load) dominate the regression.
-    Uncertainty bounds use the real per-bucket std dev recovered from SUM2.
+    Usage
+    -----
+        model = CpuPowerModel.load("models/winner.json")
+        pred  = model.predict(cpu_pct=75.0, cpu_type="intel-xeon-e5420")
+
+    Design
+    ------
+    - load()         reads winner.json, loads the winning trainer + metadata.json
+    - _build_lookup  runs one batch forward pass → isotonic smoothing → dict
+    - predict()      is a pure (cpu_type, int(round(cpu_pct))) dict lookup
     """
 
     def __init__(self) -> None:
-        self._models: dict[str, Pipeline] = {}
-        self._stats: dict[str, dict] = {}
+        self._lookup:   dict[tuple[str, int], PowerPrediction] = {}
+        self._metadata: dict[str, dict] = {}
 
-    # ── Training ───────────────────────────────────────────────────────────────
+    # ── Factory ────────────────────────────────────────────────────────────────
 
-    def fit(self, df: pd.DataFrame) -> "CpuPowerModel":
-        for cpu_type, group in df.groupby("CPUTYPE"):
-            group = group.sort_values("CPUPCT")
-            X = group[["CPUPCT"]].values.astype(float)
-            y = group["AVGPOWER"].values.astype(float)
-            weights = group["NPTS"].values.astype(float)
+    @classmethod
+    def load(cls, manifest_path: str | Path) -> "CpuPowerModel":
+        """Load the winner artefact and build the full prediction lookup table.
 
-            model = Pipeline([
-                ("poly", PolynomialFeatures(degree=2, include_bias=True)),
-                ("reg", LinearRegression()),
-            ])
-            model.fit(X, y, reg__sample_weight=weights)
-            self._models[cpu_type] = model
+        Parameters
+        ----------
+        manifest_path : path to winner.json produced by train.py
+        """
+        manifest_path = Path(manifest_path)
+        with open(manifest_path) as f:
+            manifest = json.load(f)
 
-            # Idle and full-load power from measured data (prefer direct lookup
-            # over the polynomial extrapolation at the boundaries).
-            pcts = group["CPUPCT"].values
-            avgs = group["AVGPOWER"].values
-            idle_w = float(avgs[pcts == 0][0]) if 0 in pcts else float(model.predict([[0]])[0])
-            full_w = float(avgs[pcts == 100][0]) if 100 in pcts else float(model.predict([[100]])[0])
+        model_dir  = manifest_path.parent / manifest["dir"]
+        model_name = manifest["model"]
 
-            # Weighted mean std dev recovered from SUM2 (population variance).
-            npts = group["NPTS"].values.astype(float)
-            variance = group["SUM2"].values / npts - avgs ** 2
-            std_devs = np.sqrt(np.maximum(0.0, variance))
-            mean_std_w = float(np.average(std_devs, weights=npts))
+        if model_name == "xgboost":
+            trainer: XGBoostPowerTrainer | MLPPowerTrainer = XGBoostPowerTrainer.load(model_dir)
+        elif model_name == "mlp":
+            trainer = MLPPowerTrainer.load(model_dir)
+        else:
+            raise ValueError(f"Unknown model name in manifest: {model_name!r}")
 
-            self._stats[cpu_type] = {
-                "idle_w": round(idle_w, 3),
-                "full_w": round(full_w, 3),
-                "mean_std_w": round(mean_std_w, 3),
-                "spike_threshold_w": round(idle_w + _SPIKE_FRACTION * (full_w - idle_w), 3),
-            }
+        metadata_path = manifest_path.parent / "metadata.json"
+        with open(metadata_path) as f:
+            metadata: dict[str, dict] = json.load(f)
 
-        return self
+        inst = cls()
+        inst._metadata = metadata
+        inst._lookup   = cls._build_lookup(trainer, metadata)
+        return inst
 
     # ── Inference ──────────────────────────────────────────────────────────────
 
     def predict(self, cpu_pct: float, cpu_type: str = "unknown") -> PowerPrediction:
-        if cpu_type not in self._models:
+        """Return a PowerPrediction for the given cpu_pct and cpu_type.
+
+        Unknown cpu_types fall back silently to "unknown".
+        Fractional cpu_pct values are rounded to the nearest integer
+        (training data resolution = 1 percentage point).
+        """
+        if cpu_type not in self._metadata:
             cpu_type = "unknown"
-
-        model = self._models[cpu_type]
-        stats = self._stats[cpu_type]
-
-        power_w = float(model.predict([[cpu_pct]])[0])
-        std = stats["mean_std_w"]
-
-        return PowerPrediction(
-            cpu_type=cpu_type,
-            cpu_pct=cpu_pct,
-            power_w=round(power_w, 3),
-            power_lower_w=round(max(0.0, power_w - 2 * std), 3),
-            power_upper_w=round(power_w + 2 * std, 3),
-            is_spike=power_w >= stats["spike_threshold_w"],
-            spike_threshold_w=stats["spike_threshold_w"],
-        )
+        pct_key = int(round(min(max(float(cpu_pct), 0.0), 100.0)))
+        return self._lookup[(cpu_type, pct_key)]
 
     # ── Metadata ───────────────────────────────────────────────────────────────
 
     def available_types(self) -> list[str]:
-        return sorted(self._models.keys())
+        return sorted(self._metadata.keys())
 
     def stats(self, cpu_type: str) -> dict:
-        return dict(self._stats.get(cpu_type, {}))
+        """Return the 4 per-CPU-type constants exposed by the /models endpoint.
+
+        Returns only the API contract keys — extra metadata fields (e.g.
+        dynamic_range_w) are intentionally omitted to keep the response stable.
+        """
+        meta = self._metadata.get(cpu_type, {})
+        return {k: meta[k] for k in ("idle_w", "full_w", "spike_threshold_w", "mean_std_w") if k in meta}
+
+    # ── Private ────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _build_lookup(
+        trainer: XGBoostPowerTrainer | MLPPowerTrainer,
+        metadata: dict[str, dict],
+    ) -> dict[tuple[str, int], PowerPrediction]:
+        """Pre-compute predictions for every (cpu_type, cpu_pct) pair.
+
+        Steps
+        -----
+        1. Build an 1 111-row feature DataFrame (11 types × 101 pct values)
+           in the exact column layout expected by both trainers.
+        2. Run a single batch forward pass — one predict_power() call.
+        3. Reshape to (n_types, 101) for per-type isotonic post-processing.
+        4. Isotonic regression enforces physical monotonicity: power must never
+           decrease as CPU% increases. Small XGBoost tree reversals are fixed here.
+        5. Store as (cpu_type, pct_int) → PowerPrediction.
+        """
+        cpu_types = sorted(metadata.keys())
+        n_pcts    = len(_PCT_GRID)
+
+        # ── Step 1: feature matrix ─────────────────────────────────────────────
+        rows: list[dict] = []
+        for cpu_type in cpu_types:
+            meta        = metadata[cpu_type]
+            idle_w      = meta["idle_w"]
+            dyn_range_w = meta["dynamic_range_w"]
+            for pct in _PCT_GRID:
+                p = float(pct)
+                rows.append({
+                    "cpu_pct":         p,
+                    "cpu_pct_sq":      p * p,
+                    "cpu_pct_cube":    p * p * p,
+                    "sqrt_cpu_pct":    math.sqrt(p),
+                    "log_cpu_pct":     math.log1p(p),
+                    "idle_w":          idle_w,
+                    "dynamic_range_w": dyn_range_w,
+                    "CPUTYPE":         cpu_type,
+                })
+        X = pd.DataFrame(rows)
+
+        # ── Step 2: single batch forward pass ──────────────────────────────────
+        raw_preds = trainer.predict_power(X)   # shape: (n_types × n_pcts,)
+
+        # ── Step 3: reshape ────────────────────────────────────────────────────
+        raw_matrix = raw_preds.reshape(len(cpu_types), n_pcts)
+
+        # ── Steps 4 + 5: isotonic smoothing + dict construction ────────────────
+        isotonic  = IsotonicRegression(increasing=True, out_of_bounds="clip")
+        pcts_arr  = np.array(_PCT_GRID, dtype=float)
+        lookup: dict[tuple[str, int], PowerPrediction] = {}
+
+        for i, cpu_type in enumerate(cpu_types):
+            meta              = metadata[cpu_type]
+            spike_threshold_w = meta["spike_threshold_w"]
+            mean_std_w        = meta["mean_std_w"]
+
+            # Enforce monotonicity; clip to physical floor (power ≥ 0)
+            smooth = np.maximum(0.0, isotonic.fit_transform(pcts_arr, raw_matrix[i]))
+
+            for j, pct in enumerate(_PCT_GRID):
+                power_w = float(round(smooth[j], 3))
+                lookup[(cpu_type, pct)] = PowerPrediction(
+                    cpu_type          = cpu_type,
+                    cpu_pct           = float(pct),
+                    power_w           = power_w,
+                    power_lower_w     = round(max(0.0, power_w - 2.0 * mean_std_w), 3),
+                    power_upper_w     = round(power_w + 2.0 * mean_std_w, 3),
+                    is_spike          = power_w >= spike_threshold_w,
+                    spike_threshold_w = spike_threshold_w,
+                )
+
+        return lookup

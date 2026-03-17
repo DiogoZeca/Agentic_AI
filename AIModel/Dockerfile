@@ -5,7 +5,8 @@ WORKDIR /app
 COPY requirements-service.txt .
 RUN pip install --no-cache-dir -r requirements-service.txt
 
-COPY api.py cpu_power_model.py data_loader.py ./
+COPY api.py cpu_power_model.py data_loader.py feature_engineering.py model_trainer.py train.py ./
+COPY models/ ./models/
 
 # cpu_data.dat is bind-mounted from the host at runtime
 RUN mkdir -p data

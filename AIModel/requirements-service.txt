@@ -1,5 +1,9 @@
 pandas>=2.0.0
 numpy>=1.24.0
 scikit-learn>=1.4.0
+xgboost>=2.0.0
+# CPU-only torch wheel (~200 MB vs ~2 GB for CUDA)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.0.0
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
