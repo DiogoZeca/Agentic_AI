@@ -1,6 +1,6 @@
 # Session Notes — AI Forecasting Model for Predictive Scheduling
 
-**Last updated:** 2026-03-16 (Pass 13)
+**Last updated:** 2026-03-18 (Pass 23)
 **Status:** Pivot complete — spike classifier is the primary goal, power model is legacy
 
 ---
@@ -217,6 +217,325 @@ LIMIT 1000
 5. Train XGBoost classifier — precision/recall tradeoff tunable via threshold on probability output
 6. Evaluate: recall is the primary metric (better to over-warn the scheduler than miss a spike)
 
+### Pass 18 — end_time retained for duration-weighted total_cpu
+
+**Correction:** `end_time` is NOT dropped in the preprocessor — it is used to compute duration-weighted `total_cpu`.
+
+**Why:** `cpu_rate` is a mean rate over each task's measurement window (`end_time - start_time`). A boundary artefact row (2s window, cpu_rate=0.5) uses 0.5 cores for 2 seconds, not 300 seconds. Summing raw `cpu_rate` over-counts short-window tasks by up to 150×.
+
+**Fix:** `total_cpu = sum(cpu_rate × (end_time - start_time)) / 300_000_000`
+
+- `weighted_cpu = cpu_rate × (end_time - start_time)` computed before dropping `end_time`
+- Accumulated additively in pass 1, re-summed in pass 2 (two-pass safe)
+- Divided by `_BUCKET_US` after the second pass
+- `peak_cpu` stays as `max(max_cpu_rate)` — peak rate is meaningful even for a 2-second burst
+
+`end_time` does not appear in the output — it is consumed to produce `total_cpu` and then dropped.
+
+---
+
+### Pass 19 — Step 1 complete: test_spike_preprocessor.py (26 tests)
+
+Wrote the full test suite for `spike_preprocessor.py` — the first step of the CPU spike prediction pipeline.
+
+**Test structure:**
+
+| Class | Tests | What it verifies |
+|-------|-------|-----------------|
+| `TestValidateSchema` | 2 | Valid CSV passes; missing column raises |
+| `TestProcessChunk` | 4 | cpu_rate>64 filtered; cpu_rate=1.5 kept; partial cols returned; empty after total filter |
+| `TestOutputColumns` | 2 | Column list exact; sorted by machine+bucket |
+| `TestOutputTypes` | 5 | machine_id/bucket/time_us→int64; n_tasks→int32; float cols→float32 |
+| `TestOutputValues` | 8 | Boundary merge total_cpu=0.504; n_tasks=3; peak_cpu=0.9; single-window=1.0; multi-core=1.5; filtered row gone; large machine_id stored; time_us=bucket×300M |
+| `TestParquetOutput` | 2 | File written; roundtrip matches |
+| `TestErrors` | 2 | Missing input raises; all-filtered → empty parquet with correct schema |
+
+**Bug fixed during test writing:** `test_multi_core_cpu_rate_kept` initially asserted `len(m1) == 1` but machine=1 has two rows in chunk 1 (bucket=2 boundary artefact AND bucket=5 multi-core). Fixed by adding `& (partial["bucket"] == 5)` to the filter.
+
+**Key synthetic data values (verified by hand):**
+- `(m=1, bkt=2)`: `total_cpu = (0.3×300M + 0.2×300M + 0.6×2M) / 300M ≈ 0.504` — spans both chunks
+- `peak_cpu = max(0.5, 0.9, 0.8) = 0.9`
+- `(m=1, bkt=5)`: `total_cpu = 1.5` — multi-core, kept because filter threshold is 64, not 1
+
+**`pyarrow` not installed:** tests failed with `ImportError: pyarrow is required`. Fixed with `.venv/bin/python3 -m pip install pyarrow`.
+
+**Test count after Pass 19:** 26 tests (spike pipeline only, separate from AIModel API suite)
+
+---
+
+### Pass 20 — Step 2 complete: spike_feature_engineer.py + test_spike_feature_engineer.py (33 tests)
+
+Built the feature engineering step. Takes `cluster_agg.parquet` (output of Step 1) and produces labeled feature parquets.
+
+**Key design decisions:**
+
+**Gap filling with 0:** Idle machines have no rows in the aggregated data. Reindexing to a contiguous bucket range and filling with `0.0` before computing rolling features is physically correct (no tasks = zero CPU). Using `ffill()` or `bfill()` would propagate stale readings across idle periods — wrong.
+
+**O(n) prefix-sum spike labeling:** Instead of `O(n×horizon)` nested loops:
+```python
+cs = (total_cpu > threshold).cumsum()
+future_sums[i] = cs[i + 1 + horizon] - cs[i + 1]
+```
+Assigns label 1 if any of the next `horizon` buckets exceed the threshold.
+
+**Per-machine `_engineer_machine` flow:**
+1. Reindex to contiguous bucket range, mark `_original=True` for real rows
+2. Fill gaps with 0.0
+3. Compute lags (1,2,3,6,12,24), EWMA (half-lives 6,24), delta, task_dominance on full series
+4. Return full series with `_original` flag (labels applied to full series, then filter back)
+
+**Threshold leakage prevention:** p95 computed only on `bucket <= train_max`. Machines absent from training receive global p95 fallback.
+
+**`cpu_vs_p95` placement:** Computed in `engineer()` after concat, not inside `_engineer_machine`, to keep the per-machine function signature clean:
+```python
+thresh_mapped = final["machine_id"].map(thresholds).fillna(1.0)
+final["cpu_vs_p95"] = np.where(thresh_mapped > 0, final["total_cpu"] / thresh_mapped, 0.0).astype("float32")
+```
+
+**Feature columns (`_FEATURE_COLS`, 21 total):**
+machine_id, bucket, time_us, total_cpu, peak_cpu, total_mem, peak_mem, disk_io, n_tasks,
+cpu_lag_1/2/3/6/12/24, cpu_ewma_6/24, cpu_delta_1, task_dominance, cpu_vs_p95, spike_in_60m
+
+**Test classes:**
+
+| Class | Tests | Key assertions |
+|-------|-------|---------------|
+| `TestEngineerMachineGaps` | 4 | Full series has all buckets 1–7; `_original` flag correct; lag_1 at bucket 5 = 0 (not carry-forward); lag_3 at bucket 5 = 0.4 (reaches back to bucket 2) |
+| `TestTaskDominance` | 2 | Idle rows = 0; active rows = peak_cpu/total_cpu |
+| `TestAddLabel` | 4 | 1 when future exceeds; 0 when no future spike; NaN for last 12 rows; valid label count = n − horizon |
+| `TestComputeThresholds` | 4 | Train-only threshold < full-data threshold; fallback for missing machine; all machines covered |
+| `TestCpuVsP95` | 4 | Above 1.0 at spike bucket; below 1.0 at normal bucket; non-negative everywhere; consistent with thresholds file |
+| `TestEngineerOutputSchema` | 8 | Columns match spec; types correct; no NaN in features; NaN only in last-horizon spike_in_60m |
+| `TestEngineerE2E` | 7 | Files written; machine count; row count; no feature NaN; spike rate > 0; train/test split by bucket |
+
+---
+
+### Pass 21 — Step 3 complete: spike_classifier.py + test_spike_classifier.py (26 tests)
+
+Built the XGBoost spike classifier — the learning step of the pipeline.
+
+**Key design decisions:**
+
+**`min_child_weight=1` (not 10):** Research confirmed that `min_child_weight=10` discards minority-class leaf nodes entirely for rare-event data. With ~30% positive rate, every leaf should be allowed to form from a single sample if needed.
+
+**Companion `.meta.json`:** XGBoost's `save_model()` does not preserve feature names in the JSON format. A `.meta.json` file is saved alongside the model containing `feature_cols` and `xgboost_version`. `load()` reads both files and raises `FileNotFoundError` for each independently.
+
+**Threshold calibration (no leakage):** `find_threshold()` scans `np.arange(0.05, 1.0, 0.05)`, returns the F1-optimal threshold on whichever dataset it's called with. `train()` calls it on training data only — never test data.
+
+**`average_precision_score` guard:** `sklearn.metrics.average_precision_score` returns `0.0` (not `ValueError`) when all labels are 0. Guard is `if len(np.unique(y_vals)) < 2: pr_auc = float("nan")` — not try/except.
+
+**`_X_COLS` (17 features):**
+total_cpu, peak_cpu, total_mem, peak_mem, disk_io, n_tasks,
+cpu_lag_1/2/3/6/12/24, cpu_ewma_6/24, cpu_delta_1, task_dominance, cpu_vs_p95
+
+**`train()` return dict (15 keys):**
+```
+train_rows, test_rows, train_bucket_max,
+spike_rate_train, spike_rate_test, scale_pos_weight,
+pr_auc, roc_auc,                          # threshold-independent
+precision, recall, f1,                    # at default 0.5
+optimal_threshold,                        # from find_threshold on train data
+precision_calibrated, recall_calibrated, f1_calibrated  # at optimal threshold
+```
+
+**Test classes:**
+
+| Class | Tests | Key assertions |
+|-------|-------|---------------|
+| `TestSpikeClassifierFit` | 6 | fit returns self; predict_proba shape/range; machine_id/bucket/time_us NOT in _X_COLS |
+| `TestSpikeClassifierEvaluate` | 7 | 6 keys including "threshold"; default=0.5; custom threshold; metrics in [0,1]; one-class → NaN AUC; find_threshold float in (0,1); lower threshold → higher recall |
+| `TestSpikeClassifierSaveLoad` | 6 | model file; meta file; meta contains feature_cols; load restores predictions; missing file errors |
+| `TestTrainFunction` | 7 | all 15 keys; optimal_threshold in range; test buckets > train buckets; scale_pos_weight matches; files written; error handling |
+
+---
+
+### Pass 22 — Full pipeline review (online analysis, 9 issues identified)
+
+Before continuing to Step 4, conducted a full online analysis of all code written so far. 9 issues identified across 3 priority levels:
+
+**HIGH priority (3 — fixed in Pass 23):**
+1. **`cpu_vs_p95` feature missing** — `_X_COLS` in `spike_classifier.py` was missing `cpu_vs_p95`. The feature is computed in `spike_feature_engineer.py` and written to the parquet but never used by the model. Machine-relative normalisation is the key insight from Google Autopilot research — without it, raw absolute lags mean different things for different machines.
+2. **Threshold calibration missing** — fixed 0.5 threshold for imbalanced data is misleading. PR-AUC is threshold-independent but reported metrics (precision/recall/F1) are meaningless at 0.5 without also reporting calibrated values. Added `find_threshold()` and dual-reporting in `train()`.
+3. **`average_precision_score` on all-zero labels** — returns `0.0` silently, not an exception. Test was expecting the result to be NaN but model returned 0.0 without error. Fixed with explicit `n_classes < 2` guard.
+
+**MEDIUM priority (4 — acknowledged, deferred to Step 4):**
+4. **Walk-forward validation** — single 80/20 split gives one metric estimate; walk-forward CV with 3 rolling splits is more reliable. Deferred to Step 4 CLI with `--walk-forward` flag.
+5. **Time-of-day features missing** — bucket number is present but raw bucket index is not cyclic. Hour-of-day sin/cos encoding (from `time_us`) would improve recall for workloads with strong diurnal patterns. Deferred.
+6. **Feature importance audit** — no code to print XGBoost feature importances after training. Needed for model interpretability and to verify `cpu_vs_p95` is actually used. Add to Step 4 CLI output.
+7. **`scale_pos_weight` computed from train split only** — correct, but the ratio is not logged alongside the threshold table, making it hard to debug class imbalance. Add to Step 4 output.
+
+**LOW priority (2 — noted, no action required):**
+8. **XGBoost JSON model files are not human-readable** — acceptable. The `.meta.json` provides enough auditability.
+9. **No model versioning** — no timestamp or pipeline run ID in the model artefacts. Acceptable for current scope.
+
+---
+
+### Pass 23 — Fixes applied: cpu_vs_p95 + threshold calibration
+
+Applied the two HIGH-priority fixes from Pass 22.
+
+**Fix 1 — `cpu_vs_p95` added to `_X_COLS` in `spike_classifier.py`**
+
+Added `"cpu_vs_p95"` to `_X_COLS`. Updated `_make_X()` in `test_spike_classifier.py` to sample it from `[0, 2]` (realistic range: values below 1 = below threshold, above 1 = above threshold). Updated `_make_features_df()` to compute it as `cpu[b-1] / 0.6`.
+
+`_X_COLS` is now 17 features (was 16).
+
+**Fix 2 — Threshold calibration added to `SpikeClassifier`**
+
+Added `find_threshold(X, y) -> float` method: scans `np.arange(0.05, 1.0, 0.05)`, returns F1-optimal threshold on training data.
+
+Updated `evaluate(X, y, threshold=0.5)`: now accepts threshold parameter, includes `"threshold"` key in the returned dict (6 keys total).
+
+Updated `train()`: calls `find_threshold` on training data, calls `evaluate()` twice (at 0.5 and at optimal threshold), returns 15-key flat dict.
+
+Updated tests in `TestSpikeClassifierEvaluate` to assert 6 returned keys, verify `threshold` key equals the value passed in, and verify `find_threshold` returns a float in `(0, 1)`.
+
+Updated `TestTrainFunction` to assert all 15 expected keys.
+
+**Fix 3 — `average_precision_score` NaN guard**
+
+Replaced try/except with explicit check: `if len(np.unique(y_vals)) < 2: pr_auc = float("nan")`. Same pattern applied to `roc_auc`.
+
+**Test counts after Pass 23:**
+
+| File | Tests |
+|------|-------|
+| `tests/test_spike_preprocessor.py` | 26 |
+| `tests/test_spike_feature_engineer.py` | 33 |
+| `tests/test_spike_classifier.py` | 26 |
+| **Total (spike pipeline)** | **86** |
+
+---
+
+### Pass 17 — Full plan review after node-level confirmation
+
+**Result: plan is structurally sound. Two targeted changes made.**
+
+**Change 1 — Added `task_dominance` feature**
+`peak_cpu[t-1] / total_cpu[t-1]` — fraction of node CPU consumed by its single busiest task. A node dominated by one task (dominance → 1) is at higher spike risk: if that task grows, the entire node saturates. A load spread across many small tasks (dominance → 0) is more stable. This is only meaningful at node level — at app or task level it doesn't exist. Directly computable from already-aggregated columns; no new data needed.
+
+**Change 2 — disk_io aggregation changed from `mean` to `max`**
+`mean(mean_disk_io_time)` across tasks masks node-level I/O pressure. One I/O-saturated task with nine idle tasks produces a fine-looking mean. `max(mean_disk_io_time)` captures the worst bottleneck on the node, which is the right signal for predicting node stress. Updated in both Step 1 (aggregation) and Step 2 (feature table).
+
+**Everything else confirmed valid at node level:**
+- Aggregation: `sum(cpu_rate)` per `(machine_id, bucket)` = correct node-level total
+- Label: `total_cpu > p90_per_machine` = node saturation, correct question for scheduler
+- Time features: valid — datacenters have daily/weekly workload patterns at node level
+- Memory features: `sum(canonical_mem_usage)` per machine = correct node-level total
+- EWMA, rolling stats, lags: all node-level, all correct
+- Split strategy, evaluation metrics, training config: unchanged
+
+**Updated feature count: ~43 features** (was ~41, added task_dominance + changed disk_io from 1 to 1 column = net +1)
+
+---
+
+### Pass 16 — Node vs App level + cpu_rate filter correction
+
+**Prediction granularity: Node level (confirmed)**
+
+The question "app level vs node level" is answered by both the data and EVIDEN's requirements:
+
+- **Data**: aggregating `sum(cpu_rate)` per `(machine_id, bucket)` gives total CPU load on one physical server — node-level by definition. App-level would require tracking `(job_id, bucket)` — different aggregation, different feature structure, different problem.
+- **EVIDEN's words**: "scheduling policies based on the future state of **the nodes**" — unambiguous. The scheduler asks "is this node safe for a new workload?", not "which app is misbehaving?"
+- **Observability stack**: Prometheus/node_exporter reports at machine granularity. This is what feeds EVIDEN's framework.
+
+Our existing aggregation plan is correct.
+
+**Bug fix: `cpu_rate > 1.0` filter was wrong**
+
+Pass 12 flagged "194 corrupted rows with `cpu_rate > 1.0`". This was a misidentification.
+
+The download script documents `cpu_rate` as "fraction of 1 core, 0–1+". The `+` is intentional — a task using 2 CPU cores has `cpu_rate = 2.0`. This is valid on multi-core machines (Google 2011 machines had 4–32 cores). Filtering `cpu_rate > 1.0` would silently drop all multi-threaded tasks and make every machine look artificially idle during training. Same reasoning applies to `max_cpu_rate > 10.0`.
+
+**Corrected filter:** remove the `cpu_rate <= 1.0` and `max_cpu_rate <= 10.0` filters. Only filter physically impossible values: `cpu_rate > 64` (more cores than any plausible 2011 server). Values in 1–20 range are normal multi-threaded workloads.
+
+---
+
+### Pass 15 — Implementation review: six gaps resolved before coding
+
+**Decisions confirmed:**
+- Pandas two-pass chunking (no DuckDB): correct, no new dependency, handles boundary groups.
+- Write feature splits to disk: correct, allows re-running training without redoing 15-min feature engineering step.
+
+**Six gaps identified and resolved:**
+
+**1. `pyarrow` missing from `requirements-service.txt`**
+Parquet read/write requires pyarrow. Not in current requirements, not auto-installed on slim images. Add `pyarrow>=12.0.0` to `requirements-service.txt`.
+
+**2. `.gitignore` missing large data files**
+Current `.gitignore` covers `*.csv` but not parquet files. Must add before any `git add`:
+- `AIModel/data/*.parquet`
+- `AIModel/data/features/`
+- `AIModel/data/*.progress`
+
+**3. Intermediate file locations defined**
+```
+AIModel/data/
+├── cluster_cpu_data.csv         raw, 23 GB, git-ignored
+├── cluster_agg.parquet          preprocessed, ~300 MB, git-ignored
+└── features/
+    ├── train.parquet            ~2.8 GB, git-ignored
+    ├── val.parquet              ~600 MB, git-ignored
+    ├── test.parquet             ~600 MB, git-ignored
+    └── meta.json                feature names, p90 per machine, split cutoffs, spike rate — git-ignored
+```
+
+**4. CLI must cache intermediate outputs**
+`train_spike_classifier.py` checks if outputs exist before running each step:
+- `cluster_agg.parquet` exists → skip preprocessing
+- `features/train.parquet` exists → skip feature engineering
+- Training always runs (it's the fast, experimental step)
+- `--force` flag re-runs everything from scratch
+
+**5. Per-machine p90 thresholds must be persisted for inference**
+The p90 spike threshold computed per machine during feature engineering is needed at inference time (to compute the `distance_to_threshold` feature for new data). Save it in `features/meta.json` during Step 2, then copy into `models/spike/spike_config.json` in Step 3. Unknown machines at inference → use global p90 fallback.
+
+**6. CLI prints threshold selection table on val set**
+Before saving the model, print a table across thresholds [0.2, 0.3, 0.4, 0.5, 0.6]:
+`Threshold | Recall | Precision | F1 | Alarms/day`
+User selects threshold; it's saved in `spike_config.json`. This makes the recall/precision tradeoff visible and learnable.
+
+**Note on XGBoost (not a neural network):**
+XGBoost is gradient-boosted decision trees, not a neural network. It trains in minutes on CPU, needs no GPU, and is fully interpretable via feature importances. It was chosen because gradient boosting on tabular features matches or beats LSTMs for binary classification — a well-studied result. The MLP in the existing codebase is a neural network; the spike classifier is not.
+
+---
+
+### Pass 14 — External research validation + plan corrections
+
+**Research findings (datacenter workload ML literature + production systems):**
+
+**Model choice — XGBoost confirmed, LightGBM noted as alternative.**
+XGBoost is the dominant approach for binary spike/failure classification on datacenter traces. Google 2011 trace papers: XGBoost achieves ~94% accuracy, F1=93.1% on job failure prediction. Microsoft Resource Central (Azure production system, SOSP 2017): gradient boosting + RF for workload classification. LightGBM is a viable alternative (leaf-wise growth = faster training at equivalent AUC) — relevant if 24M-row feature matrix becomes slow to train. Not using LSTM: research confirms gradient boosting on tabular lag features matches or beats LSTM for binary classification; LSTM is appropriate only for regression time-series forecasting.
+
+**Feature engineering — two gaps identified in our plan:**
+1. **EWMA features are missing.** Google Autopilot (EuroSys 2020) uses exponentially weighted moving averages with half-lives of 12h and 48h. This smooths noisy spikes and gives the model a "trend anchor" beyond raw rolling means. Should be added: EWMA of `total_cpu` with half-life = 6 windows (30 min) and 24 windows (2h).
+2. **First-difference (delta) is missing.** `total_cpu[t-1] - total_cpu[t-2]` — the first derivative of CPU load. Appears in every tabular time-series paper reviewed. Captures acceleration/deceleration into a spike boundary. Must add.
+
+**Evaluation — PR-AUC should be added.**
+When class imbalance is high, ROC-AUC is optimistically biased (the large true-negative pool inflates TPR/FPR curves). PR-AUC (precision-recall area) is the recommended supplement for imbalanced classification. Should be reported alongside ROC-AUC.
+
+**Cross-validation — Walk-forward CV noted as more rigorous.**
+For final hyperparameter tuning, sklearn's `TimeSeriesSplit` (expanding window) is more rigorous than a single 70/15/15 split. However it is also much slower. Plan: use 70/15/15 for initial experiments and the `--fast` mode; optionally run TimeSeriesSplit on final hyperparameter search.
+
+**Threshold tuning — confirm as a post-training step.**
+Research confirms that threshold calibration on the validation set is the most reliably top-performing imbalance strategy (stronger than SMOTE in most comparisons). Plan already includes a `--threshold` CLI flag; the CLI should also print the precision-recall curve on val so the user can pick a good threshold manually.
+
+**Plan status after research validation:**
+
+| Decision | Status | Notes |
+|----------|--------|-------|
+| XGBoost binary classifier | ✅ Confirmed | Production-proven on this exact data type |
+| 70/15/15 chronological split | ✅ Confirmed | De facto standard in all reviewed papers |
+| scale_pos_weight + threshold tuning | ✅ Confirmed | Most common + most reliable imbalance strategy |
+| Recall as primary metric | ✅ Confirmed | Consensus in scheduling / alert systems |
+| 60-min horizon, 30-min re-predict | ✅ Confirmed | Consistent with production systems (Autopilot, Resource Central) |
+| 2h lookback (24 windows) | ✅ Confirmed | Consistent with Autopilot's 12h EWMA and literature |
+| EWMA features | ⚠️ **ADD** — missing from plan | Google Autopilot uses half-life 12h; we'll use 30-min + 2h |
+| Delta (first-difference) | ⚠️ **ADD** — missing from plan | Appears in every tabular time-series paper reviewed |
+| PR-AUC metric | ⚠️ **ADD** — missing from plan | Preferred over ROC-AUC at high imbalance |
+
+---
+
 ### Pass 13 — Prediction horizon + re-prediction interval decision
 
 **Decision: 60-minute prediction horizon, 30-minute re-prediction interval**
@@ -263,7 +582,7 @@ Target: **Recall > 85%, Precision > 50%** on the test set.
 - After aggregation: ~24M (machine, 5-min window) observations
 - Window duration: 89.2% are exactly 300s; 10.8% are short (1–16s) — task boundary artefacts, harmless
 - `sample_portion` = 0.0 for every row → drop this column entirely (no information content)
-- Corrupted rows: 194 with `cpu_rate > 1.0`, 922 with `max_cpu_rate > 10.0` → filter before aggregation
+- ~~Corrupted rows: 194 with `cpu_rate > 1.0`, 922 with `max_cpu_rate > 10.0`~~ → **corrected in Pass 16**: these are valid multi-core measurements, not corrupted. `cpu_rate` is fraction of 1 core, so multi-threaded tasks legitimately exceed 1.0. Only filter `cpu_rate > 64` (physically impossible).
 
 **Dataset role clarified:**
 - `cluster_cpu_data.csv` **replaces `cpu_data.dat`** as the primary training source
@@ -285,16 +604,18 @@ Recommended: **p90 per machine** → 10% spike rate, manageable class imbalance 
 
 ## Implementation Plan — Spike Classifier Pipeline
 
-### Files to create (4 modules + 1 CLI + 2 test files)
+### Files to create / modify
 
-| File | Role |
-|------|------|
-| `spike_preprocessor.py` | Reads raw CSV in chunks → aggregates to (machine, 5-min window) → writes clean parquet/CSV |
-| `spike_feature_engineer.py` | Builds sliding-window features + labels from aggregated data |
-| `spike_classifier.py` | XGBoost binary classifier wrapper (fit, predict_proba, evaluate, save, load) |
-| `train_spike_classifier.py` | CLI orchestrating all three steps end-to-end |
-| `tests/test_spike_preprocessor.py` | Unit tests for preprocessor |
-| `tests/test_spike_classifier.py` | Unit tests for classifier (fit/predict/save/load/evaluate) |
+| File | Change | Role |
+|------|--------|------|
+| `spike_preprocessor.py` | new | Reads raw CSV in chunks → two-pass aggregation → writes `cluster_agg.parquet` |
+| `spike_feature_engineer.py` | new | Builds lag/rolling/EWMA features + labels → writes `data/features/` parquets + `meta.json` |
+| `spike_classifier.py` | new | XGBoost wrapper: fit, predict_proba, evaluate, save, load |
+| `train_spike_classifier.py` | new | CLI: caches intermediate outputs, prints threshold table, saves `models/spike/` |
+| `tests/test_spike_preprocessor.py` | new | Unit tests with tiny synthetic CSV |
+| `tests/test_spike_classifier.py` | new | Unit tests with tiny synthetic feature matrix |
+| `requirements-service.txt` | update | Add `pyarrow>=12.0.0` |
+| `.gitignore` | update | Add `AIModel/data/*.parquet`, `AIModel/data/features/`, `AIModel/data/*.progress` |
 
 ---
 
@@ -304,18 +625,26 @@ Recommended: **p90 per machine** → 10% spike rate, manageable class imbalance 
 
 **What it does (chunk by chunk, never loads full file):**
 1. Drop `sample_portion` column (zero information)
-2. Filter corrupted rows: `cpu_rate <= 1.0` AND `max_cpu_rate <= 10.0`
-3. Assign 5-min bucket: `bucket = floor(start_time / 300_000_000)`
-4. Aggregate per `(machine_id, bucket)`:
-   - `sum(cpu_rate)` → `total_cpu` — total machine CPU load
-   - `max(max_cpu_rate)` → `peak_cpu` — worst single task in window
-   - `sum(canonical_mem_usage)` → `total_mem` — total memory pressure
-   - `max(max_mem_usage)` → `peak_mem` — peak memory pressure
-   - `mean(mean_disk_io_time)` → `disk_io` — I/O pressure
-   - `count()` → `n_tasks` — active task count (diversity signal)
-5. Convert bucket back to `time_us = bucket × 300_000_000` for interpretability
+2. Filter physically impossible outliers only: `cpu_rate > 64` → drop (actual max in data ≈ 0.55, filter removes nothing in practice but is a safety net)
+3. Compute `window_duration = end_time - start_time` per row (µs)
+4. Compute duration-weighted CPU: `weighted_cpu = cpu_rate × window_duration` (before dropping end_time)
+5. Drop `end_time` (consumed; not needed after step 4)
+6. Assign 5-min bucket: `bucket = floor(start_time / 300_000_000)`
+7. Aggregate per `(machine_id, bucket)`:
+   - `sum(weighted_cpu)` → intermediate `weighted_cpu_sum` (additive, two-pass safe)
+   - `max(max_cpu_rate)` → `peak_cpu` — worst single task peak rate (no weighting: a 2s task that peaked at 5 cores is still a real stress signal)
+   - `sum(canonical_mem_usage)` → `total_mem`
+   - `max(max_mem_usage)` → `peak_mem`
+   - `max(mean_disk_io_time)` → `disk_io`
+   - `count()` → `n_tasks`
+8. After pass 2: `total_cpu = weighted_cpu_sum / 300_000_000` — true average CPU load across full 5-min window
+9. Convert bucket back to `time_us = bucket × 300_000_000`
+
+**Why duration-weighted `total_cpu` (Pass 18 correction):**
+`cpu_rate` is a *mean rate* during each task's measurement window. A task boundary artefact (2-second window, cpu_rate=0.5) uses the CPU for 2s, not 300s. Summing raw rates conflates these. Duration weighting: `total_cpu = sum(cpu_rate × duration) / 300M` gives the true average node CPU load over the full window. 10.8% of rows are short windows — without weighting, high-activity periods (when many tasks start/end) are artificially inflated, which would corrupt the spike threshold and labels.
 
 **Output:** `data/cluster_agg.parquet` (~few hundred MB, fits in RAM for feature engineering)
+**Note:** this file is git-ignored. If it already exists, the CLI skips this step.
 
 ---
 
@@ -328,28 +657,34 @@ Recommended: **p90 per machine** → 10% spike rate, manageable class imbalance 
 2. Compute per-machine p90 of `total_cpu` → this machine's spike threshold
 3. For each window at time t, build feature vector from the previous **24 windows (2h lookback)**:
 
-| Feature group | Features |
-|--------------|---------|
-| CPU lags | `total_cpu` at t-1 through t-12 (every 5-min step for 1h) |
-| CPU rolling | mean, std, max over last 3, 6, 12, **24** windows |
-| CPU trend | rate of change (t-1 minus t-2), linear slope over **12** windows |
-| Distance to threshold | `total_cpu[t-1] / machine_p90` — relative proximity to spike boundary |
-| Memory | `total_mem` at t-1, rolling mean/std over 6 and **12** windows |
-| Disk I/O | `disk_io` at t-1, rolling mean over 6 windows |
-| Task count | `n_tasks` at t-1 |
-| Time | hour-of-day as sin/cos, day-of-week as sin/cos |
+| Feature group | Features | Node-level rationale |
+|--------------|---------|---------------------|
+| CPU lags | `total_cpu` at t-1 through t-12 | Recent total node CPU load history |
+| CPU rolling | mean, std, max over last 3, 6, 12, 24 windows | Load trend and volatility across windows |
+| CPU delta | `total_cpu[t-1] - total_cpu[t-2]` | Is the node accelerating toward saturation? |
+| CPU EWMA | half-life 6 windows (30 min) and 24 windows (2h) | Smooth trend anchor, suppresses noise |
+| CPU trend | linear slope over 12 windows | Sustained upward drift signal |
+| Distance to threshold | `total_cpu[t-1] / machine_p90` | How close is this node to its spike boundary? |
+| Task dominance | `peak_cpu[t-1] / total_cpu[t-1]` | **Node-level only**: if one task owns most of the node, spike risk is higher; if load is spread across many tasks, more stable. Computable from existing aggregated columns. |
+| Memory | `total_mem` at t-1, rolling mean/std over 6 and 12 windows | Total node memory pressure |
+| Disk I/O | `max(mean_disk_io_time)` at t-1, rolling mean over 6 windows | Worst I/O bottleneck on node (max more meaningful than mean at node level — a single IO-starved task indicates node pressure) |
+| Task count | `n_tasks` at t-1 | More concurrent tasks = more variability |
+| Time | hour-of-day as sin/cos, day-of-week as sin/cos | Daily/weekly workload patterns (batch jobs overnight, interactive peaks during business hours) |
 
 4. **Label:** `spike_next_12 = 1` if `total_cpu > threshold` at ANY of [t+1 … t+12] → **60 min advance warning**
    - Re-prediction every **30 min** (6 windows): ensures 50% overlap, always a fresh prediction in scope
 5. Drop first **24** and last **12** rows per machine (insufficient lookback history or unlabellable)
 
-**Train/val/test split: by time, not randomly**
-- First 70% of time buckets → train
-- Next 15% → validation
-- Last 15% → test
-- Prevents future leakage: model never trains on data from a time it should not have seen
+**Train/val/test split: by global time bucket, not row index**
+- Split cutoff computed on all unique time buckets (not per-machine)
+- First 70% of bucket range → train, next 15% → val, last 15% → test
+- p90 threshold computed on train period only (not full dataset — prevents test-set leakage into threshold)
+- Features computed on full dataset before split; split applied after (so val rows get correct lookback from train period)
 
-**Output:** `(X_train, y_train, X_val, y_val, X_test, y_test)` as numpy arrays or parquet files
+**Output written to disk** (`data/features/`):
+- `train.parquet`, `val.parquet`, `test.parquet` — features + label column
+- `meta.json` — feature column names, p90 per machine (dict), global p90 fallback, split cutoff values, spike rate per split
+- All git-ignored. If these files exist, the CLI skips this step.
 
 ---
 
@@ -368,30 +703,41 @@ XGBoost binary classifier, same design pattern as `model_trainer.py`:
 
 | Metric | Why |
 |--------|-----|
-| AUC-ROC | threshold-independent overall quality |
-| Precision @ 0.4 | fraction of alarms that are real spikes |
-| Recall @ 0.4 | fraction of spikes that were caught (**primary metric**) |
-| F1 @ 0.4 | balance |
-| Alarms/day | operational cost to the scheduler |
+| Recall @ threshold | fraction of spikes caught — **primary metric** |
+| Precision @ threshold | fraction of alarms that are real (controls false alarm rate) |
+| F1 @ threshold | harmonic balance |
+| AUC-ROC | threshold-independent ranking quality |
+| PR-AUC | precision-recall area — preferred over ROC-AUC at high imbalance (ROC is optimistically biased when negative class is huge) |
+| Alarms/day | operational cost: how many alerts the scheduler receives |
 
-**`save()` / `load()`:** writes `spike_model.json` (XGBoost booster) + `spike_config.json` (threshold, feature names, training metadata)
+**`save()` / `load()`:** writes `models/spike/model.ubj` (XGBoost booster) + `models/spike/spike_config.json` containing:
+- feature names list (must match at inference or raise error)
+- p90 threshold per machine + global p90 fallback (copied from features/meta.json)
+- classification threshold (default 0.4, user-selected from val table)
+- scale_pos_weight used, training date, XGBoost version, val metrics
 
 ---
 
 ### Step 4 — `train_spike_classifier.py` (CLI)
 
 ```
-python train_spike_classifier.py
-python train_spike_classifier.py --fast           # 10% sample, for iteration
-python train_spike_classifier.py --threshold 0.4  # recall/precision tradeoff
+python train_spike_classifier.py             # full run
+python train_spike_classifier.py --fast      # 10% of machines (random_state=42), for iteration
+python train_spike_classifier.py --force     # re-run all steps even if outputs exist
+python train_spike_classifier.py --threshold 0.4  # set inference threshold explicitly
 ```
 
-**Fixed parameters (not CLI flags — decided and documented):**
-- Horizon: 12 windows (60 min)
-- Re-prediction interval: 6 windows (30 min)
-- Lookback: 24 windows (2h)
+**Fixed parameters (not CLI flags):** horizon=12 windows, lookback=24 windows.
 
-Orchestrates Steps 1–3, prints comparison table, saves artefact to `models/spike/`.
+**CLI execution order with caching:**
+1. If `cluster_agg.parquet` missing → run preprocessor; else skip
+2. If `features/train.parquet` missing → run feature engineer; else skip
+3. Always run training (fast, experimental)
+4. Print threshold selection table on val set (thresholds 0.2–0.6)
+5. Save model + spike_config.json to `models/spike/`
+6. Print final metrics table (train/val/test)
+
+**`--fast` mode:** samples 10% of unique machine_ids after preprocessing (not 10% of rows). Preserves per-machine time series structure. Full preprocessing still runs; sampling happens at feature engineering step.
 
 ---
 

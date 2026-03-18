@@ -21,6 +21,11 @@ build/
 # ─── Generated data (re-create with: python AIModel/data_generator.py) ──────
 AIModel/data/*.csv
 
+# ─── Spike classifier — large intermediate files (re-create with train_spike_classifier.py) ──
+AIModel/data/*.parquet
+AIModel/data/features/
+AIModel/data/*.progress
+
 # ─── Generated charts (re-create with: python AIModel/carbon_analysis.py) ───
 AIModel/analysis_output/
 
