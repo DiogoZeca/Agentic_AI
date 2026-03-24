@@ -1,0 +1,26 @@
+# Virtual environment — never copy into image
+.venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Training data and artifacts — mounted at runtime, not baked into image
+data/
+
+# Editors and OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Logs
+*.log
+nohup.out
+
+# Git
+.git/
+.gitignore

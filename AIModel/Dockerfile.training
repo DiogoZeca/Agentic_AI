@@ -1,0 +1,43 @@
+# ── Spike Prediction Training Image ──────────────────────────────────────────
+#
+#   Build and run (from Agentic_AI/):
+#     docker compose --profile train run --rm --build train
+#
+#   Or standalone:
+#     docker build -f AIModel/Dockerfile.training -t spike-train AIModel/
+#     docker run --rm -v $(pwd)/AIModel/data:/app/data spike-train
+#
+#   The data directory is bind-mounted — the CSV input and the output artifacts
+#   are both written to the host filesystem.
+#
+#   Environment variables (all optional — match train_spike_classifier.py CLI):
+#     DATA_PATH       path to input CSV inside container (default: data/cluster_cpu_data.csv)
+#     ARTIFACTS_DIR   output directory for trained artifacts  (default: data/full_run)
+#     OPTUNA_TRIALS   number of Optuna hyperparameter trials  (default: 30)
+# ──────────────────────────────────────────────────────────────────────────────
+
+FROM python:3.12-slim
+
+# libgomp1 is required by XGBoost (OpenMP runtime)
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements-train.txt .
+RUN pip install --no-cache-dir -r requirements-train.txt
+
+# Copy all source files needed for training
+COPY train_spike_classifier.py spike_classifier.py spike_feature_engineer.py spike_preprocessor.py ./
+
+RUN mkdir -p data/full_run
+
+ENV DATA_PATH=data/cluster_cpu_data.csv
+ENV ARTIFACTS_DIR=data/full_run
+ENV OPTUNA_TRIALS=30
+
+CMD python -u train_spike_classifier.py \
+    --data-path  "$DATA_PATH" \
+    --artifacts-dir "$ARTIFACTS_DIR" \
+    --tune-hyperparams \
+    --optuna-trials "$OPTUNA_TRIALS"

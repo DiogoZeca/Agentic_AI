@@ -1,0 +1,8 @@
+xgboost==3.2.0
+pandas==3.0.0
+numpy==2.4.2
+scikit-learn==1.8.0
+scipy==1.17.0
+pyarrow==23.0.1
+fastapi==0.129.0
+uvicorn[standard]==0.41.0

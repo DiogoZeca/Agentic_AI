@@ -4,7 +4,7 @@ Fixtures
 --------
 clf_data
     200-row synthetic DataFrame with all _X_COLS columns and a binary
-    spike_in_60m label (~30 % positive rate).  Used for unit tests of
+    severity_in_60m label (3-class).  Used for unit tests of
     SpikeClassifier directly (no parquet I/O, no time-split logic).
 
 features_parquet
@@ -31,7 +31,10 @@ from spike_classifier import (
     _TRAIN_RATIO,
     _VAL_RATIO,
     _X_COLS,
+    _BINARY_MONOTONE,
+    _BINARY_MONOTONE_STR,
     SpikeClassifier,
+    BinarySpikeClassifier,
     train,
 )
 
@@ -57,13 +60,11 @@ def _make_X(n: int = _N_ROWS) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
-def _make_y(n: int = _N_ROWS, positive_rate: float = 0.30) -> pd.Series:
-    """Binary labels with ~30 % positive rate."""
+def _make_y(n: int = _N_ROWS) -> pd.Series:
+    """3-class severity labels: ~70% no_spike, ~20% moderate, ~10% severe."""
     rng = np.random.default_rng(1)
-    return pd.Series(
-        (rng.uniform(size=n) < positive_rate).astype("int8"),
-        name="spike_in_60m",
-    )
+    vals = rng.choice([0, 1, 2], size=n, p=[0.70, 0.20, 0.10]).astype("int8")
+    return pd.Series(vals, name="severity_in_60m")
 
 
 def _make_features_df(n_machines: int = _N_MACHINES, n_buckets: int = _N_BUCKETS) -> pd.DataFrame:
@@ -76,14 +77,18 @@ def _make_features_df(n_machines: int = _N_MACHINES, n_buckets: int = _N_BUCKETS
             label: float
             if b > n_buckets - 12:
                 label = float("nan")    # last 12 buckets per machine → NaN
+            elif cpu[b - 1] > 0.75:
+                label = 2.0             # severe
+            elif cpu[b - 1] > 0.5:
+                label = 1.0             # moderate
             else:
-                label = float(cpu[b - 1] > 0.6)
+                label = 0.0             # no_spike
 
             row = {
                 "machine_id": m,
                 "bucket":     b,
                 "time_us":    b * 300_000_000,
-                "spike_in_60m": label,
+                "severity_in_60m": label,
             }
             for col in _X_COLS:
                 if col == "total_cpu":
@@ -148,7 +153,12 @@ class TestSpikeClassifierFit:
     def test_predict_proba_shape(self, fitted_clf, clf_data):
         X, _ = clf_data
         out  = fitted_clf.predict_proba(X)
-        assert out.shape == (len(X),)
+        assert out.shape == (len(X), 3)
+
+    def test_predict_proba_rows_sum_to_one(self, fitted_clf, clf_data):
+        X, _ = clf_data
+        out  = fitted_clf.predict_proba(X)
+        np.testing.assert_allclose(out.sum(axis=1), 1.0, atol=1e-5)
 
     def test_predict_proba_in_unit_interval(self, fitted_clf, clf_data):
         X, _ = clf_data
@@ -172,42 +182,32 @@ class TestSpikeClassifierEvaluate:
     def test_evaluate_returns_all_keys(self, fitted_clf, clf_data):
         X, y   = clf_data
         result = fitted_clf.evaluate(X, y)
-        assert set(result.keys()) == {"threshold", "pr_auc", "roc_auc", "precision", "recall", "f1"}
-
-    def test_evaluate_default_threshold_is_half(self, fitted_clf, clf_data):
-        X, y = clf_data
-        assert fitted_clf.evaluate(X, y)["threshold"] == pytest.approx(0.5)
-
-    def test_evaluate_respects_custom_threshold(self, fitted_clf, clf_data):
-        X, y = clf_data
-        assert fitted_clf.evaluate(X, y, threshold=0.3)["threshold"] == pytest.approx(0.3)
+        assert set(result.keys()) == {
+            "macro_pr_auc", "pr_auc_class_0", "pr_auc_class_1", "pr_auc_class_2",
+            "macro_roc_auc", "weighted_f1", "macro_f1",
+            "alarm_threshold", "alarm_precision", "alarm_recall",
+        }
 
     def test_evaluate_metrics_in_unit_interval(self, fitted_clf, clf_data):
         X, y   = clf_data
         result = fitted_clf.evaluate(X, y)
         for key, val in result.items():
-            assert 0.0 <= val <= 1.0, f"{key} = {val} is outside [0, 1]"
+            if not np.isnan(val):
+                assert 0.0 <= val <= 1.0, f"{key} = {val} is outside [0, 1]"
 
     def test_evaluate_all_one_class_returns_nan_auc(self, fitted_clf, clf_data):
         """When test set has only one class, AUC metrics must be NaN, not raise."""
         X, _ = clf_data
         y_one_class = pd.Series(np.zeros(len(X), dtype="int8"))
         result = fitted_clf.evaluate(X, y_one_class)
-        assert np.isnan(result["pr_auc"])
-        assert np.isnan(result["roc_auc"])
+        assert np.isnan(result["macro_pr_auc"])
+        assert np.isnan(result["macro_roc_auc"])
 
-    def test_find_threshold_returns_float_in_range(self, fitted_clf, clf_data):
+    def test_find_alarm_threshold_returns_float_in_range(self, fitted_clf, clf_data):
         X, y   = clf_data
-        thresh = fitted_clf.find_threshold(X, y)
+        thresh = fitted_clf.find_alarm_threshold(X, y)
         assert isinstance(thresh, float)
         assert 0.0 < thresh < 1.0
-
-    def test_find_threshold_affects_precision_recall_tradeoff(self, fitted_clf, clf_data):
-        """A lower threshold should increase recall (fewer missed spikes)."""
-        X, y = clf_data
-        high_thresh_result = fitted_clf.evaluate(X, y, threshold=0.9)
-        low_thresh_result  = fitted_clf.evaluate(X, y, threshold=0.1)
-        assert low_thresh_result["recall"] >= high_thresh_result["recall"]
 
 
 class TestSpikeClassifierSaveLoad:
@@ -259,26 +259,25 @@ class TestTrainFunction:
         expected  = {
             "train_rows", "val_rows", "test_rows",
             "train_bucket_max", "val_bucket_max",
-            "spike_rate_train", "spike_rate_val", "spike_rate_test",
-            "scale_pos_weight",
+            "class_rates_train", "class_rates_val", "class_rates_test",
             # threshold-independent
-            "pr_auc", "roc_auc",
-            # at default 0.5 threshold (test set)
-            "precision", "recall", "f1",
-            # at F1-optimal threshold calibrated on val, reported on test
-            "optimal_threshold",
-            "precision_calibrated", "recall_calibrated", "f1_calibrated",
+            "macro_pr_auc", "macro_roc_auc",
+            "pr_auc_class_0", "pr_auc_class_1", "pr_auc_class_2",
+            # alarm threshold calibrated on val, reported on test
+            "alarm_threshold",
+            "alarm_precision", "alarm_recall",
+            "weighted_f1", "macro_f1",
         }
         assert expected == set(result.keys())
 
-    def test_optimal_threshold_in_range(self, train_result):
+    def test_alarm_threshold_in_range(self, train_result):
         result, _ = train_result
-        assert 0.0 < result["optimal_threshold"] < 1.0
+        assert 0.0 < result["alarm_threshold"] < 1.0
 
     def test_splits_are_strictly_ordered_by_bucket(self, features_parquet):
         """Verify the 3-way time-based split: train < val < test (no overlap)."""
         df         = pd.read_parquet(features_parquet)
-        df         = df[df["spike_in_60m"].notna()]
+        df         = df[df["severity_in_60m"].notna()]
         bucket_max = int(df["bucket"].max())
         train_max  = int(bucket_max * _TRAIN_RATIO)
         val_max    = int(bucket_max * (_TRAIN_RATIO + _VAL_RATIO))
@@ -289,17 +288,6 @@ class TestTrainFunction:
         assert val_bkts.min()   >  train_max
         assert val_bkts.max()   <= val_max
         assert test_bkts.min()  >  val_max
-
-    def test_scale_pos_weight_matches_training_data(self, features_parquet, train_result):
-        """scale_pos_weight must equal neg/pos of training rows only (not val/test)."""
-        result, _ = train_result
-        df        = pd.read_parquet(features_parquet)
-        df        = df[df["spike_in_60m"].notna()]
-        train_max = int(df["bucket"].max() * _TRAIN_RATIO)
-        y_train   = df[df["bucket"] <= train_max]["spike_in_60m"]
-        neg       = int((y_train == 0).sum())
-        pos       = int((y_train == 1).sum())
-        assert result["scale_pos_weight"] == pytest.approx(neg / pos, rel=1e-6)
 
     def test_model_file_written(self, train_result):
         _, model_p = train_result
@@ -317,10 +305,177 @@ class TestTrainFunction:
         """Train split with fewer than _MIN_POSITIVE spike rows must raise ValueError."""
         # All labels = 0 → pos = 0
         df        = _make_features_df(n_machines=1, n_buckets=50)
-        df["spike_in_60m"] = df["spike_in_60m"].where(
-            df["spike_in_60m"].isna(), 0.0
+        df["severity_in_60m"] = df["severity_in_60m"].where(
+            df["severity_in_60m"].isna(), 0.0
         )
         path = tmp_path / "no_spikes.parquet"
         df.to_parquet(path, engine="pyarrow", index=False)
-        with pytest.raises(ValueError, match="positive"):
+        with pytest.raises(ValueError, match="spike"):
             train(path, tmp_path / "model.json")
+
+
+# ── Monotone constraints (Phase 3 — disabled for multiclass) ──────────────────
+
+class TestConstraintsDisabledForMulticlass:
+    def test_no_monotone_constraints_by_default(self):
+        """SpikeClassifier must NOT apply monotone constraints for multi:softprob —
+        they are undefined for multiclass objectives in XGBoost 2.x."""
+        clf    = SpikeClassifier()
+        params = clf._model.get_params()
+        mc     = params.get("monotone_constraints", None)
+        # None or empty tuple or all zeros means disabled
+        if mc is not None and mc != ():
+            assert all(v == 0 for v in mc), (
+                f"Expected all constraints to be 0 (disabled), got: {mc}"
+            )
+
+    def test_new_hyperparams_accepted_and_training_works(self, clf_data):
+        """gamma, reg_alpha, reg_lambda must be accepted and not raise during fit."""
+        X, y = clf_data
+        clf  = SpikeClassifier(gamma=1.0, reg_alpha=0.5, reg_lambda=2.0)
+        clf.fit(X, y)
+        proba = clf.predict_proba(X)
+        assert proba.shape == (len(X), 3)
+        assert float(proba.min()) >= 0.0
+        assert float(proba.max()) <= 1.0
+
+
+# ── BinarySpikeClassifier — Phase 4 ──────────────────────────────────────────
+
+def _make_binary_y(n: int = _N_ROWS) -> pd.Series:
+    """Binary labels: ~80% no_spike, ~20% spike."""
+    rng  = np.random.default_rng(3)
+    vals = rng.choice([0, 1], size=n, p=[0.80, 0.20]).astype("int8")
+    return pd.Series(vals, name="spike_in_15m")
+
+
+@pytest.fixture(scope="module")
+def binary_clf_data():
+    X = _make_X()
+    y = _make_binary_y()
+    return X, y
+
+
+@pytest.fixture(scope="module")
+def fitted_binary_clf(binary_clf_data):
+    X, y = binary_clf_data
+    return BinarySpikeClassifier().fit(X, y)
+
+
+class TestBinarySpikeClassifierFit:
+    def test_fit_returns_self(self, binary_clf_data):
+        X, y = binary_clf_data
+        clf  = BinarySpikeClassifier()
+        assert clf.fit(X, y) is clf
+
+    def test_predict_proba_shape(self, fitted_binary_clf, binary_clf_data):
+        X, _ = binary_clf_data
+        out  = fitted_binary_clf.predict_proba(X)
+        assert out.shape == (len(X), 2)
+
+    def test_predict_proba_rows_sum_to_one(self, fitted_binary_clf, binary_clf_data):
+        X, _ = binary_clf_data
+        out  = fitted_binary_clf.predict_proba(X)
+        np.testing.assert_allclose(out.sum(axis=1), 1.0, atol=1e-5)
+
+    def test_predict_proba_in_unit_interval(self, fitted_binary_clf, binary_clf_data):
+        X, _ = binary_clf_data
+        out  = fitted_binary_clf.predict_proba(X)
+        assert float(out.min()) >= 0.0
+        assert float(out.max()) <= 1.0
+
+
+class TestBinarySpikeClassifierEvaluate:
+    def test_evaluate_returns_all_keys(self, fitted_binary_clf, binary_clf_data):
+        X, y   = binary_clf_data
+        result = fitted_binary_clf.evaluate(X, y)
+        assert set(result.keys()) == {
+            "pr_auc", "roc_auc", "f1", "precision", "recall", "alarm_threshold"
+        }
+
+    def test_evaluate_metrics_in_unit_interval(self, fitted_binary_clf, binary_clf_data):
+        X, y   = binary_clf_data
+        result = fitted_binary_clf.evaluate(X, y)
+        for key, val in result.items():
+            if not np.isnan(val):
+                assert 0.0 <= val <= 1.0, f"{key} = {val} is outside [0, 1]"
+
+    def test_evaluate_one_class_returns_nan_auc(self, fitted_binary_clf, binary_clf_data):
+        X, _        = binary_clf_data
+        y_one_class = pd.Series(np.zeros(len(X), dtype="int8"))
+        result      = fitted_binary_clf.evaluate(X, y_one_class)
+        assert np.isnan(result["pr_auc"])
+        assert np.isnan(result["roc_auc"])
+
+    def test_find_alarm_threshold_returns_float_in_range(self, fitted_binary_clf, binary_clf_data):
+        X, y   = binary_clf_data
+        thresh = fitted_binary_clf.find_alarm_threshold(X, y)
+        assert isinstance(thresh, float)
+        assert 0.0 < thresh < 1.0
+
+
+class TestBinarySpikeClassifierSaveLoad:
+    def test_save_creates_model_file(self, fitted_binary_clf, tmp_path):
+        path = tmp_path / "binary_model.json"
+        fitted_binary_clf.save(path)
+        assert path.exists()
+
+    def test_save_creates_meta_file(self, fitted_binary_clf, tmp_path):
+        path = tmp_path / "binary_model.json"
+        fitted_binary_clf.save(path)
+        assert path.with_suffix(".meta.json").exists()
+
+    def test_load_restores_predictions(self, fitted_binary_clf, binary_clf_data, tmp_path):
+        X, _  = binary_clf_data
+        path  = tmp_path / "binary_model.json"
+        fitted_binary_clf.save(path)
+        loaded = BinarySpikeClassifier.load(path)
+        np.testing.assert_allclose(
+            fitted_binary_clf.predict_proba(X),
+            loaded.predict_proba(X),
+            rtol=1e-5,
+        )
+
+    def test_load_raises_on_missing_model(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="Model file not found"):
+            BinarySpikeClassifier.load(tmp_path / "nonexistent.json")
+
+    def test_load_raises_on_missing_meta(self, fitted_binary_clf, tmp_path):
+        path = tmp_path / "binary_model.json"
+        fitted_binary_clf.save(path)
+        path.with_suffix(".meta.json").unlink()
+        with pytest.raises(FileNotFoundError, match="Metadata file not found"):
+            BinarySpikeClassifier.load(path)
+
+
+class TestBinaryMonotoneConstraints:
+    def test_monotone_constraints_enabled(self):
+        """BinarySpikeClassifier MUST apply monotone constraints (binary:logistic is safe)."""
+        clf    = BinarySpikeClassifier()
+        params = clf._model.get_params()
+        mc     = params.get("monotone_constraints", None)
+        assert mc is not None and mc != "", "monotone_constraints must be set"
+        # XGBoost 3.x declared contract: Union[Dict[str,int], str] — we use string form
+        assert mc == _BINARY_MONOTONE_STR, (
+            f"Expected _BINARY_MONOTONE_STR '{_BINARY_MONOTONE_STR}', got: {mc!r}"
+        )
+
+    def test_binary_monotone_tuple_length_matches_x_cols(self):
+        """_BINARY_MONOTONE must be positional — length must equal len(_X_COLS)."""
+        assert len(_BINARY_MONOTONE) == len(_X_COLS)
+
+    def test_binary_monotone_str_is_string(self):
+        """_BINARY_MONOTONE_STR must be a string in '(v1,v2,...)' format."""
+        assert isinstance(_BINARY_MONOTONE_STR, str)
+        assert _BINARY_MONOTONE_STR.startswith("(")
+        assert _BINARY_MONOTONE_STR.endswith(")")
+        parts = _BINARY_MONOTONE_STR[1:-1].split(",")
+        assert len(parts) == len(_X_COLS)
+
+    def test_binary_monotone_values_valid(self):
+        """Each constraint must be -1, 0, or +1."""
+        for i, v in enumerate(_BINARY_MONOTONE):
+            assert v in (-1, 0, 1), (
+                f"_BINARY_MONOTONE[{i}]={v} for _X_COLS[{i}]={_X_COLS[i]}: "
+                "must be -1, 0, or +1"
+            )

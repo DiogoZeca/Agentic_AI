@@ -37,6 +37,7 @@ from spike_classifier import _X_COLS, _TRAIN_RATIO, _VAL_RATIO
 from train_spike_classifier import (
     _N_FOLDS,
     _fold_metrics,
+    _run_optuna_search,
     _run_walk_forward_cv,
     _threshold_sweep_table,
     _step_needed,
@@ -46,22 +47,34 @@ from train_spike_classifier import (
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
 _N_MACHINES = 2
-_N_BUCKETS  = 200
+_N_BUCKETS  = 300   # increased from 200 — needs enough rows for 3-class CV folds
 _RNG        = np.random.default_rng(42)
 
 
 def _make_agg_df(n_machines: int = _N_MACHINES, n_buckets: int = _N_BUCKETS) -> pd.DataFrame:
-    rng  = np.random.default_rng(7)
+    """Generate synthetic cluster_agg data with all three severity classes.
+
+    Uses a bimodal CPU distribution: most buckets are moderate (0.05–0.85),
+    but ~5% are deliberately high (0.90–1.0) to create both moderate and severe
+    spikes once the feature engineer applies per-machine p95/p99 thresholds.
+    This ensures all three labels (0=no_spike, 1=moderate, 2=severe) are present,
+    which is required for the 3-class walk-forward CV and Optuna tests.
+    """
+    rng  = np.random.default_rng(42)
     rows = []
     for m in range(1, n_machines + 1):
-        cpu = rng.uniform(0.05, 0.95, n_buckets).astype("float32")
+        cpu = rng.uniform(0.05, 0.85, n_buckets).astype("float32")
+        # Inject ~5% high-CPU buckets so the p99 threshold is reachable and
+        # severe labels (class 2) appear in the engineered feature parquet.
+        spike_idx = rng.choice(n_buckets, size=max(1, n_buckets // 20), replace=False)
+        cpu[spike_idx] = rng.uniform(0.90, 1.0, len(spike_idx)).astype("float32")
         for b in range(1, n_buckets + 1):
             rows.append({
                 "machine_id": m,
                 "bucket":     b,
                 "time_us":    b * 300_000_000,
                 "total_cpu":  float(cpu[b - 1]),
-                "peak_cpu":   float(min(cpu[b - 1] * 1.2, 1.0)),
+                "peak_cpu":   float(min(cpu[b - 1] * 1.1, 1.0)),
                 "total_mem":  float(rng.uniform(0.1, 0.9)),
                 "peak_mem":   float(rng.uniform(0.1, 0.9)),
                 "disk_io":    float(rng.uniform(0.0, 0.5)),
@@ -98,11 +111,18 @@ def features_parquet(agg_parquet, tmp_path_factory) -> Path:
 @pytest.fixture(scope="module")
 def pipeline_result(features_parquet, tmp_path_factory):
     """Run the pipeline from step 3 (training only) with walk-forward off."""
+    import shutil
     arts_dir = tmp_path_factory.mktemp("arts")
     # Copy features parquet into artifacts dir so run() can find it
     feat_dest = arts_dir / "cluster_features.parquet"
     pd.read_parquet(features_parquet).to_parquet(
         feat_dest, engine="pyarrow", compression="zstd", index=False
+    )
+    # Copy spike_thresholds.parquet — written by engineer() alongside features.
+    # Required by train_spike_classifier.py step 3 to compute global_threshold_fallback.
+    shutil.copy(
+        features_parquet.parent / "spike_thresholds.parquet",
+        arts_dir / "spike_thresholds.parquet",
     )
     result = run(
         data_path     = arts_dir / "nonexistent.csv",   # not needed when from_step=3
@@ -156,26 +176,48 @@ class TestFoldMetrics:
         X   = pd.DataFrame(
             {col: rng.uniform(0.0, 1.0, 100).astype("float32") for col in _X_COLS}
         )
-        y   = pd.Series((rng.uniform(size=100) < 0.3).astype("int8"))
+        y   = pd.Series(rng.choice([0, 1, 2], size=100, p=[0.70, 0.20, 0.10]).astype("int8"))
         return SpikeClassifier().fit(X, y), X, y
 
-    def test_returns_five_keys(self, fitted_clf):
+    @pytest.fixture(scope="class")
+    def fitted_binary_clf(self):
+        from spike_classifier import BinarySpikeClassifier
+        rng = np.random.default_rng(0)
+        X   = pd.DataFrame(
+            {col: rng.uniform(0.0, 1.0, 100).astype("float32") for col in _X_COLS}
+        )
+        y   = pd.Series(rng.choice([0, 1], size=100, p=[0.80, 0.20]).astype("int8"))
+        return BinarySpikeClassifier().fit(X, y), X, y
+
+    def test_returns_expected_keys(self, fitted_clf):
         clf, X, y = fitted_clf
-        m = _fold_metrics(clf, X, y, threshold=0.5)
-        assert set(m.keys()) == {"pr_auc", "roc_auc", "precision", "recall", "f1"}
+        m = _fold_metrics(clf, X, y, alarm_threshold=0.5)
+        assert set(m.keys()) == {"macro_pr_auc", "macro_roc_auc", "weighted_f1", "macro_f1"}
+
+    def test_binary_path_returns_same_keys(self, fitted_binary_clf):
+        """binary=True path must return the same metric key names as the 3-class path."""
+        clf, X, y = fitted_binary_clf
+        m = _fold_metrics(clf, X, y, alarm_threshold=0.5, binary=True)
+        assert set(m.keys()) == {"macro_pr_auc", "macro_roc_auc", "weighted_f1", "macro_f1"}
+
+    def test_binary_path_metrics_in_unit_interval(self, fitted_binary_clf):
+        clf, X, y = fitted_binary_clf
+        m = _fold_metrics(clf, X, y, alarm_threshold=0.5, binary=True)
+        for key, val in m.items():
+            assert 0.0 <= val <= 1.0 or np.isnan(val), f"{key}={val}"
 
     def test_metrics_in_unit_interval(self, fitted_clf):
         clf, X, y = fitted_clf
-        m = _fold_metrics(clf, X, y, threshold=0.5)
+        m = _fold_metrics(clf, X, y, alarm_threshold=0.5)
         for key, val in m.items():
             assert 0.0 <= val <= 1.0 or np.isnan(val), f"{key}={val}"
 
     def test_one_class_returns_nan_auc(self, fitted_clf):
         clf, X, _ = fitted_clf
         y_one = pd.Series(np.zeros(len(X), dtype="int8"))
-        m = _fold_metrics(clf, X, y_one, threshold=0.5)
-        assert np.isnan(m["pr_auc"])
-        assert np.isnan(m["roc_auc"])
+        m = _fold_metrics(clf, X, y_one, alarm_threshold=0.5)
+        assert np.isnan(m["macro_pr_auc"])
+        assert np.isnan(m["macro_roc_auc"])
 
 
 # ── _run_walk_forward_cv ──────────────────────────────────────────────────────
@@ -184,8 +226,8 @@ class TestWalkForwardCV:
     @pytest.fixture(scope="class")
     def cv_output(self, features_parquet, tmp_path_factory):
         df       = pd.read_parquet(features_parquet)
-        df       = df[df["spike_in_60m"].notna()].copy()
-        df["spike_in_60m"] = df["spike_in_60m"].astype("int8")
+        df       = df[df["severity_in_60m"].notna()].copy()
+        df["severity_in_60m"] = df["severity_in_60m"].astype("int8")
         train_max = int(df["bucket"].max() * _TRAIN_RATIO)
         train_df  = df[df["bucket"] <= train_max].reset_index(drop=True)
         cv_p      = tmp_path_factory.mktemp("cv") / "cv_results.csv"
@@ -199,14 +241,14 @@ class TestWalkForwardCV:
 
     def test_cv_summary_has_expected_keys(self, cv_output):
         summary, _ = cv_output
-        expected_keys = {
-            "cv_pr_auc_mean", "cv_pr_auc_std",
-            "cv_roc_auc_mean", "cv_roc_auc_std",
-            "cv_f1_mean", "cv_f1_std",
-            "cv_precision_mean", "cv_precision_std",
-            "cv_recall_mean", "cv_recall_std",
+        required_keys = {
+            "cv_macro_pr_auc_mean", "cv_macro_pr_auc_std",
+            "cv_macro_roc_auc_mean", "cv_macro_roc_auc_std",
+            "cv_weighted_f1_mean", "cv_weighted_f1_std",
+            "cv_macro_f1_mean", "cv_macro_f1_std",
         }
-        assert expected_keys == set(summary.keys())
+        # cv_drift_tau / cv_drift_p_val are only present when >= 3 valid folds
+        assert required_keys.issubset(set(summary.keys()))
 
     def test_cv_means_in_unit_interval(self, cv_output):
         summary, _ = cv_output
@@ -233,17 +275,18 @@ class TestThresholdSweepTable:
     @pytest.fixture(scope="class")
     def sweep(self, features_parquet):
         from spike_classifier import SpikeClassifier
+        from sklearn.utils.class_weight import compute_sample_weight
         df       = pd.read_parquet(features_parquet)
-        df       = df[df["spike_in_60m"].notna()].copy()
-        df["spike_in_60m"] = df["spike_in_60m"].astype("int8")
+        df       = df[df["severity_in_60m"].notna()].copy()
+        df["severity_in_60m"] = df["severity_in_60m"].astype("int8")
         train_max = int(df["bucket"].max() * _TRAIN_RATIO)
         val_max   = int(df["bucket"].max() * (_TRAIN_RATIO + _VAL_RATIO))
         train_df  = df[df["bucket"] <= train_max]
         val_df    = df[(df["bucket"] > train_max) & (df["bucket"] <= val_max)]
-        y_train   = train_df["spike_in_60m"]
-        neg, pos  = int((y_train == 0).sum()), int((y_train == 1).sum())
-        clf = SpikeClassifier(scale_pos_weight=neg / max(pos, 1)).fit(train_df, y_train)
-        return _threshold_sweep_table(clf, val_df[_X_COLS], val_df["spike_in_60m"], len(val_df))
+        y_train   = train_df["severity_in_60m"]
+        sw        = compute_sample_weight("balanced", y_train)
+        clf = SpikeClassifier().fit(train_df, y_train, sample_weight=sw)
+        return _threshold_sweep_table(clf, val_df[_X_COLS], val_df["severity_in_60m"], len(val_df))
 
     def test_sweep_covers_expected_range(self, sweep):
         thresholds = [r["threshold"] for r in sweep]
@@ -274,12 +317,11 @@ class TestRunPipeline:
         expected = {
             "train_rows", "val_rows", "test_rows",
             "train_bucket_max", "val_bucket_max",
-            "spike_rate_train", "spike_rate_val", "spike_rate_test",
-            "scale_pos_weight",
-            "pr_auc", "roc_auc",
-            "precision", "recall", "f1",
-            "optimal_threshold",
-            "precision_calibrated", "recall_calibrated", "f1_calibrated",
+            "class_rates_train", "class_rates_val", "class_rates_test",
+            "macro_pr_auc", "macro_roc_auc",
+            "pr_auc_class_0", "pr_auc_class_1", "pr_auc_class_2",
+            "alarm_threshold", "alarm_precision", "alarm_recall",
+            "weighted_f1", "macro_f1",
         }
         assert expected == set(result.keys())
 
@@ -303,17 +345,17 @@ class TestRunPipeline:
         _, arts = pipeline_result
         assert (arts / "models" / "spike" / "feature_importance.csv").exists()
 
-    def test_spike_config_has_optimal_threshold(self, pipeline_result):
+    def test_spike_config_has_alarm_threshold(self, pipeline_result):
         _, arts = pipeline_result
         cfg = json.loads((arts / "models" / "spike" / "spike_config.json").read_text())
-        assert "optimal_threshold" in cfg
-        assert 0.0 < cfg["optimal_threshold"] < 1.0
+        assert "alarm_threshold" in cfg
+        assert 0.0 < cfg["alarm_threshold"] < 1.0
 
     def test_spike_config_has_final_metrics(self, pipeline_result):
         _, arts = pipeline_result
         cfg = json.loads((arts / "models" / "spike" / "spike_config.json").read_text())
         assert "final_metrics" in cfg
-        assert "pr_auc" in cfg["final_metrics"]
+        assert "macro_pr_auc" in cfg["final_metrics"]
 
     def test_run_config_records_seed(self, pipeline_result):
         _, arts = pipeline_result
@@ -339,16 +381,30 @@ class TestRunPipeline:
         result, _ = pipeline_result
         assert result["train_bucket_max"] < result["val_bucket_max"]
 
+    def test_binary_horizon_model_dirs_written(self, pipeline_result):
+        """Only spike_15m binary model dir should exist — 30m/45m were dropped."""
+        _, arts = pipeline_result
+        assert (arts / "models" / "spike_15m" / "spike_model.json").exists()
+        for removed in ("spike_30m", "spike_45m"):
+            assert not (arts / "models" / removed).exists(), (
+                f"{removed} should not be trained"
+            )
+
 
 # ── Walk-forward enabled in run() ─────────────────────────────────────────────
 
 class TestRunWithWalkForward:
     @pytest.fixture(scope="class")
     def wf_result(self, features_parquet, tmp_path_factory):
+        import shutil
         arts_dir  = tmp_path_factory.mktemp("arts_wf")
         feat_dest = arts_dir / "cluster_features.parquet"
         pd.read_parquet(features_parquet).to_parquet(
             feat_dest, engine="pyarrow", compression="zstd", index=False
+        )
+        shutil.copy(
+            features_parquet.parent / "spike_thresholds.parquet",
+            arts_dir / "spike_thresholds.parquet",
         )
         result = run(
             data_path     = arts_dir / "nonexistent.csv",
@@ -394,3 +450,99 @@ class TestRunErrors:
                 from_step     = 3,
                 walk_forward  = False,
             )
+
+
+# ── Hyperparameter search (Phase 1) ───────────────────────────────────────────
+
+class TestHyperparameterSearch:
+    @pytest.fixture(scope="class")
+    def train_df(self, features_parquet):
+        """Training split of the synthetic features parquet."""
+        df = pd.read_parquet(features_parquet)
+        df = df[df["severity_in_60m"].notna()].copy()
+        df["severity_in_60m"] = df["severity_in_60m"].astype("int8")
+        train_max = int(df["bucket"].max() * _TRAIN_RATIO)
+        return df[df["bucket"] <= train_max].reset_index(drop=True)
+
+    def test_search_returns_expected_param_keys(self, train_df):
+        """Optuna result must contain all 9 tuned hyperparameter keys."""
+        result        = _run_optuna_search(train_df, seed=42, n_trials=2)
+        expected_keys = {
+            "n_estimators", "max_depth", "learning_rate",
+            "subsample", "colsample_bytree", "min_child_weight",
+            "gamma", "reg_alpha", "reg_lambda",
+        }
+        assert expected_keys == set(result["params"].keys())
+
+    def test_search_result_structure(self, train_df, tmp_path):
+        """Top-level result dict must have all expected metadata keys."""
+        result = _run_optuna_search(train_df, seed=42, n_trials=2, output_dir=tmp_path)
+        assert "params"            in result
+        assert "best_macro_pr_auc" in result
+        assert "n_trials"          in result
+        assert "n_completed"       in result
+        assert "resumed_from"      in result
+        assert result["n_trials"]           == 2
+        assert result["n_completed"]        == 2
+        assert result["resumed_from"]       == 0
+        assert 0.0 <= result["best_macro_pr_auc"] <= 1.0
+
+    def test_resume_skips_completed_trials(self, train_df, tmp_path):
+        """Running the search twice with the same output_dir must resume, not restart.
+        Second call should report resumed_from == first call's n_completed."""
+        r1 = _run_optuna_search(train_df, seed=42, n_trials=2, output_dir=tmp_path)
+        r2 = _run_optuna_search(train_df, seed=42, n_trials=2, output_dir=tmp_path)
+        # All trials already done — second call must skip and report resumed_from=2
+        assert r2["resumed_from"] == 2
+        assert r2["n_completed"]  == 2
+
+    def test_warmstart_params_accepted(self, train_df, tmp_path):
+        """warmstart_params must not raise and the enqueued trial is counted."""
+        warmstart = {
+            "n_estimators": 300, "max_depth": 6, "learning_rate": 0.05,
+            "subsample": 0.8, "colsample_bytree": 0.8, "min_child_weight": 1,
+            "gamma": 0.0, "reg_alpha": 0.0, "reg_lambda": 1.0,
+        }
+        result = _run_optuna_search(
+            train_df, seed=42, n_trials=3,
+            output_dir=tmp_path / "ws",
+            warmstart_params=warmstart,
+        )
+        assert result["n_completed"] == 3
+        assert "params" in result
+
+    def test_config_has_hyperparameter_search_block_after_tuning(
+        self, features_parquet, tmp_path_factory
+    ):
+        """spike_config.json must contain a hyperparameter_search block with
+        best_params populated after a tuning run."""
+        import shutil
+        arts_dir  = tmp_path_factory.mktemp("arts_tune")
+        feat_dest = arts_dir / "cluster_features.parquet"
+        pd.read_parquet(features_parquet).to_parquet(
+            feat_dest, engine="pyarrow", compression="zstd", index=False
+        )
+        shutil.copy(
+            features_parquet.parent / "spike_thresholds.parquet",
+            arts_dir / "spike_thresholds.parquet",
+        )
+        run(
+            data_path        = arts_dir / "nonexistent.csv",
+            artifacts_dir    = arts_dir,
+            train_ratio      = _TRAIN_RATIO,
+            val_ratio        = _VAL_RATIO,
+            from_step        = 3,
+            walk_forward     = False,
+            seed             = 42,
+            tune_hyperparams = True,
+            n_trials         = 2,
+        )
+        cfg = json.loads(
+            (arts_dir / "models" / "spike" / "spike_config.json").read_text()
+        )
+        assert "hyperparameter_search" in cfg
+        hs = cfg["hyperparameter_search"]
+        assert hs["enabled"] is True
+        assert hs["best_params"] is not None
+        assert isinstance(hs["best_params"], dict)
+        assert len(hs["best_params"]) == 9

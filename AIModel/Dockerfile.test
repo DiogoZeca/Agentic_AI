@@ -1,12 +1,16 @@
 FROM python:3.12-slim
 
+# libgomp1 is required by XGBoost (OpenMP runtime)
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-COPY requirements-service.txt requirements-test.txt ./
-RUN pip install --no-cache-dir -r requirements-service.txt -r requirements-test.txt
+COPY requirements-train.txt requirements-test.txt ./
+RUN pip install --no-cache-dir -r requirements-test.txt
 
-COPY api.py cpu_power_model.py data_loader.py feature_engineering.py model_trainer.py train.py ./
-COPY models/ ./models/
+# Copy all source files — tests exercise the full pipeline
+COPY *.py ./
 COPY tests/ ./tests/
 
 RUN mkdir -p data

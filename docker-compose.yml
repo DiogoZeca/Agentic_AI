@@ -1,10 +1,13 @@
-# CPU Power Spike Prediction — Docker Compose
+# CPU Spike Prediction — Docker Compose
 #
 #   Test suite:
-#     docker compose --profile test run --rm test
+#     docker compose --profile test run --rm --build test
 #
-#   API service:
+#   API service (requires trained artifacts in data/full_run/):
 #     docker compose up --build
+#
+#   Training run (on VM or local — writes artifacts to data/full_run/):
+#     docker compose --profile train run --rm --build train
 
 services:
 
@@ -12,7 +15,7 @@ services:
     build:
       context: ./AIModel
       dockerfile: Dockerfile.test
-    container_name: cpu-power-test
+    container_name: spike-test
     volumes:
       - ./AIModel/data:/app/data
     profiles: [test]
@@ -21,11 +24,14 @@ services:
     build:
       context: ./AIModel
       dockerfile: Dockerfile
-    container_name: cpu-power-api
+    container_name: spike-api
     ports:
       - "8000:8000"
     environment:
-      MODELS_PATH: models/winner.json
+      - MODEL_DIR=/app/data/full_run/models/spike
+    volumes:
+      # Model artifacts mounted read-only — update model without rebuilding image
+      - ./AIModel/data/full_run:/app/data/full_run:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -33,3 +39,13 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  train:
+    build:
+      context: ./AIModel
+      dockerfile: Dockerfile.training
+    container_name: spike-train
+    volumes:
+      # Data mounted read-only; artifacts dir writable for output
+      - ./AIModel/data:/app/data
+    profiles: [train]

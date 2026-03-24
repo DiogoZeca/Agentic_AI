@@ -65,6 +65,24 @@ _INPUT_COLS: list[str] = [
     "sample_portion",
 ]
 
+# Explicit dtype map passed to read_csv on every chunk.
+# Without this, pandas infers types independently per chunk — a column that
+# is all-integer in chunk 1 may be float in chunk 50, silently breaking
+# numeric operations downstream.  machine_id is kept as float64 here because
+# it arrives from the CSV as float (download script) and may contain NaN;
+# it is cast to int64 in _merge_partials after null rows are dropped.
+_INPUT_DTYPES: dict[str, str] = {
+    "start_time":           "float64",
+    "end_time":             "float64",
+    "machine_id":           "float64",
+    "cpu_rate":             "float64",
+    "max_cpu_rate":         "float64",
+    "canonical_mem_usage":  "float64",
+    "max_mem_usage":        "float64",
+    "mean_disk_io_time":    "float64",
+    "sample_portion":       "float64",
+}
+
 # Columns produced by _process_chunk before the second aggregation pass.
 # Includes the intermediate weighted_cpu_sum that is not in the final output.
 _PARTIAL_COLS: list[str] = [
@@ -118,6 +136,13 @@ def _process_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
     Groups that straddle this chunk's boundary with the next chunk will
     produce partial rows here. _merge_partials (pass 2) merges them.
 
+    Filters applied (in order):
+      1. Null machine_id  — rows without a machine cannot be attributed to a
+                            node; groupby would silently create a fake NaN machine.
+      2. Invalid duration — end_time <= start_time indicates clock drift or a
+                            corrupt row; weighted_cpu would be zero or negative.
+      3. Impossible rate  — cpu_rate > 64 is a safety net for corrupted sensors.
+
     Parameters
     ----------
     chunk : raw CSV chunk containing _INPUT_COLS columns.
@@ -128,6 +153,19 @@ def _process_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
     Returns an empty DataFrame (with correct columns) when no rows
     survive filtering.
     """
+    # Filter 1: null machine_id
+    n_null_id = int(chunk["machine_id"].isna().sum())
+    if n_null_id:
+        log.warning("  Dropped %d rows with null machine_id in chunk", n_null_id)
+        chunk = chunk[chunk["machine_id"].notna()]
+
+    # Filter 2: invalid duration (clock drift / corrupt entries)
+    n_bad_dur = int((chunk["end_time"] <= chunk["start_time"]).sum())
+    if n_bad_dur:
+        log.warning("  Dropped %d rows with end_time <= start_time in chunk", n_bad_dur)
+        chunk = chunk[chunk["end_time"] > chunk["start_time"]]
+
+    # Filter 3: physically impossible cpu_rate
     chunk = chunk[chunk["cpu_rate"] <= _CPU_MAX].copy()
 
     if chunk.empty:
@@ -264,23 +302,31 @@ def preprocess(
     total_input_rows: int                = 0
     t_start = time.perf_counter()
 
-    for chunk_idx, chunk in enumerate(
-        pd.read_csv(input_path, chunksize=chunksize)
-    ):
-        partial           = _process_chunk(chunk)
-        total_input_rows += len(chunk)
+    # Context manager ensures the underlying C parser buffers are freed after
+    # each chunk — without it, TextFileReader accumulates memory across all
+    # chunks and does not release until the object is garbage-collected
+    # (pandas issue #21516).
+    with pd.read_csv(
+        input_path,
+        chunksize  = chunksize,
+        dtype      = _INPUT_DTYPES,
+        usecols    = _INPUT_COLS,
+    ) as reader:
+        for chunk_idx, chunk in enumerate(reader):
+            partial           = _process_chunk(chunk)
+            total_input_rows += len(chunk)
 
-        if not partial.empty:
-            partials.append(partial)
+            if not partial.empty:
+                partials.append(partial)
 
-        if (chunk_idx + 1) % 10 == 0:
-            elapsed = (time.perf_counter() - t_start) / 60
-            log.info(
-                "  chunk %3d  |  %s rows read  |  %.1f min elapsed",
-                chunk_idx + 1,
-                f"{total_input_rows:,}",
-                elapsed,
-            )
+            if (chunk_idx + 1) % 10 == 0:
+                elapsed = (time.perf_counter() - t_start) / 60
+                log.info(
+                    "  chunk %3d  |  %s rows read  |  %.1f min elapsed",
+                    chunk_idx + 1,
+                    f"{total_input_rows:,}",
+                    elapsed,
+                )
 
     if not partials:
         log.warning("No rows survived filtering — output is empty.")
