@@ -563,15 +563,17 @@ class _OptunaProgressCallback:
 
 
 def _run_optuna_search(
-    train_df:         pd.DataFrame,
-    seed:             int,
-    n_trials:         int,
-    device:           str        = "cpu",
-    output_dir:       Path | None = None,
-    warmstart_params: dict | None = None,
-    label_col:        str        = "severity_in_60m",
-    study_name:       str        = "spike-hpo-60m",
-    binary:           bool       = False,
+    train_df:              pd.DataFrame,
+    seed:                  int,
+    n_trials:              int,
+    device:                str        = "cpu",
+    output_dir:            Path | None = None,
+    warmstart_params:      dict | None = None,
+    label_col:             str        = "severity_in_60m",
+    study_name:            str        = "spike-hpo-60m",
+    binary:                bool       = False,
+    n_estimators:          int        = 2000,
+    early_stopping_rounds: int        = 150,
 ) -> dict:
     """Bayesian hyperparameter search using Optuna TPE sampler.
 
@@ -617,7 +619,7 @@ def _run_optuna_search(
     Returns
     -------
     dict with keys:
-        params       — best hyperparameter dict (9 keys)
+        params       — best hyperparameter dict (8 keys, n_estimators excluded)
         best_pr_auc  — PR-AUC of the best trial on the inner val split
         n_trials     — requested number of trials
         n_completed  — number of trials that completed without error
@@ -720,7 +722,11 @@ def _run_optuna_search(
     # the feature set changes between phases.  TPE will score it on the new features
     # and use it to initialise its probability model.
     if warmstart_params and len(study.trials) == 0:
-        study.enqueue_trial(warmstart_params)
+        # Strip n_estimators — it is no longer an Optuna param (Phase 5).
+        # Old best_params.json files may still contain it; filtering prevents
+        # Optuna from raising "unknown parameter" errors on warm-start.
+        safe_warmstart = {k: v for k, v in warmstart_params.items() if k != "n_estimators"}
+        study.enqueue_trial(safe_warmstart)
         log.info("  Optuna warm-start : enqueueing 1 trial from previous best_params")
 
     log.info(
@@ -728,9 +734,17 @@ def _run_optuna_search(
         remaining, len(inner_train), len(inner_val),
     )
 
+    # Pre-compute inner val arrays once (reused across all trials)
+    X_inner_val_arr = X_inner_val.astype("float32").values
+    y_inner_val_arr = y_inner_val.values
+
     def objective(trial) -> float:
+        # n_estimators is excluded from the search space (Phase 5): all trials
+        # use n_estimators=2000 with early_stopping_rounds=150 so XGBoost selects
+        # the optimal tree count via the eval_set rather than treating it as a
+        # hyperparameter.  This removes one dimension from the TPE search and
+        # eliminates the risk of Optuna overfitting to a fixed tree budget.
         params = {
-            "n_estimators":     trial.suggest_int("n_estimators", 200, 800),
             "max_depth":        trial.suggest_int("max_depth", 3, 8),
             "learning_rate":    trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
             "subsample":        trial.suggest_float("subsample", 0.6, 1.0),
@@ -744,12 +758,15 @@ def _run_optuna_search(
             return 0.0
         if binary:
             clf = BinarySpikeClassifier(
-                device           = device,
-                random_state     = seed,
-                scale_pos_weight = spw_inner,
+                device                = device,
+                random_state          = seed,
+                scale_pos_weight      = spw_inner,
+                n_estimators          = n_estimators,
+                early_stopping_rounds = early_stopping_rounds,
                 **params,
             )
-            clf.fit(X_inner_tr, y_inner_tr)
+            clf.fit(X_inner_tr, y_inner_tr,
+                    eval_set=[(X_inner_val_arr, y_inner_val_arr)])
             probas = clf.predict_proba(X_inner_val)[:, 1]  # P(spike)
             score  = float(_ap_score(y_inner_val.values, probas))
             del clf
@@ -757,11 +774,14 @@ def _run_optuna_search(
             return score
         else:
             clf = SpikeClassifier(
-                device       = device,
-                random_state = seed,
+                device                = device,
+                random_state          = seed,
+                n_estimators          = n_estimators,
+                early_stopping_rounds = early_stopping_rounds,
                 **params,
             )
-            clf.fit(X_inner_tr, y_inner_tr, sample_weight=sw_inner)
+            clf.fit(X_inner_tr, y_inner_tr, sample_weight=sw_inner,
+                    eval_set=[(X_inner_val_arr, y_inner_val_arr)])
             probas = clf.predict_proba(X_inner_val)  # (n, 3)
             score  = float(_ap_score(y_inner_val.values, probas, average="macro"))
             del clf
@@ -794,21 +814,23 @@ def _run_optuna_search(
 
 
 def _train_binary_horizon(
-    df:               pd.DataFrame,
-    label_col:        str,
-    horizon_name:     str,
-    cv_gap:           int,
-    model_dir:        Path,
-    features_path:    Path,
-    train_ratio:      float,
-    val_ratio:        float,
-    n_folds:          int,
-    walk_forward:     bool,
-    seed:             int,
-    device:           str,
-    tune_hyperparams: bool,
-    n_trials:         int,
-    warmstart_params: dict | None = None,
+    df:                    pd.DataFrame,
+    label_col:             str,
+    horizon_name:          str,
+    cv_gap:                int,
+    model_dir:             Path,
+    features_path:         Path,
+    train_ratio:           float,
+    val_ratio:             float,
+    n_folds:               int,
+    walk_forward:          bool,
+    seed:                  int,
+    device:                str,
+    tune_hyperparams:      bool,
+    n_trials:              int,
+    warmstart_params:      dict | None = None,
+    n_estimators:          int         = 2000,
+    early_stopping_rounds: int         = 150,
 ) -> dict:
     """Train and evaluate a BinarySpikeClassifier for one short horizon.
 
@@ -875,12 +897,14 @@ def _train_binary_horizon(
             train_df,
             seed,
             binary_n_trials,
-            device           = device,
-            output_dir       = model_dir,
-            warmstart_params = ws,
-            label_col        = label_col,
-            study_name       = f"spike-hpo-{horizon_name}",
-            binary           = True,
+            device                = device,
+            output_dir            = model_dir,
+            warmstart_params      = ws,
+            label_col             = label_col,
+            study_name            = f"spike-hpo-{horizon_name}",
+            binary                = True,
+            n_estimators          = n_estimators,
+            early_stopping_rounds = early_stopping_rounds,
         )
         best_params_path.write_text(json.dumps(search_result, indent=2))
         model_kwargs: dict = search_result["params"]
@@ -902,14 +926,21 @@ def _train_binary_horizon(
             binary       = True,
         )
 
-    # Final model training
+    # Final model training — strip any cached n_estimators so the explicit
+    # parameter value (default 2000, overridable for tests) takes precedence.
+    final_model_kwargs = {k: v for k, v in (model_kwargs or {}).items()
+                          if k != "n_estimators"}
     clf = BinarySpikeClassifier(
-        device           = device,
-        random_state     = seed,
-        scale_pos_weight = spw,
-        **(model_kwargs or {}),
+        device                = device,
+        random_state          = seed,
+        scale_pos_weight      = spw,
+        n_estimators          = n_estimators,
+        early_stopping_rounds = early_stopping_rounds,
+        **final_model_kwargs,
     )
-    clf.fit(train_df[_X_COLS], train_df[label_col])
+    X_val_arr = val_df[_X_COLS].astype("float32").values
+    clf.fit(train_df[_X_COLS], train_df[label_col],
+            eval_set=[(X_val_arr, val_df[label_col].values)])
 
     alarm_thresh = clf.find_alarm_threshold(val_df[_X_COLS], val_df[label_col])
     m = clf.evaluate(test_df[_X_COLS], test_df[label_col], alarm_threshold=alarm_thresh)
@@ -970,19 +1001,21 @@ def _train_binary_horizon(
 
 
 def run(
-    data_path:        Path,
-    artifacts_dir:    Path,
-    train_ratio:      float        = _TRAIN_RATIO,
-    val_ratio:        float        = _VAL_RATIO,
-    n_folds:          int          = _N_FOLDS,
-    walk_forward:     bool         = True,
-    from_step:        int          = 1,
-    force:            bool         = False,
-    seed:             int          = 42,
-    device:           str          = "cpu",
-    target_pos_rate:  float | None = None,
-    tune_hyperparams: bool         = False,
-    n_trials:         int          = 30,
+    data_path:             Path,
+    artifacts_dir:         Path,
+    train_ratio:           float        = _TRAIN_RATIO,
+    val_ratio:             float        = _VAL_RATIO,
+    n_folds:               int          = _N_FOLDS,
+    walk_forward:          bool         = True,
+    from_step:             int          = 1,
+    force:                 bool         = False,
+    seed:                  int          = 42,
+    device:                str          = "cpu",
+    target_pos_rate:       float | None = None,
+    tune_hyperparams:      bool         = False,
+    n_trials:              int          = 30,
+    n_estimators:          int          = 2000,
+    early_stopping_rounds: int          = 150,
 ) -> dict:
     """Run the full spike classifier training pipeline.
 
@@ -1106,20 +1139,28 @@ def run(
             except (KeyError, json.JSONDecodeError):
                 warmstart = None
 
+        warmstart_filtered: dict | None = None
+        if warmstart is not None:
+            warmstart_filtered = {k: v for k, v in warmstart.items() if k != "n_estimators"}
+
         search_result = _run_optuna_search(
             train_df,
             seed,
             n_trials,
-            device           = device,
-            output_dir       = model_dir,
-            warmstart_params = warmstart,
+            device                = device,
+            output_dir            = model_dir,
+            warmstart_params      = warmstart_filtered,
+            n_estimators          = n_estimators,
+            early_stopping_rounds = early_stopping_rounds,
         )
         best_params_path.write_text(json.dumps(search_result, indent=2))
         log.info("  Best params saved  : %s", best_params_path)
         model_kwargs: dict = search_result["params"]
     elif best_params_path.exists():
         cached = json.loads(best_params_path.read_text())
-        model_kwargs = cached["params"]
+        # Strip n_estimators from cache — CV uses the class default (300 trees
+        # for speed); final training uses an explicit 2000 with early stopping.
+        model_kwargs = {k: v for k, v in cached["params"].items() if k != "n_estimators"}
         log.info("  Loaded cached hyperparams from %s", best_params_path)
     else:
         model_kwargs = {}
@@ -1138,13 +1179,19 @@ def run(
              train_ratio * 100, val_ratio * 100,
              (1.0 - train_ratio - val_ratio) * 100)
 
+    # Override any cached n_estimators so the explicit parameter value takes
+    # precedence.  CV uses model_kwargs as-is (default 300 trees for speed).
+    final_model_kwargs = dict(model_kwargs)
+    final_model_kwargs["n_estimators"] = n_estimators
+
     result = _train_model(
-        features_path = features_path,
-        model_path    = model_path,
-        train_ratio   = train_ratio,
-        val_ratio     = val_ratio,
-        device        = device,
-        model_kwargs  = model_kwargs,
+        features_path         = features_path,
+        model_path            = model_path,
+        train_ratio           = train_ratio,
+        val_ratio             = val_ratio,
+        device                = device,
+        model_kwargs          = final_model_kwargs,
+        early_stopping_rounds = early_stopping_rounds,
     )
 
     # ── Alarm threshold sweep table ───────────────────────────────────────────
@@ -1244,11 +1291,13 @@ def run(
     # rows where binary labels are valid but severity_in_60m may be NaN.
     df_all = pd.read_parquet(features_path)
 
-    # Warm-start binary models from 60m best_params (tree structure is portable)
+    # Warm-start binary models from 60m best_params (tree structure is portable).
+    # Strip n_estimators — binary final training uses 2000 with early stopping.
     binary_warmstart: dict | None = None
     if best_params_path.exists():
         try:
-            binary_warmstart = json.loads(best_params_path.read_text())["params"]
+            raw_ws = json.loads(best_params_path.read_text())["params"]
+            binary_warmstart = {k: v for k, v in raw_ws.items() if k != "n_estimators"}
         except (KeyError, json.JSONDecodeError):
             binary_warmstart = None
 
@@ -1263,23 +1312,62 @@ def run(
 
         log.info("  Starting binary horizon model: %s (%s)", h_name, h_label)
         h_result = _train_binary_horizon(
-            df               = df_all,
-            label_col        = h_label,
-            horizon_name     = h_name,
-            cv_gap           = h_cv_gap,
-            model_dir        = h_model_dir,
-            features_path    = features_path,
-            train_ratio      = train_ratio,
-            val_ratio        = val_ratio,
-            n_folds          = n_folds,
-            walk_forward     = walk_forward,
-            seed             = seed,
-            device           = device,
-            tune_hyperparams = tune_hyperparams,
-            n_trials         = n_trials,
-            warmstart_params = binary_warmstart,
+            df                    = df_all,
+            label_col             = h_label,
+            horizon_name          = h_name,
+            cv_gap                = h_cv_gap,
+            model_dir             = h_model_dir,
+            features_path         = features_path,
+            train_ratio           = train_ratio,
+            val_ratio             = val_ratio,
+            n_folds               = n_folds,
+            walk_forward          = walk_forward,
+            seed                  = seed,
+            device                = device,
+            tune_hyperparams      = tune_hyperparams,
+            n_trials              = n_trials,
+            warmstart_params      = binary_warmstart,
+            n_estimators          = n_estimators,
+            early_stopping_rounds = early_stopping_rounds,
         )
         binary_results[h_name] = h_result
+
+    # ── OVR severe binary model ────────────────────────────────────────────────
+    # Trains a dedicated binary classifier for "will a *severe* (p99) spike occur
+    # in the next 60 minutes?"  Unlike the 3-class model's softmax column 2, this
+    # OVR model is optimised end-to-end for the severe-vs-all distinction.
+    # Label is derived from severity_in_60m — NaN preserved so _train_binary_horizon
+    # can filter via notna() as it does for all other binary horizons.
+    log.info("  Starting OVR severe binary model (severe_ovr)")
+    sev_col = df_all["severity_in_60m"]
+    # Use float32 NaN to keep the column float32 (consistent with other feature
+    # columns).  np.nan is float64 and would upcast the whole column.
+    df_all["spike_severe_ovr"] = np.where(
+        sev_col.notna(),
+        (sev_col == 2).astype("float32"),
+        np.float32("nan"),
+    )
+    ovr_model_dir = artifacts_dir / "models" / "spike_severe_ovr"
+    ovr_result = _train_binary_horizon(
+        df                    = df_all,
+        label_col             = "spike_severe_ovr",
+        horizon_name          = "severe_ovr",
+        cv_gap                = _CV_GAP,
+        model_dir             = ovr_model_dir,
+        features_path         = features_path,
+        train_ratio           = train_ratio,
+        val_ratio             = val_ratio,
+        n_folds               = n_folds,
+        walk_forward          = walk_forward,
+        seed                  = seed,
+        device                = device,
+        tune_hyperparams      = tune_hyperparams,
+        n_trials              = n_trials,
+        warmstart_params      = binary_warmstart,
+        n_estimators          = n_estimators,
+        early_stopping_rounds = early_stopping_rounds,
+    )
+    binary_results["severe_ovr"] = ovr_result
 
     elapsed = (time.perf_counter() - t_pipeline) / 60
     log.info("═" * 62)

@@ -45,7 +45,24 @@ services:
       context: ./AIModel
       dockerfile: Dockerfile.training
     container_name: spike-train
+    environment:
+      # Set DEVICE=cuda to use the GPU; _resolve_device() falls back to CPU if
+      # no CUDA GPU is found, so this compose file also works on CPU-only hosts.
+      - DEVICE=cuda
+      - DATA_PATH=data/cluster_cpu_data.csv
+      - ARTIFACTS_DIR=data/full_run
+      - OPTUNA_TRIALS=30
     volumes:
-      # Data mounted read-only; artifacts dir writable for output
+      # Input CSV (read) + artifact output (write) both under the same mount.
+      # Trained models are accessible from the host at ./AIModel/data/full_run/.
       - ./AIModel/data:/app/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            # 'capabilities: [gpu]' is mandatory — omitting it ignores the GPU
+            # silently.  Requires NVIDIA Container Toolkit on the host.
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     profiles: [train]

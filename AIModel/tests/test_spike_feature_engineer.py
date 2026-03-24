@@ -183,6 +183,41 @@ class TestTaskDominance:
         assert float(row["task_dominance"]) == pytest.approx(expected, rel=1e-4)
 
 
+# ── cpu_per_task (Phase 5) ────────────────────────────────────────────────────
+
+
+class TestCpuPerTask:
+    """cpu_per_task = total_cpu / max(n_tasks, 1) — per-task intensity proxy.
+
+    Added in Phase 5 to capture machines doing more CPU work per scheduled
+    task, which is predictive of upcoming spikes independent of raw load.
+    """
+
+    @pytest.fixture(scope="class")
+    def full_series(self, gap_group):
+        return _engineer_machine(gap_group, 1, threshold=0.45)
+
+    def test_cpu_per_task_present(self, full_series):
+        assert "cpu_per_task" in full_series.columns
+
+    def test_cpu_per_task_is_float32(self, full_series):
+        assert full_series["cpu_per_task"].dtype == np.float32
+
+    def test_cpu_per_task_no_divide_by_zero(self, full_series):
+        """All values must be finite — including filled (n_tasks=0) rows."""
+        assert np.isfinite(full_series["cpu_per_task"].values).all()
+
+    def test_cpu_per_task_value(self, full_series):
+        """Spot-check: bucket 1 has total_cpu=0.3, n_tasks=5 → cpu_per_task=0.06."""
+        row = full_series[full_series["bucket"] == 1].iloc[0]
+        assert float(row["cpu_per_task"]) == pytest.approx(0.3 / 5, rel=1e-4)
+
+    def test_cpu_per_task_zero_when_idle(self, full_series):
+        """Gap-filled rows have total_cpu=0 → cpu_per_task must be 0."""
+        idle = full_series[~full_series["_original"]]
+        assert (idle["cpu_per_task"] == 0.0).all()
+
+
 # ── _add_label: spike labeling ────────────────────────────────────────────────
 
 class TestAddLabel:
@@ -592,27 +627,34 @@ class TestClusterFeatures:
 # ── Time features ─────────────────────────────────────────────────────────────
 
 class TestTimeFeatures:
-    """Group D: hour_sin, hour_cos, dow_sin, dow_cos.
+    """Group D: hour_sin, hour_cos only (Phase 5: dow_sin/dow_cos removed).
 
-    Derived from bucket % 288 (within-day) and bucket % 2016 (within-week).
-    All values must be in [-1, 1].  No epoch lookup required.
+    dow_sin/dow_cos carried near-zero SHAP importance (0.356 gain, 0.011)
+    and introduced a day-of-week temporal confound on the 7-day dataset.
+    Only within-day harmonic features are retained.
     """
 
     def test_all_time_features_present(self, eng_result):
         df, _, _ = eng_result
-        for col in ("hour_sin", "hour_cos", "dow_sin", "dow_cos"):
+        for col in ("hour_sin", "hour_cos"):
             assert col in df.columns
+
+    def test_dow_features_absent(self, eng_result):
+        """dow_sin and dow_cos must not appear after Phase 5 removal."""
+        df, _, _ = eng_result
+        for col in ("dow_sin", "dow_cos"):
+            assert col not in df.columns, f"{col} should have been removed in Phase 5"
 
     def test_time_features_in_unit_interval(self, eng_result):
         """sin/cos values must always lie in [-1.0, 1.0]."""
         df, _, _ = eng_result
-        for col in ("hour_sin", "hour_cos", "dow_sin", "dow_cos"):
+        for col in ("hour_sin", "hour_cos"):
             assert (df[col] >= -1.0 - 1e-6).all(), f"{col} has values below -1"
             assert (df[col] <=  1.0 + 1e-6).all(), f"{col} has values above +1"
 
     def test_time_features_are_float32(self, eng_result):
         df, _, _ = eng_result
-        for col in ("hour_sin", "hour_cos", "dow_sin", "dow_cos"):
+        for col in ("hour_sin", "hour_cos"):
             assert df[col].dtype == np.float32, f"{col} should be float32"
 
     def test_same_bucket_mod_same_hour_encoding(self, eng_result):
@@ -624,13 +666,11 @@ class TestTimeFeatures:
         assert (grp["hour_sin"] == 1).all()
         assert (grp["hour_cos"] == 1).all()
 
-    def test_sin_cos_satisfy_pythagorean_identity(self, eng_result):
-        """sin^2 + cos^2 == 1 for both day and week encodings."""
+    def test_hour_sin_cos_pythagorean_identity(self, eng_result):
+        """sin^2 + cos^2 == 1 for within-day encoding."""
         df, _, _ = eng_result
-        day_norm  = df["hour_sin"].astype("float64")**2 + df["hour_cos"].astype("float64")**2
-        week_norm = df["dow_sin"].astype("float64")**2  + df["dow_cos"].astype("float64")**2
-        np.testing.assert_allclose(day_norm.values,  1.0, atol=1e-5)
-        np.testing.assert_allclose(week_norm.values, 1.0, atol=1e-5)
+        day_norm = df["hour_sin"].astype("float64")**2 + df["hour_cos"].astype("float64")**2
+        np.testing.assert_allclose(day_norm.values, 1.0, atol=1e-5)
 
 
 # ── Cross-module contract ─────────────────────────────────────────────────────
@@ -671,7 +711,7 @@ class TestOutputSchema:
     def test_float_feature_cols_are_float32(self, eng_result):
         df, _, _ = eng_result
         float32_cols = [
-            "total_cpu", "peak_cpu", "cpu_lag_1",
+            "total_cpu", "peak_cpu", "cpu_per_task", "cpu_lag_1",
             "cpu_ewma_6", "cpu_ewma_24", "cpu_delta_1", "cpu_delta_2",
             "cpu_rolling_std_6",
             "task_dominance", "cpu_vs_p95", "cpu_vs_p95_delta", "peak_cpu_vs_p95",
@@ -682,7 +722,7 @@ class TestOutputSchema:
             "spike_now", "spike_in_last_1", "spike_in_last_3", "spike_in_last_6",
             "time_since_last_spike", "cpu_spike_rate_24",
             "cluster_cpu_p90", "machine_rank_in_cluster",
-            "hour_sin", "hour_cos", "dow_sin", "dow_cos",
+            "hour_sin", "hour_cos",
         ]
         for col in float32_cols:
             assert df[col].dtype == np.float32, f"{col} should be float32"

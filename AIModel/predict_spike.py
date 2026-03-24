@@ -204,9 +204,13 @@ def _load_artifacts(model_dir: Path) -> _Artifacts:
     boosters: dict[str, xgb.Booster]  = {"60m": booster_60m}
     alarm_thresholds: dict[str, float] = {"60m": alarm_60m}
 
-    # Load binary 15m horizon model if present (sibling directory)
+    # Load optional binary horizon models (sibling directories of model_dir).
+    # "15m"         — short-horizon imminence scorer.
+    # "severe_ovr"  — OVR severe binary detector trained end-to-end on p99
+    #                 exceedances; overrides is_severe from the 60m softmax column
+    #                 when present (Phase 5).
     models_parent = model_dir.parent
-    for h_name in ("15m",):
+    for h_name in ("15m", "severe_ovr"):
         h_dir = models_parent / f"spike_{h_name}"
         if (h_dir / "spike_model.json").exists():
             try:
@@ -447,6 +451,11 @@ def _run_inference(
                 sev_cls     = None
                 p_spike_60m = None
 
+            # OVR severe probability (Phase 5) — dedicated binary p99 detector.
+            # When present, overrides is_severe from the 60m softmax column.
+            p_sev_ovr = h_probs.get("severe_ovr")
+            alm_ovr   = artifacts.alarm_thresholds.get("severe_ovr", 0.5)
+
             # Collect binary P(spike) per short horizon
             raw_p_spikes = {
                 h: h_probs.get(h)
@@ -492,6 +501,11 @@ def _run_inference(
             if pv_60m is not None:
                 alm_60m = artifacts.alarm_thresholds.get("60m", 0.5)
                 p_sev_enforced = p_enforced.get("60m", p_sev)
+                # is_severe: prefer OVR model when available (Phase 5)
+                if p_sev_ovr is not None:
+                    is_severe_60m = bool(p_sev_ovr >= alm_ovr)
+                else:
+                    is_severe_60m = bool(p_sev >= alm_60m)
                 imminence["60m"] = {
                     "severity_class":  sev_cls,
                     "p_no_spike":      round(p_no,  6),
@@ -499,9 +513,19 @@ def _run_inference(
                     "p_severe":        round(p_sev, 6),
                     "p_spike":         round(p_sev_enforced, 6) if p_sev_enforced is not None else round(p_spike_60m, 6),
                     "is_spike":        bool(sev_cls >= 1),
-                    "is_severe":       bool(p_sev >= alm_60m),
+                    "is_severe":       is_severe_60m,
                     "alarm_threshold": round(alm_60m, 4),
+                    **({"p_severe_ovr": round(p_sev_ovr, 6), "alarm_threshold_ovr": round(alm_ovr, 4)}
+                       if p_sev_ovr is not None else {}),
                 }
+
+            # Top-level is_severe also uses OVR when available
+            if p_sev_ovr is not None:
+                top_is_severe = bool(p_sev_ovr >= alm_ovr)
+            elif p_sev is not None:
+                top_is_severe = bool(p_sev >= artifacts.alarm_thresholds.get("60m", 0.5))
+            else:
+                top_is_severe = None
 
             predictions.append({
                 "machine_id":       machine_id,
@@ -511,8 +535,9 @@ def _run_inference(
                 "p_no_spike":       round(p_no,  6) if p_no  is not None else None,
                 "p_moderate":       round(p_mod, 6) if p_mod is not None else None,
                 "p_severe":         round(p_sev, 6) if p_sev is not None else None,
+                "p_severe_ovr":     round(p_sev_ovr, 6) if p_sev_ovr is not None else None,
                 "is_spike":         bool(sev_cls >= 1) if sev_cls is not None else None,
-                "is_severe":        bool(p_sev >= artifacts.alarm_thresholds.get("60m", 0.5)) if p_sev is not None else None,
+                "is_severe":        top_is_severe,
                 "alarm_threshold":  round(artifacts.alarm_thresholds.get("60m", 0.5), 4),
                 "threshold_used":   round(thresh, 6),
                 "threshold_source": (
@@ -535,6 +560,7 @@ def _run_inference(
                 "p_no_spike":       None,
                 "p_moderate":       None,
                 "p_severe":         None,
+                "p_severe_ovr":     None,
                 "is_spike":         None,
                 "is_severe":        None,
                 "alarm_threshold":  None,

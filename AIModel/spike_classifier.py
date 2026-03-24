@@ -73,6 +73,8 @@ log = logging.getLogger(__name__)
 _X_COLS: list[str] = [
     # raw signals
     "total_cpu", "peak_cpu", "total_mem", "peak_mem", "disk_io", "n_tasks",
+    # derived raw: CPU intensity per concurrent task (Phase 5)
+    "cpu_per_task",
     # lag history (Phase 2: dropped cpu_lag_2/3/6 — combined gain 0.010)
     "cpu_lag_1", "cpu_lag_12", "cpu_lag_24",
     # trend
@@ -104,9 +106,8 @@ _X_COLS: list[str] = [
     # cluster-level (cross-sectional, same bucket t — not temporal leakage)
     "cluster_cpu_p90",          # p90 CPU across all machines at this timestamp
     "machine_rank_in_cluster",  # percentile rank of this machine at this timestamp
-    # time-of-day / day-of-week (harmonic encoding)
-    "hour_sin", "hour_cos",  # within-day periodicity
-    "dow_sin",  "dow_cos",   # within-week periodicity
+    # time-of-day (harmonic encoding; dow dropped in Phase 5 — confound on 7-day dataset)
+    "hour_sin", "hour_cos",
 ]
 
 _TRAIN_RATIO:  float = 0.6   # must match spike_feature_engineer._TRAIN_RATIO
@@ -128,6 +129,8 @@ _BINARY_MONOTONE_MAP: dict[str, int] = {
     # higher normalised CPU → more likely to spike
     "cpu_vs_p95":            +1,
     "peak_cpu_vs_p95":       +1,
+    # cpu_per_task: higher per-task intensity → more likely spike (Phase 5)
+    "cpu_per_task":          +1,
     # p99-level features (Fix 5b)
     "spike_severe_now":        +1,   # current severe spike → imminent future spike
     "cpu_vs_p99":              +1,   # higher normalized CPU vs p99 → more likely spike
@@ -210,43 +213,45 @@ class SpikeClassifier:
 
     def __init__(
         self,
-        n_estimators:    int   = 300,
-        max_depth:       int   = 6,
-        learning_rate:   float = 0.05,
-        subsample:       float = 0.8,
-        colsample_bytree: float = 0.8,
-        min_child_weight: int  = 1,    # 1–3 recommended for rare-event detection
-        max_delta_step:  int   = 1,    # caps leaf weight updates — prevents gradient
-                                       # explosion when sample_weight amplifies gradients
-                                       # on imbalanced data (XGBoost issue #4204)
-        gamma:           float = 0.0,  # min loss reduction required to split a node
-        reg_alpha:       float = 0.0,  # L1 regularisation on leaf weights
-        reg_lambda:      float = 1.0,  # L2 regularisation on leaf weights
-        device:          str   = "cpu",  # "cpu" or "cuda" — XGBoost 2.x device param
-        random_state:    int   = 42,
+        n_estimators:          int       = 300,
+        max_depth:             int       = 6,
+        learning_rate:         float     = 0.05,
+        subsample:             float     = 0.8,
+        colsample_bytree:      float     = 0.8,
+        min_child_weight:      int       = 1,    # 1–3 recommended for rare-event detection
+        max_delta_step:        int       = 1,    # caps leaf weight updates — prevents gradient
+                                                 # explosion when sample_weight amplifies gradients
+                                                 # on imbalanced data (XGBoost issue #4204)
+        gamma:                 float     = 0.0,  # min loss reduction required to split a node
+        reg_alpha:             float     = 0.0,  # L1 regularisation on leaf weights
+        reg_lambda:            float     = 1.0,  # L2 regularisation on leaf weights
+        early_stopping_rounds: int | None = None,  # stop when mlogloss on eval_set stops improving
+        device:                str       = "cpu",  # "cpu" or "cuda" — XGBoost 2.x device param
+        random_state:          int       = 42,
     ) -> None:
         device = _resolve_device(device)
         self._feature_cols: list[str] = list(_X_COLS)
 
         self._model = xgb.XGBClassifier(
-            objective        = "multi:softprob",
-            num_class        = _NUM_CLASSES,
-            eval_metric      = "mlogloss",
-            tree_method      = "hist",   # unified histogram method for CPU and GPU (XGBoost 2.x)
-            device           = device,
-            n_estimators     = n_estimators,
-            max_depth        = max_depth,
-            learning_rate    = learning_rate,
-            subsample        = subsample,
-            colsample_bytree = colsample_bytree,
-            min_child_weight = min_child_weight,
-            max_delta_step   = max_delta_step,
-            gamma            = gamma,
-            reg_alpha        = reg_alpha,
-            reg_lambda       = reg_lambda,
+            objective             = "multi:softprob",
+            num_class             = _NUM_CLASSES,
+            eval_metric           = "mlogloss",
+            tree_method           = "hist",   # unified histogram method for CPU and GPU (XGBoost 2.x)
+            device                = device,
+            n_estimators          = n_estimators,
+            max_depth             = max_depth,
+            learning_rate         = learning_rate,
+            subsample             = subsample,
+            colsample_bytree      = colsample_bytree,
+            min_child_weight      = min_child_weight,
+            max_delta_step        = max_delta_step,
+            gamma                 = gamma,
+            reg_alpha             = reg_alpha,
+            reg_lambda            = reg_lambda,
+            early_stopping_rounds = early_stopping_rounds,
             # monotone_constraints: intentionally absent — see module-level NOTE
-            random_state     = random_state,
-            n_jobs           = 1 if device == "cuda" else -1,
+            random_state          = random_state,
+            n_jobs                = 1 if device == "cuda" else -1,
         )
 
     # ── Internal helpers ──────────────────────────────────────────────────────
@@ -262,6 +267,7 @@ class SpikeClassifier:
         X:             pd.DataFrame,
         y:             pd.Series,
         sample_weight: np.ndarray | None = None,
+        eval_set:      list | None       = None,
     ) -> "SpikeClassifier":
         """Fit on training data.
 
@@ -272,12 +278,20 @@ class SpikeClassifier:
         sample_weight : optional per-sample weights for class balancing.
                         Use compute_sample_weight('balanced', y) to balance
                         the 3 severity classes by inverse frequency.
+        eval_set      : optional list of (X_array, y_array) tuples for early
+                        stopping.  Only used when early_stopping_rounds is set
+                        in __init__.  Pass raw numpy arrays (float32, int8).
 
         Returns
         -------
         self
         """
-        self._model.fit(self._to_array(X), y.values, sample_weight=sample_weight)
+        self._model.fit(
+            self._to_array(X), y.values,
+            sample_weight = sample_weight,
+            eval_set      = eval_set,
+            verbose       = False,
+        )
         return self
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
@@ -477,9 +491,10 @@ class BinarySpikeClassifier:
         gamma:            float = 0.0,
         reg_alpha:        float = 0.0,
         reg_lambda:       float = 1.0,
-        scale_pos_weight: float = 1.0,  # n_negative / n_positive for class balance
-        device:           str   = "cpu",
-        random_state:     int   = 42,
+        scale_pos_weight:      float      = 1.0,  # n_negative / n_positive for class balance
+        early_stopping_rounds: int | None = None,
+        device:                str        = "cpu",
+        random_state:          int        = 42,
     ) -> None:
         device = _resolve_device(device)
         self._feature_cols: list[str] = list(_X_COLS)
@@ -501,6 +516,7 @@ class BinarySpikeClassifier:
             reg_lambda            = reg_lambda,
             scale_pos_weight      = scale_pos_weight,
             monotone_constraints  = _BINARY_MONOTONE_STR,
+            early_stopping_rounds = early_stopping_rounds,
             random_state          = random_state,
             n_jobs                = 1 if device == "cuda" else -1,
         )
@@ -513,19 +529,29 @@ class BinarySpikeClassifier:
 
     # ── Public interface ──────────────────────────────────────────────────────
 
-    def fit(self, X: pd.DataFrame, y: pd.Series) -> "BinarySpikeClassifier":
+    def fit(
+        self,
+        X:        pd.DataFrame,
+        y:        pd.Series,
+        eval_set: list | None = None,
+    ) -> "BinarySpikeClassifier":
         """Fit on training data.
 
         Parameters
         ----------
-        X : DataFrame containing at least the columns in _X_COLS.
-        y : binary Series {0, 1} — spike labels, NaN-free.
+        X        : DataFrame containing at least the columns in _X_COLS.
+        y        : binary Series {0, 1} — spike labels, NaN-free.
+        eval_set : optional list of (X_arr, y_arr) pairs for early stopping.
 
         Returns
         -------
         self
         """
-        self._model.fit(self._to_array(X), y.values)
+        self._model.fit(
+            self._to_array(X), y.values,
+            eval_set=eval_set,
+            verbose=False,
+        )
         return self
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
@@ -671,12 +697,13 @@ class BinarySpikeClassifier:
 
 
 def train(
-    features_path: str | Path  = "data/cluster_features.parquet",
-    model_path:    str | Path  = "data/spike_model.json",
-    train_ratio:   float       = _TRAIN_RATIO,
-    val_ratio:     float       = _VAL_RATIO,
-    device:        str         = "cpu",
-    model_kwargs:  dict | None = None,
+    features_path:         str | Path  = "data/cluster_features.parquet",
+    model_path:            str | Path  = "data/spike_model.json",
+    train_ratio:           float       = _TRAIN_RATIO,
+    val_ratio:             float       = _VAL_RATIO,
+    device:                str         = "cpu",
+    model_kwargs:          dict | None = None,
+    early_stopping_rounds: int | None  = None,
 ) -> dict:
     """Train SpikeClassifier and save the model.
 
@@ -787,8 +814,17 @@ def train(
     sw_train = compute_sample_weight("balanced", y_train)
 
     t_start = time.perf_counter()
-    clf = SpikeClassifier(device=device, **(model_kwargs or {}))
-    clf.fit(train_df, y_train, sample_weight=sw_train)
+    clf = SpikeClassifier(
+        device                = device,
+        early_stopping_rounds = early_stopping_rounds,
+        **(model_kwargs or {}),
+    )
+    if early_stopping_rounds is not None:
+        X_val_arr = val_df[clf._feature_cols].astype("float32").values
+        clf.fit(train_df, y_train, sample_weight=sw_train,
+                eval_set=[(X_val_arr, y_val.values)])
+    else:
+        clf.fit(train_df, y_train, sample_weight=sw_train)
     elapsed = time.perf_counter() - t_start
     log.info("  Training time : %.1f s", elapsed)
 

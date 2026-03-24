@@ -125,13 +125,15 @@ def pipeline_result(features_parquet, tmp_path_factory):
         arts_dir / "spike_thresholds.parquet",
     )
     result = run(
-        data_path     = arts_dir / "nonexistent.csv",   # not needed when from_step=3
-        artifacts_dir = arts_dir,
-        train_ratio   = _TRAIN_RATIO,
-        val_ratio     = _VAL_RATIO,
-        from_step     = 3,
-        walk_forward  = False,
-        seed          = 42,
+        data_path             = arts_dir / "nonexistent.csv",   # not needed when from_step=3
+        artifacts_dir         = arts_dir,
+        train_ratio           = _TRAIN_RATIO,
+        val_ratio             = _VAL_RATIO,
+        from_step             = 3,
+        walk_forward          = False,
+        seed                  = 42,
+        n_estimators          = 50,
+        early_stopping_rounds = 10,
     )
     return result, arts_dir
 
@@ -382,9 +384,12 @@ class TestRunPipeline:
         assert result["train_bucket_max"] < result["val_bucket_max"]
 
     def test_binary_horizon_model_dirs_written(self, pipeline_result):
-        """Only spike_15m binary model dir should exist — 30m/45m were dropped."""
+        """spike_15m and spike_severe_ovr model dirs must exist; 30m/45m must not."""
         _, arts = pipeline_result
         assert (arts / "models" / "spike_15m" / "spike_model.json").exists()
+        assert (arts / "models" / "spike_severe_ovr" / "spike_model.json").exists(), (
+            "OVR severe model (Phase 5) must be trained alongside 15m"
+        )
         for removed in ("spike_30m", "spike_45m"):
             assert not (arts / "models" / removed).exists(), (
                 f"{removed} should not be trained"
@@ -407,14 +412,16 @@ class TestRunWithWalkForward:
             arts_dir / "spike_thresholds.parquet",
         )
         result = run(
-            data_path     = arts_dir / "nonexistent.csv",
-            artifacts_dir = arts_dir,
-            train_ratio   = _TRAIN_RATIO,
-            val_ratio     = _VAL_RATIO,
-            from_step     = 3,
-            walk_forward  = True,
-            n_folds       = 3,
-            seed          = 42,
+            data_path             = arts_dir / "nonexistent.csv",
+            artifacts_dir         = arts_dir,
+            train_ratio           = _TRAIN_RATIO,
+            val_ratio             = _VAL_RATIO,
+            from_step             = 3,
+            walk_forward          = True,
+            n_folds               = 3,
+            seed                  = 42,
+            n_estimators          = 50,
+            early_stopping_rounds = 10,
         )
         return result, arts_dir
 
@@ -465,18 +472,21 @@ class TestHyperparameterSearch:
         return df[df["bucket"] <= train_max].reset_index(drop=True)
 
     def test_search_returns_expected_param_keys(self, train_df):
-        """Optuna result must contain all 9 tuned hyperparameter keys."""
-        result        = _run_optuna_search(train_df, seed=42, n_trials=2)
+        """Optuna result must contain all 8 tuned hyperparameter keys.
+        n_estimators is excluded (Phase 5): final training uses 2000 + early stopping.
+        """
+        result        = _run_optuna_search(train_df, seed=42, n_trials=2, n_estimators=50)
         expected_keys = {
-            "n_estimators", "max_depth", "learning_rate",
+            "max_depth", "learning_rate",
             "subsample", "colsample_bytree", "min_child_weight",
             "gamma", "reg_alpha", "reg_lambda",
         }
         assert expected_keys == set(result["params"].keys())
+        assert "n_estimators" not in result["params"]
 
     def test_search_result_structure(self, train_df, tmp_path):
         """Top-level result dict must have all expected metadata keys."""
-        result = _run_optuna_search(train_df, seed=42, n_trials=2, output_dir=tmp_path)
+        result = _run_optuna_search(train_df, seed=42, n_trials=2, output_dir=tmp_path, n_estimators=50)
         assert "params"            in result
         assert "best_macro_pr_auc" in result
         assert "n_trials"          in result
@@ -490,16 +500,21 @@ class TestHyperparameterSearch:
     def test_resume_skips_completed_trials(self, train_df, tmp_path):
         """Running the search twice with the same output_dir must resume, not restart.
         Second call should report resumed_from == first call's n_completed."""
-        r1 = _run_optuna_search(train_df, seed=42, n_trials=2, output_dir=tmp_path)
-        r2 = _run_optuna_search(train_df, seed=42, n_trials=2, output_dir=tmp_path)
+        r1 = _run_optuna_search(train_df, seed=42, n_trials=2, output_dir=tmp_path, n_estimators=50)
+        r2 = _run_optuna_search(train_df, seed=42, n_trials=2, output_dir=tmp_path, n_estimators=50)
         # All trials already done — second call must skip and report resumed_from=2
         assert r2["resumed_from"] == 2
         assert r2["n_completed"]  == 2
 
     def test_warmstart_params_accepted(self, train_df, tmp_path):
-        """warmstart_params must not raise and the enqueued trial is counted."""
+        """warmstart_params must not raise and the enqueued trial is counted.
+
+        Includes n_estimators in the warmstart dict (as an old best_params.json
+        would) — Phase 5 code must filter it out silently before enqueue_trial().
+        """
         warmstart = {
-            "n_estimators": 300, "max_depth": 6, "learning_rate": 0.05,
+            "n_estimators": 300,  # legacy key — must be stripped before enqueue
+            "max_depth": 6, "learning_rate": 0.05,
             "subsample": 0.8, "colsample_bytree": 0.8, "min_child_weight": 1,
             "gamma": 0.0, "reg_alpha": 0.0, "reg_lambda": 1.0,
         }
@@ -507,9 +522,11 @@ class TestHyperparameterSearch:
             train_df, seed=42, n_trials=3,
             output_dir=tmp_path / "ws",
             warmstart_params=warmstart,
+            n_estimators=50,
         )
         assert result["n_completed"] == 3
         assert "params" in result
+        assert "n_estimators" not in result["params"]
 
     def test_config_has_hyperparameter_search_block_after_tuning(
         self, features_parquet, tmp_path_factory
@@ -527,15 +544,17 @@ class TestHyperparameterSearch:
             arts_dir / "spike_thresholds.parquet",
         )
         run(
-            data_path        = arts_dir / "nonexistent.csv",
-            artifacts_dir    = arts_dir,
-            train_ratio      = _TRAIN_RATIO,
-            val_ratio        = _VAL_RATIO,
-            from_step        = 3,
-            walk_forward     = False,
-            seed             = 42,
-            tune_hyperparams = True,
-            n_trials         = 2,
+            data_path             = arts_dir / "nonexistent.csv",
+            artifacts_dir         = arts_dir,
+            train_ratio           = _TRAIN_RATIO,
+            val_ratio             = _VAL_RATIO,
+            from_step             = 3,
+            walk_forward          = False,
+            seed                  = 42,
+            tune_hyperparams      = True,
+            n_trials              = 2,
+            n_estimators          = 50,
+            early_stopping_rounds = 10,
         )
         cfg = json.loads(
             (arts_dir / "models" / "spike" / "spike_config.json").read_text()
@@ -545,4 +564,4 @@ class TestHyperparameterSearch:
         assert hs["enabled"] is True
         assert hs["best_params"] is not None
         assert isinstance(hs["best_params"], dict)
-        assert len(hs["best_params"]) == 9
+        assert len(hs["best_params"]) == 8

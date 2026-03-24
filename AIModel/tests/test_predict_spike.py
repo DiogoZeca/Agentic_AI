@@ -142,11 +142,12 @@ def _make_fake_artifacts(
     thresholds: dict[int, float] | None = None,
     thresholds_p99: dict[int, float] | None = None,
     include_binary_horizons: bool = True,
+    include_severe_ovr: bool = False,
 ) -> tuple[Path, _Artifacts]:
     """Build a minimal fake model directory and return (model_dir, artifacts).
 
-    Trains a 5-tree XGBoost 3-class model for 60m and optionally 3 binary
-    models for 15m/30m/45m.
+    Trains a 5-tree XGBoost 3-class model for 60m and optionally binary models
+    for 15m and/or severe_ovr (Phase 5).
     """
     feature_cols   = feature_cols   or list(_X_COLS)
     thresholds     = thresholds     or {1: 0.30, 2: 0.32}
@@ -163,6 +164,11 @@ def _make_fake_artifacts(
     if include_binary_horizons:
         _write_horizon_dir(models_dir, "spike_15m", feature_cols,
                            alarm_threshold * 0.8, binary=True)
+
+    # OVR severe binary model (Phase 5)
+    if include_severe_ovr:
+        _write_horizon_dir(models_dir, "spike_severe_ovr", feature_cols,
+                           alarm_threshold * 0.9, binary=True)
 
     thresh_df = pd.DataFrame([
         {
@@ -652,6 +658,51 @@ class TestOperational:
 
         # Both outputs must contain the same predictions
         assert from_file["predictions"] == from_stdout["predictions"]
+
+
+# ── Phase 5: OVR severe model ─────────────────────────────────────────────────
+
+
+def test_severe_ovr_model_loaded_when_present(tmp_path):
+    """_load_artifacts must load spike_severe_ovr if the directory exists."""
+    _, arts = _make_fake_artifacts(tmp_path, thresholds={1: 0.30}, include_severe_ovr=True)
+    assert "severe_ovr" in arts.boosters, (
+        "severe_ovr booster should be loaded when spike_severe_ovr/ dir exists"
+    )
+    assert "severe_ovr" in arts.alarm_thresholds
+
+
+def test_severe_ovr_model_absent_does_not_raise(tmp_path):
+    """_load_artifacts must succeed silently when spike_severe_ovr/ is absent."""
+    _, arts = _make_fake_artifacts(tmp_path, thresholds={1: 0.30}, include_severe_ovr=False)
+    assert "severe_ovr" not in arts.boosters
+
+
+def test_p_severe_ovr_present_when_model_loaded(tmp_path):
+    """When OVR model is loaded, predictions must include p_severe_ovr."""
+    model_dir, _ = _make_fake_artifacts(
+        tmp_path, thresholds={1: 0.30, 2: 0.32}, include_severe_ovr=True
+    )
+    df = _make_window_df(machine_ids=[1, 2], n_buckets=24)
+    result = predict(df, model_dir)
+    for pred in result["predictions"]:
+        if pred["status"] != "cold_start":
+            assert "p_severe_ovr" in pred, "p_severe_ovr must be in prediction when OVR model present"
+            assert isinstance(pred["p_severe_ovr"], float)
+            assert 0.0 <= pred["p_severe_ovr"] <= 1.0
+
+
+def test_p_severe_ovr_null_when_model_absent(tmp_path):
+    """When OVR model is absent, p_severe_ovr must be null in predictions."""
+    model_dir, _ = _make_fake_artifacts(
+        tmp_path, thresholds={1: 0.30, 2: 0.32}, include_severe_ovr=False
+    )
+    df = _make_window_df(machine_ids=[1, 2], n_buckets=24)
+    result = predict(df, model_dir)
+    for pred in result["predictions"]:
+        assert pred.get("p_severe_ovr") is None, (
+            "p_severe_ovr must be null when OVR model is absent"
+        )
 
 
 def test_imminence_has_only_15m_and_60m_horizons(tmp_path):

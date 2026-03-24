@@ -112,11 +112,22 @@ _SPIKE_QUANTILE_P99:   float = 0.99   # severe exceedance boundary (Phase 3)
 _MAX_TIME_SINCE_SPIKE: int   = 24    # cap for time_since_last_spike (24 × 5 min = 2 h)
 _BUCKETS_PER_DAY:      int   = 288   # 24 h × 12 buckets/h (5-min windows)
 
+# Time-interval window sizes — grouped here so tuning one value updates all usages.
+# All sizes are in 5-min bucket units.  The horizon (12 buckets = 60 min) sets the
+# upper bound on look-ahead; all look-back windows should stay ≤ _HORIZON to avoid
+# redundancy with the lag features.
+_ROLLING_STD_WINDOW:     int   = 6          # 30-min volatility window  (6 × 5-min buckets)
+_CPU_DELTA_LAGS:         tuple = (1, 2)     # first and second differences of CPU load
+_SPIKE_HISTORY_WINDOWS:  tuple = (1, 3, 6)  # lookback windows for p95 spike history features
+_SEVERE_HISTORY_WINDOWS: tuple = (1, 3, 6)  # lookback windows for p99 spike history features
+
 _FEATURE_COLS: list[str] = [
     # identifiers
     "machine_id", "bucket", "time_us",
     # raw signals
     "total_cpu", "peak_cpu", "total_mem", "peak_mem", "disk_io", "n_tasks",
+    # derived raw: CPU load per concurrent task (Phase 5)
+    "cpu_per_task",
     # lag history (Phase 2: dropped cpu_lag_2/3/6 — combined gain 0.010)
     "cpu_lag_1", "cpu_lag_12", "cpu_lag_24",
     # trend
@@ -132,8 +143,8 @@ _FEATURE_COLS: list[str] = [
     "cpu_spike_rate_24",    # fraction of previous 24 windows spiking (Phase 2)
     # cluster-level (cross-sectional, same bucket t)
     "cluster_cpu_p90", "machine_rank_in_cluster",
-    # time-of-day / day-of-week (harmonic encoding)
-    "hour_sin", "hour_cos", "dow_sin", "dow_cos",
+    # time-of-day (harmonic encoding; dow dropped in Phase 5 — confound on 7-day dataset)
+    "hour_sin", "hour_cos",
     # p99-level features (Fix 1)
     "spike_severe_now",       # is total_cpu[t] already above p99 threshold? (binary)
     "cpu_vs_p99",             # total_cpu / machine p99 threshold
@@ -291,6 +302,11 @@ def _engineer_machine(
         g[col] = g[col].fillna(0.0)
     g["n_tasks"] = g["n_tasks"].fillna(0).astype("int32")
 
+    # cpu_per_task: intensity per concurrent task.
+    # clip(lower=1) prevents division by zero for gap-filled windows where n_tasks=0.
+    # Idle windows have total_cpu=0 too, so the result is 0/1 = 0 (correct).
+    g["cpu_per_task"] = (g["total_cpu"] / g["n_tasks"].clip(lower=1)).astype("float32")
+
     cpu = g["total_cpu"]
 
     # ── Lag features ──────────────────────────────────────────────────────────
@@ -306,10 +322,10 @@ def _engineer_machine(
     g["cpu_delta_1"]      = delta_1
     g["cpu_delta_2"]      = (delta_1 - delta_1.shift(1).fillna(0.0)).astype("float32")
 
-    # Rolling std over last 6 windows — captures load volatility.
+    # Rolling std over last _ROLLING_STD_WINDOW windows — captures load volatility.
     # min_periods=1: returns 0 on first row (std of one value = NaN → fillna 0).
     g["cpu_rolling_std_6"] = (
-        cpu.rolling(6, min_periods=1).std().fillna(0.0).astype("float32")
+        cpu.rolling(_ROLLING_STD_WINDOW, min_periods=1).std().fillna(0.0).astype("float32")
     )
 
     # ── Task dominance ────────────────────────────────────────────────────────
@@ -358,8 +374,8 @@ def _engineer_machine(
     # Rolling p99 exceedance history — shift(1) guards against leakage
     exc_sev = spike_severe_now.shift(1).fillna(0).astype("float32")
     g["spike_severe_in_last_1"] = exc_sev.values
-    g["spike_severe_in_last_3"] = exc_sev.rolling(3, min_periods=1).max().astype("float32").values
-    g["spike_severe_in_last_6"] = exc_sev.rolling(6, min_periods=1).max().astype("float32").values
+    g["spike_severe_in_last_3"] = exc_sev.rolling(_SEVERE_HISTORY_WINDOWS[1], min_periods=1).max().astype("float32").values
+    g["spike_severe_in_last_6"] = exc_sev.rolling(_SEVERE_HISTORY_WINDOWS[2], min_periods=1).max().astype("float32").values
 
     # ── Spike history features ────────────────────────────────────────────────
     # LEAKAGE FIREWALL: spike_now uses current window only (not future).
@@ -371,15 +387,15 @@ def _engineer_machine(
 
     g["spike_now"]      = spike_now
     g["spike_in_last_1"] = exc
-    g["spike_in_last_3"] = exc.rolling(3, min_periods=1).max().astype("float32")
-    g["spike_in_last_6"] = exc.rolling(6, min_periods=1).max().astype("float32")
+    g["spike_in_last_3"] = exc.rolling(_SPIKE_HISTORY_WINDOWS[1], min_periods=1).max().astype("float32")
+    g["spike_in_last_6"] = exc.rolling(_SPIKE_HISTORY_WINDOWS[2], min_periods=1).max().astype("float32")
 
     # cpu_spike_rate_24: fraction of the previous 24 windows that were spiking.
     # Reuses `exc` (shift(1) applied) — same leakage firewall; never uses current t.
     # Captures "chronic spiker" machines that neither spike_in_last_6 (binary)
     # nor consecutive_spikes (unbroken run) can represent.
     g["cpu_spike_rate_24"] = (
-        exc.rolling(24, min_periods=1).mean().fillna(0.0).astype("float32")
+        exc.rolling(_MAX_TIME_SINCE_SPIKE, min_periods=1).mean().fillna(0.0).astype("float32")
     )
 
     # time_since_last_spike: how many windows ago was the last exceedance,
@@ -526,7 +542,7 @@ def _add_cluster_features(df: pd.DataFrame, train_bucket_max: int) -> pd.DataFra
 
 
 def _add_time_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add cyclical time-of-day and day-of-week features.
+    """Add cyclical time-of-day features.
 
     Derived from the bucket index only — no epoch lookup required.
     ``bucket % 288`` captures within-day periodicity regardless of the
@@ -537,19 +553,21 @@ def _add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     hour 0 are angularly adjacent in sin/cos space but numerically far apart
     as integers.
 
+    Phase 5: dow_sin / dow_cos removed.  High SHAP (0.356) combined with low
+    XGBoost gain (0.011) indicates a global-bias corrector via interaction
+    effects, not genuine weekly periodicity.  With only 7 days of data (~23
+    samples per DOW label) the signal is confound-level, not structural.
+
     Parameters
     ----------
     df : post-concat DataFrame.
     """
     two_pi = float(2.0 * np.pi)
 
-    bucket_in_day  = (df["bucket"] % _BUCKETS_PER_DAY).astype("float32")
-    bucket_in_week = (df["bucket"] % (_BUCKETS_PER_DAY * 7)).astype("float32")
+    bucket_in_day = (df["bucket"] % _BUCKETS_PER_DAY).astype("float32")
 
-    df["hour_sin"] = np.sin(two_pi * bucket_in_day  / _BUCKETS_PER_DAY).astype("float32")
-    df["hour_cos"] = np.cos(two_pi * bucket_in_day  / _BUCKETS_PER_DAY).astype("float32")
-    df["dow_sin"]  = np.sin(two_pi * bucket_in_week / (_BUCKETS_PER_DAY * 7)).astype("float32")
-    df["dow_cos"]  = np.cos(two_pi * bucket_in_week / (_BUCKETS_PER_DAY * 7)).astype("float32")
+    df["hour_sin"] = np.sin(two_pi * bucket_in_day / _BUCKETS_PER_DAY).astype("float32")
+    df["hour_cos"] = np.cos(two_pi * bucket_in_day / _BUCKETS_PER_DAY).astype("float32")
 
     return df
 
