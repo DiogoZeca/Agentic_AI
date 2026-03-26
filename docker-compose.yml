@@ -51,7 +51,7 @@ services:
       - DEVICE=cuda
       - DATA_PATH=data/cluster_cpu_data.csv
       - ARTIFACTS_DIR=data/full_run
-      - OPTUNA_TRIALS=30
+      - OPTUNA_TRIALS=150
     volumes:
       # Input CSV (read) + artifact output (write) both under the same mount.
       # Trained models are accessible from the host at ./AIModel/data/full_run/.

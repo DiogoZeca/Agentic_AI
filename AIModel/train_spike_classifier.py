@@ -484,6 +484,9 @@ def _compute_feature_importance(
         log.info("  SHAP values computed (shap package available)")
     except ImportError:
         log.info("  shap package not installed — skipping SHAP values (gain only)")
+    except Exception as exc:
+        log.warning("  SHAP computation failed (%s: %s) — gain-only importance saved",
+                    type(exc).__name__, exc)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _write_csv(output_path, rows)

@@ -84,8 +84,11 @@ sudo systemctl restart docker
 echo ""
 echo "==> [5/5] Smoke test — running nvidia-smi inside a container..."
 
-docker run --rm --gpus all \
-    nvidia/cuda:12.4.1-base-ubuntu24.04 \
+# Add current user to docker group so future commands don't need sudo
+sudo usermod -aG docker "$USER"
+
+sudo docker run --rm --gpus all \
+    nvidia/cuda:12.4.1-base-ubuntu22.04 \
     nvidia-smi
 
 echo ""
