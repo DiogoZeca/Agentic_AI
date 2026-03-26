@@ -463,27 +463,36 @@ def _compute_feature_importance(
         for col in sorted(gain_norm, key=gain_norm.get, reverse=True)
     ]
 
-    # SHAP — optional, not a hard dependency
+    # SHAP — use XGBoost's native TreeSHAP (pred_contribs=True) which is always
+    # compatible with any XGBoost version.  shap.TreeExplainer crashes on
+    # XGBoost >= 3.1 multiclass models because base_score is now a vector;
+    # that bug is fixed in shap >= 0.50.0 but that release requires Python >= 3.11.
     try:
-        import shap  # type: ignore[import]
-        explainer = shap.TreeExplainer(clf._model)
-        shap_vals = explainer.shap_values(X_val[_X_COLS].astype("float32"))
-        # shap_values() return shape depends on objective:
-        #   binary:logistic  → 2-D array (n_samples, n_features)
-        #   multi:softprob   → list of 2-D arrays or 3-D array (n_samples, n_features, n_classes)
-        if isinstance(shap_vals, list):
-            # List of (n_samples, n_features) arrays — mean absolute SHAP across classes
-            shap_means = np.mean([np.abs(sv) for sv in shap_vals], axis=0).mean(axis=0)
-        elif isinstance(shap_vals, np.ndarray) and shap_vals.ndim == 3:
-            shap_means = np.abs(shap_vals).mean(axis=(0, 2))
+        import xgboost as xgb  # always available (training dependency)
+
+        X_sample = X_val[_X_COLS].astype("float32")
+        if len(X_sample) > 50_000:
+            rng = np.random.default_rng(42)
+            idx = rng.choice(len(X_sample), 50_000, replace=False)
+            X_sample = X_sample.iloc[idx]
+
+        booster  = clf._model.get_booster()
+        contribs = booster.predict(xgb.DMatrix(X_sample.values), pred_contribs=True)
+
+        n_features = len(_X_COLS)
+        if contribs.shape[1] == n_features + 1:
+            # Binary:     (n_samples, n_features + 1)  — last col is bias
+            shap_means = np.abs(contribs[:, :n_features]).mean(axis=0)
         else:
-            shap_means = np.abs(shap_vals).mean(axis=0)
+            # Multiclass: (n_samples, n_classes * (n_features + 1))
+            n_classes = contribs.shape[1] // (n_features + 1)
+            shaped    = contribs.reshape(len(X_sample), n_classes, n_features + 1)
+            shap_means = np.abs(shaped[:, :, :n_features]).mean(axis=(0, 1))
+
         shap_map = dict(zip(_X_COLS, shap_means.tolist()))
         for r in rows:
             r["shap_mean_abs"] = round(float(shap_map[r["feature"]]), 6)
-        log.info("  SHAP values computed (shap package available)")
-    except ImportError:
-        log.info("  shap package not installed — skipping SHAP values (gain only)")
+        log.info("  SHAP values computed (XGBoost native pred_contribs)")
     except Exception as exc:
         log.warning("  SHAP computation failed (%s: %s) — gain-only importance saved",
                     type(exc).__name__, exc)
