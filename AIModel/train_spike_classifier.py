@@ -480,11 +480,14 @@ def _compute_feature_importance(
         contribs = booster.predict(xgb.DMatrix(X_sample.values), pred_contribs=True)
 
         n_features = len(_X_COLS)
-        if contribs.shape[1] == n_features + 1:
-            # Binary:     (n_samples, n_features + 1)  — last col is bias
+        if contribs.ndim == 3:
+            # XGBoost 3.x returns (n_samples, n_classes, n_features + 1) directly
+            shap_means = np.abs(contribs[:, :, :n_features]).mean(axis=(0, 1))
+        elif contribs.shape[1] == n_features + 1:
+            # Binary: (n_samples, n_features + 1) — last col is bias
             shap_means = np.abs(contribs[:, :n_features]).mean(axis=0)
         else:
-            # Multiclass: (n_samples, n_classes * (n_features + 1))
+            # Multiclass flat (older XGBoost): (n_samples, n_classes * (n_features + 1))
             n_classes = contribs.shape[1] // (n_features + 1)
             shaped    = contribs.reshape(len(X_sample), n_classes, n_features + 1)
             shap_means = np.abs(shaped[:, :, :n_features]).mean(axis=(0, 1))
