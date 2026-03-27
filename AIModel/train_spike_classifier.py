@@ -1289,6 +1289,16 @@ def run(
     del clf
     gc.collect()
 
+    # Binary models (binary:logistic) run on CPU even when the 60m model used CUDA.
+    # After the 60m GPU training, CUDA memory pools are not fully released by
+    # gc.collect() — the CUDA runtime holds onto allocations until the process
+    # exits or the driver decides to compact.  With 16 GB VRAM, loading another
+    # 14M-row training set on top of the 60m residual reliably triggers a silent
+    # OOM kill.  binary:logistic is simple enough that CPU training is fast (~20
+    # min per model) and removes the VRAM dependency entirely.
+    binary_device = "cpu" if device == "cuda" else device
+    log.info("  Binary models will use device='%s' (avoids VRAM conflict with 60m GPU residual)", binary_device)
+
     # ── Binary horizon models (15m only — 30m/45m dropped in Fix 3) ───────────
     # Log available RAM before starting binary training — helpful for OOM diagnosis.
     try:
@@ -1338,7 +1348,7 @@ def run(
             n_folds               = n_folds,
             walk_forward          = walk_forward,
             seed                  = seed,
-            device                = device,
+            device                = binary_device,
             tune_hyperparams      = tune_hyperparams,
             n_trials              = n_trials,
             warmstart_params      = binary_warmstart,
@@ -1375,7 +1385,7 @@ def run(
         n_folds               = n_folds,
         walk_forward          = walk_forward,
         seed                  = seed,
-        device                = device,
+        device                = binary_device,
         tune_hyperparams      = tune_hyperparams,
         n_trials              = n_trials,
         warmstart_params      = binary_warmstart,
