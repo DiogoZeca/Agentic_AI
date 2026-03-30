@@ -11,8 +11,7 @@ machine.
 Input schema (cluster_agg format)
 ----------------------------------
   machine_id  int64   — unique machine identifier
-  bucket      int64   — 5-min bucket index (monotonically increasing, same epoch
-                        as training data)
+  bucket      int64   — 5-min bucket index (monotonically increasing per machine)
   time_us     int64   — bucket * 300_000_000 (microseconds since trace epoch)
   total_cpu   float32 — duration-weighted total CPU load  (fraction of 1 core)
   peak_cpu    float32 — peak cpu_rate observed in this bucket
@@ -69,6 +68,7 @@ import argparse
 import json
 import logging
 import os
+import pickle
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -136,6 +136,8 @@ class _Artifacts:
     thresholds_p99:    pd.Series                 # machine_id (int) → threshold_p99 (float)
     horizon_minutes:   int                       # primary horizon for output annotation
     model_dir:         Path                      # source directory (for response metadata)
+    trained_at:        str | None = None         # ISO-8601 timestamp from spike_config.json
+    calibrators_60m:   list | None = None        # per-class IsotonicRegression fitted on val set
 
 
 # ── Load artefacts ────────────────────────────────────────────────────────────
@@ -235,10 +237,23 @@ def _load_artifacts(model_dir: Path) -> _Artifacts:
     config_path = model_dir / "spike_config.json"
     config      = json.loads(config_path.read_text())
     inf         = config.get("inference", {})
+    trained_at  = config.get("trained_at")
 
     thresholds_df  = pd.read_parquet(thresholds_path)
     thresholds     = thresholds_df.set_index("machine_id")["threshold_p95"]
     thresholds_p99 = thresholds_df.set_index("machine_id")["threshold_p99"]
+
+    # Load optional per-class isotonic calibrators (fitted on val set during training).
+    # When present, raw softmax probabilities are calibrated before threshold comparisons.
+    # Absent on first-run models — inference degrades gracefully to raw probabilities.
+    calibrators_60m = None
+    cal_path = model_dir / "calibrators.pkl"
+    if cal_path.exists():
+        with open(cal_path, "rb") as _f:
+            calibrators_60m = pickle.load(_f)
+        log.info("  Calibrators     : loaded (%d classes)", len(calibrators_60m))
+    else:
+        log.info("  Calibrators     : not found — using raw softmax probabilities")
 
     log.info("Artefacts loaded from %s", model_dir)
     log.info("  Horizons loaded : %s", ", ".join(sorted(boosters.keys())))
@@ -260,6 +275,8 @@ def _load_artifacts(model_dir: Path) -> _Artifacts:
         thresholds_p99    = thresholds_p99,
         horizon_minutes   = int(inf.get("horizon_minutes", 60)),
         model_dir         = model_dir.resolve(),
+        trained_at        = trained_at,
+        calibrators_60m   = calibrators_60m,
     )
 
 
@@ -435,6 +452,17 @@ def _run_inference(
                 # multi:softprob — inplace_predict returns (n, 3): [P(no), P(mod), P(sev)]
                 raw      = booster.inplace_predict(X)
                 probas_h = raw.reshape(-1, 3)
+                # Apply per-class isotonic calibration when calibrators are available.
+                # Calibrators are fitted on the val set during training (sklearn IsotonicRegression).
+                # Renormalize after calibration so probabilities sum to 1.
+                if artifacts.calibrators_60m is not None:
+                    cals = artifacts.calibrators_60m
+                    cal  = np.column_stack([
+                        np.clip(cals[k].predict(probas_h[:, k].astype("float64")), 0.0, 1.0)
+                        for k in range(3)
+                    ])
+                    row_sums = cal.sum(axis=1, keepdims=True)
+                    probas_h = np.where(row_sums > 0, cal / row_sums, cal).astype("float32")
             else:
                 # binary:logistic — use strict_shape=True to always get (n, 1),
                 # eliminating version-dependent shape variance.  Without it,

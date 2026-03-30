@@ -116,6 +116,8 @@ def ready() -> dict[str, Any]:
         "horizons":        sorted(_artifacts.boosters.keys()),
         "known_machines":  int(len(_artifacts.thresholds)),
         "feature_count":   int(len(_artifacts.feature_cols)),
+        "trained_at":      _artifacts.trained_at,
+        "calibrated":      _artifacts.calibrators_60m is not None,
     }
 
 

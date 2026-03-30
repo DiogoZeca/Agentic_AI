@@ -168,23 +168,24 @@ only 7 days of data (23 samples per label), confirmed temporal confound with the
 - **Macro PR-AUC** — primary metric for 60m model (equal weight to all severity classes including rare severe)
 - **Binary Optuna capped at 30 trials** — binary:logistic converges faster than multi:softprob
 - **Optuna inner split capped at 2M rows** — OOM prevention for binary model (full inner split = 7M+ rows)
-- **Early stopping** — `n_estimators=2000`, `early_stopping_rounds=150`; `n_estimators` removed from Optuna search space
+- **Early stopping** — `n_estimators=4000` (CLI default), `early_stopping_rounds=150`; `n_estimators` removed from Optuna search space; programmatic `run()` default is 2000 (tests use this)
 - **`aucpr` not usable for multiclass** — XGBoost issue #5662; use `mlogloss` for 60m model early stopping
 - **GPU training** — `device='cuda'` + `tree_method='hist'` (correct XGBoost 2.x/3.x syntax); `n_jobs=1` required when `device='cuda'`; `_resolve_device()` falls back to CPU silently if no CUDA GPU found
 
-## Current Performance (Phase 5, 2026-03-24)
+## Current Performance (Phase 5, 2026-03-30 — VM training run)
 
-| Model | CV Macro PR-AUC | Test Macro PR-AUC |
-|-------|-----------------|-------------------|
-| 60m severity | **0.565 ± 0.010** | 0.522 |
-| 15m binary | pending (first full run — OOM fixes applied) | — |
-| OVR severe | pending (first run) | — |
+| Model | CV Macro PR-AUC | Test Macro PR-AUC | Test ROC-AUC |
+|-------|-----------------|-------------------|--------------|
+| 60m severity | **0.559 ± 0.008** | 0.556 | 0.839 |
+| 15m binary | 0.584 ± 0.008 | 0.575 | 0.911 |
+| OVR severe | — | see `models/spike_severe_ovr/spike_config.json` | — |
 
-Per-class on test (60m model): `no_spike`=0.965, `moderate`=0.278, `severe`=0.324.
-Alarm threshold: 0.70 → Precision=0.382 / Recall=0.332 / ~12.4 alarms/day.
+Per-class on test (60m model): `no_spike`=0.970, `moderate`=0.367, `severe`=0.330.
+Alarm threshold: 0.55 → Precision=0.385 / Recall=0.444 / ~17.9 alarms/day.
 
-Note: Performance numbers are from Phase 3/4 with 39 features. Phase 5 adds `cpu_per_task`,
-drops `dow_sin`/`dow_cos`, and adds the OVR severe model — results pending the VM training run.
+CV-test gap improved from 0.043 (Phase 3/4) to 0.003: dropping `dow_sin`/`dow_cos`
+eliminated the dominant temporal confound. Model `best_iteration=1997/2000` — not
+converged; next run should use `--n-estimators 4000`.
 
 ## Training Artifacts
 
@@ -199,6 +200,7 @@ All written to `--artifacts-dir` (default `data/full_run/`):
 | `models/spike/spike_config.json` | Threshold sweep, class rates, CV summary, hyperparams |
 | `models/spike/feature_importance.csv` | XGBoost gain + SHAP importances |
 | `models/spike/best_params.json` | Best Optuna hyperparameters |
+| `models/spike/calibrators.pkl` | Per-class isotonic calibrators (fitted on val set) |
 | `models/spike_15m/spike_model.json` | 15m binary XGBoost model |
 | `models/spike_15m/spike_config.json` | Config + best params |
 | `models/spike_severe_ovr/spike_model.json` | OVR severe binary XGBoost model |

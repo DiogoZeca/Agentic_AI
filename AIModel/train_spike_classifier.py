@@ -55,6 +55,7 @@ import csv
 import gc
 import json
 import logging
+import pickle
 import shutil
 import sys
 import time
@@ -65,6 +66,7 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from scipy.stats import kendalltau
+from sklearn.isotonic import IsotonicRegression
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import (
     average_precision_score,
@@ -1282,6 +1284,26 @@ def run(
     # ── Alarm threshold sweep table ───────────────────────────────────────────
     clf = SpikeClassifier.load(model_path)
 
+    # ── Isotonic calibration ──────────────────────────────────────────────────
+    # Fit one IsotonicRegression per class on validation set probabilities.
+    # Calibration maps raw softmax outputs to empirical class probabilities,
+    # improving the cost-rational decisions downstream that depend on the
+    # absolute probability scale (not just ranking).
+    log.info("  Fitting isotonic calibrators on validation set …")
+    raw_val_probs = clf.predict_proba(X_val_compact)  # shape (n, 3)
+    y_val_arr     = y_val_compact.values
+    calibrators   = []
+    for k in range(3):
+        y_k = (y_val_arr == k).astype("float64")
+        p_k = raw_val_probs[:, k].astype("float64")
+        ir  = IsotonicRegression(out_of_bounds="clip")
+        ir.fit(p_k, y_k)
+        calibrators.append(ir)
+    cal_path = model_dir / "calibrators.pkl"
+    with open(cal_path, "wb") as _f:
+        pickle.dump(calibrators, _f, protocol=pickle.HIGHEST_PROTOCOL)
+    log.info("  Calibrators saved  : %s", cal_path)
+
     sweep_rows = _threshold_sweep_table(clf, X_val_compact, y_val_compact, n_val_rows)
     log.info("  ALARM THRESHOLD SWEEP  (p_severe on validation set)")
     _print_threshold_table(sweep_rows, result["alarm_threshold"])
@@ -1622,6 +1644,19 @@ def _parse_args() -> argparse.Namespace:
             "30 trials is a practical minimum; 50–100 yields diminishing returns."
         ),
     )
+    p.add_argument(
+        "--n-estimators",
+        dest    = "n_estimators",
+        type    = int,
+        default = 4000,
+        metavar = "N",
+        help    = (
+            "Maximum boosting rounds for final model training  (default: 4000). "
+            "Early stopping (150 rounds without improvement) typically halts well "
+            "before this cap.  Increase if best_iteration equals n_estimators in "
+            "spike_config.json (model has not converged)."
+        ),
+    )
     return p.parse_args()
 
 
@@ -1641,4 +1676,5 @@ if __name__ == "__main__":
         target_pos_rate  = args.target_pos_rate,
         tune_hyperparams = args.tune_hyperparams,
         n_trials         = args.n_trials,
+        n_estimators     = args.n_estimators,
     )
