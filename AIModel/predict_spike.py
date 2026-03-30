@@ -218,8 +218,19 @@ def _load_artifacts(model_dir: Path) -> _Artifacts:
                 boosters[h_name]         = b
                 alarm_thresholds[h_name] = alm
                 log.info("  Loaded %s binary model from %s", h_name, h_dir.name)
-            except Exception as e:
-                log.warning("  Could not load %s model: %s — skipping", h_name, e)
+            except FileNotFoundError as e:
+                # A companion artefact (meta.json, config.json) is missing.
+                # Expected when the model hasn't been trained yet — degrade
+                # gracefully, the 60m model still produces valid predictions.
+                log.warning("  Optional %s model incomplete (missing artefact) — skipping: %s", h_name, e)
+            except (RuntimeError, ValueError) as e:
+                # Structural integrity error (feature mismatch, corrupted JSON,
+                # incompatible XGBoost version).  This is unexpected — a silently
+                # wrong prediction is worse than a hard failure here.
+                raise RuntimeError(
+                    f"Artefact integrity error in optional '{h_name}' model — "
+                    f"re-train or delete corrupted artefacts. Cause: {e}"
+                ) from e
 
     config_path = model_dir / "spike_config.json"
     config      = json.loads(config_path.read_text())
@@ -414,16 +425,18 @@ def _run_inference(
         machine_ids_col = feature_df["machine_id"].values
 
         for h_name, booster in artifacts.boosters.items():
-            raw = booster.inplace_predict(X)
             if h_name == "60m":
-                # multi:softprob — reshape to (n, 3): [P(no), P(mod), P(sev)]
+                # multi:softprob — inplace_predict returns (n, 3): [P(no), P(mod), P(sev)]
+                raw      = booster.inplace_predict(X)
                 probas_h = raw.reshape(-1, 3)
             else:
-                # binary:logistic — reshape to (n, 2): [P(no), P(spike)]
-                if raw.ndim == 1:
-                    probas_h = np.stack([1 - raw, raw], axis=1)
-                else:
-                    probas_h = raw.reshape(-1, 2)
+                # binary:logistic — use strict_shape=True to always get (n, 1),
+                # eliminating version-dependent shape variance.  Without it,
+                # XGBoost may return (n,) in some versions, (n,1) in others; a
+                # naive reshape(-1, 2) on a (n,1) array silently corrupts values.
+                raw  = booster.inplace_predict(X, strict_shape=True)  # (n, 1)
+                p1   = raw[:, 0]                                        # P(spike)
+                probas_h = np.stack([1 - p1, p1], axis=1)              # (n, 2)
 
             # For each row, record probability; keep only the LAST bucket per machine
             for i, mid in enumerate(machine_ids_col):
@@ -500,7 +513,9 @@ def _run_inference(
 
             if pv_60m is not None:
                 alm_60m = artifacts.alarm_thresholds.get("60m", 0.5)
-                p_sev_enforced = p_enforced.get("60m", p_sev)
+                # p_spike_60m_enforced = max(p_15m, p_mod+p_sev) after monotonic
+                # enforcement — P(any spike in 60m), not P(severe specifically).
+                p_spike_60m_enforced = p_enforced.get("60m", p_spike_60m)
                 # is_severe: prefer OVR model when available (Phase 5)
                 if p_sev_ovr is not None:
                     is_severe_60m = bool(p_sev_ovr >= alm_ovr)
@@ -511,7 +526,7 @@ def _run_inference(
                     "p_no_spike":      round(p_no,  6),
                     "p_moderate":      round(p_mod, 6),
                     "p_severe":        round(p_sev, 6),
-                    "p_spike":         round(p_sev_enforced, 6) if p_sev_enforced is not None else round(p_spike_60m, 6),
+                    "p_spike":         round(p_spike_60m_enforced, 6),
                     "is_spike":        bool(sev_cls >= 1),
                     "is_severe":       is_severe_60m,
                     "alarm_threshold": round(alm_60m, 4),

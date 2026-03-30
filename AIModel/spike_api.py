@@ -56,12 +56,13 @@ async def lifespan(app: FastAPI):
     import os
     model_dir = os.environ.get("MODEL_DIR", "/app/data/full_run/models/spike")
     log.info("Loading artefacts from %s …", model_dir)
-    try:
-        _artifacts = _load_artifacts(__import__("pathlib").Path(model_dir))
-        log.info("Artefacts loaded — service ready.")
-    except Exception as exc:
-        log.error("Failed to load artefacts: %s", exc)
-        # Don't crash the process — /ready will return 503 until artefacts load.
+    # Let exceptions propagate — Starlette sends lifespan.startup.failed to
+    # uvicorn, which sets should_exit=True and terminates with a non-zero exit
+    # code.  A container restart policy then handles recovery.  Swallowing the
+    # exception leaves the process alive but permanently broken (_artifacts=None),
+    # which fools liveness probes into never restarting the container.
+    _artifacts = _load_artifacts(__import__("pathlib").Path(model_dir))
+    log.info("Artefacts loaded — service ready.")
     yield
     log.info("Shutting down.")
 

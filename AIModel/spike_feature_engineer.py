@@ -350,9 +350,14 @@ def _engineer_machine(
     # Machines where the average looks safe but the peak grazed the threshold are
     # currently invisible to the model — this feature surfaces them.
     peak = g["peak_cpu"].values
-    g["peak_cpu_vs_p95"] = np.where(
-        threshold > 0, peak / threshold, 0.0
-    ).astype("float32")
+    # np.divide with out/where avoids the spurious RuntimeWarning: divide by zero
+    # that np.where triggers even when the zero-threshold branch is not selected
+    # (NumPy evaluates both branches before masking).
+    g["peak_cpu_vs_p95"] = np.divide(
+        peak, threshold,
+        out   = np.zeros(len(peak), dtype="float32"),
+        where = threshold > 0,
+    )
 
     # ── p99-level features (Fix 1) ────────────────────────────────────────────
     band_w = max(float(threshold_p99) - float(threshold), 1e-6)   # avoid div-by-zero

@@ -157,6 +157,15 @@ _BINARY_MONOTONE_MAP: dict[str, int] = {
 _BINARY_MONOTONE: tuple = tuple(_BINARY_MONOTONE_MAP.get(col, 0) for col in _X_COLS)
 _BINARY_MONOTONE_STR: str = "(" + ",".join(str(v) for v in _BINARY_MONOTONE) + ")"
 
+# Guard: XGBoost silently pads a too-short constraint tuple with zeros (no
+# error), so a length mismatch means constraints are applied to wrong features.
+# Too-long raises XGBoostError mid-training.  Validate at import time so any
+# edit to _X_COLS or _BINARY_MONOTONE_MAP causes an immediate, clear failure.
+assert len(_BINARY_MONOTONE) == len(_X_COLS), (
+    f"_BINARY_MONOTONE has {len(_BINARY_MONOTONE)} entries but _X_COLS has "
+    f"{len(_X_COLS)}. Update _BINARY_MONOTONE_MAP to match _X_COLS."
+)
+
 # ── Device helpers ────────────────────────────────────────────────────────────
 
 
@@ -256,16 +265,18 @@ class SpikeClassifier:
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _to_array(self, df: pd.DataFrame) -> np.ndarray:
-        """Extract feature matrix as float32 (consistent dtype for XGBoost)."""
-        return df[self._feature_cols].astype("float32").values
+    def _to_array(self, X) -> np.ndarray:
+        """Extract feature matrix as float32.  Accepts DataFrame or ndarray."""
+        if isinstance(X, np.ndarray):
+            return X.astype("float32")
+        return X[self._feature_cols].astype("float32").values
 
     # ── Public interface ──────────────────────────────────────────────────────
 
     def fit(
         self,
-        X:             pd.DataFrame,
-        y:             pd.Series,
+        X:             pd.DataFrame | np.ndarray,
+        y:             pd.Series    | np.ndarray,
         sample_weight: np.ndarray | None = None,
         eval_set:      list | None       = None,
     ) -> "SpikeClassifier":
@@ -287,7 +298,8 @@ class SpikeClassifier:
         self
         """
         self._model.fit(
-            self._to_array(X), y.values,
+            self._to_array(X),
+            y if isinstance(y, np.ndarray) else y.values,
             sample_weight = sample_weight,
             eval_set      = eval_set,
             verbose       = False,
@@ -523,16 +535,18 @@ class BinarySpikeClassifier:
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _to_array(self, df: pd.DataFrame) -> np.ndarray:
-        """Extract feature matrix as float32 (consistent dtype for XGBoost)."""
-        return df[self._feature_cols].astype("float32").values
+    def _to_array(self, X) -> np.ndarray:
+        """Extract feature matrix as float32.  Accepts DataFrame or ndarray."""
+        if isinstance(X, np.ndarray):
+            return X.astype("float32")
+        return X[self._feature_cols].astype("float32").values
 
     # ── Public interface ──────────────────────────────────────────────────────
 
     def fit(
         self,
-        X:        pd.DataFrame,
-        y:        pd.Series,
+        X:        pd.DataFrame | np.ndarray,
+        y:        pd.Series    | np.ndarray,
         eval_set: list | None = None,
     ) -> "BinarySpikeClassifier":
         """Fit on training data.
@@ -548,7 +562,8 @@ class BinarySpikeClassifier:
         self
         """
         self._model.fit(
-            self._to_array(X), y.values,
+            self._to_array(X),
+            y if isinstance(y, np.ndarray) else y.values,
             eval_set=eval_set,
             verbose=False,
         )

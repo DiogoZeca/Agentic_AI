@@ -105,7 +105,7 @@ _THRESHOLD_SWEEP:      list[float] = [round(t, 2) for t in np.arange(0.10, 1.0, 
 _MAX_OPTUNA_ROWS_BINARY: int = 2_000_000
 # Maximum Optuna trials for binary horizon models.  Binary:logistic converges
 # faster than multi:softprob — 30 trials from warm-start is sufficient.
-_MAX_BINARY_TRIALS:      int = 30
+_MAX_BINARY_TRIALS:      int = 75
 
 # Multi-horizon training configuration (Phase 4).
 # Each entry defines one model to train.  The binary=False entry (60m) uses
@@ -238,6 +238,14 @@ def _run_walk_forward_cv(
     for fold_idx, (tr_idx, val_idx) in enumerate(tscv.split(indices), start=1):
         X_tr, y_tr   = X_all.iloc[tr_idx], y_all.iloc[tr_idx]
         X_val, y_val = X_all.iloc[val_idx], y_all.iloc[val_idx]
+
+        # Binary CV: cap fold training data — same reason as Optuna inner split cap.
+        # Without this, fold 3+ exceed 8M rows on CPU → OOM / swap thrash.
+        if binary and len(X_tr) > _MAX_OPTUNA_ROWS_BINARY:
+            rng     = np.random.default_rng(seed + fold_idx)
+            cap_idx = np.sort(rng.choice(len(X_tr), _MAX_OPTUNA_ROWS_BINARY, replace=False))
+            X_tr    = X_tr.iloc[cap_idx]
+            y_tr    = y_tr.iloc[cap_idx]
 
         n_spikes_tr = int((y_tr > 0).sum())
         if n_spikes_tr == 0:
@@ -497,8 +505,14 @@ def _compute_feature_importance(
             r["shap_mean_abs"] = round(float(shap_map[r["feature"]]), 6)
         log.info("  SHAP values computed (XGBoost native pred_contribs)")
     except Exception as exc:
-        log.warning("  SHAP computation failed (%s: %s) — gain-only importance saved",
-                    type(exc).__name__, exc)
+        # SHAP is non-critical (not on inference path) — training continues with
+        # gain-only importance.  exc_info=True in DEBUG mode preserves the full
+        # traceback so OOM and version errors are distinguishable in logs.
+        log.warning(
+            "  SHAP computation failed (%s: %s) — gain-only importance saved",
+            type(exc).__name__, exc,
+            exc_info=log.isEnabledFor(logging.DEBUG),
+        )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _write_csv(output_path, rows)
@@ -672,14 +686,12 @@ def _run_optuna_search(
             len(inner_train), _MAX_OPTUNA_ROWS_BINARY,
         )
         inner_train = inner_train.sample(
-            n           = _MAX_OPTUNA_ROWS_BINARY,
+            n            = _MAX_OPTUNA_ROWS_BINARY,
             random_state = seed,
-            stratify    = inner_train[label_col].astype("int8"),
         ).sort_values("bucket").reset_index(drop=True)
         inner_val = inner_val.sample(
-            n           = min(_MAX_OPTUNA_ROWS_BINARY, len(inner_val)),
+            n            = min(_MAX_OPTUNA_ROWS_BINARY, len(inner_val)),
             random_state = seed,
-            stratify    = inner_val[label_col].astype("int8"),
         ).sort_values("bucket").reset_index(drop=True)
 
     X_inner_tr  = inner_train[_X_COLS]
@@ -749,7 +761,12 @@ def _run_optuna_search(
         remaining, len(inner_train), len(inner_val),
     )
 
-    # Pre-compute inner val arrays once (reused across all trials)
+    # Pre-compute inner arrays once — reused across all Optuna trials.
+    # Converting DataFrame → float32 numpy inside every trial objective wastes
+    # CPU time (and GPU data-transfer bandwidth on CUDA) proportional to
+    # n_trials × n_rows × n_features.
+    X_inner_tr_arr  = X_inner_tr.astype("float32").values
+    y_inner_tr_arr  = y_inner_tr.values
     X_inner_val_arr = X_inner_val.astype("float32").values
     y_inner_val_arr = y_inner_val.values
 
@@ -780,9 +797,9 @@ def _run_optuna_search(
                 early_stopping_rounds = early_stopping_rounds,
                 **params,
             )
-            clf.fit(X_inner_tr, y_inner_tr,
+            clf.fit(X_inner_tr_arr, y_inner_tr_arr,
                     eval_set=[(X_inner_val_arr, y_inner_val_arr)])
-            probas = clf.predict_proba(X_inner_val)[:, 1]  # P(spike)
+            probas = clf.predict_proba(X_inner_val_arr)[:, 1]  # P(spike)
             score  = float(_ap_score(y_inner_val.values, probas))
             del clf
             gc.collect()
@@ -795,9 +812,9 @@ def _run_optuna_search(
                 early_stopping_rounds = early_stopping_rounds,
                 **params,
             )
-            clf.fit(X_inner_tr, y_inner_tr, sample_weight=sw_inner,
+            clf.fit(X_inner_tr_arr, y_inner_tr_arr, sample_weight=sw_inner,
                     eval_set=[(X_inner_val_arr, y_inner_val_arr)])
-            probas = clf.predict_proba(X_inner_val)  # (n, 3)
+            probas = clf.predict_proba(X_inner_val_arr)  # (n, 3)
             score  = float(_ap_score(y_inner_val.values, probas, average="macro"))
             del clf
             gc.collect()
@@ -866,8 +883,12 @@ def _train_binary_horizon(
     config_path     = model_dir / "spike_config.json"
     best_params_path = model_dir / "best_params.json"
 
-    # Filter to rows with a valid label for this horizon
-    df_h = df[df[label_col].notna()].copy()
+    # Filter to rows with a valid label for this horizon.
+    # Select only the columns needed for binary training — copying all columns of
+    # df_all (60+ cols × 24M rows ≈ 7-8 GB) alongside the existing df_all causes
+    # OOM.  _X_COLS + label + bucket + machine_id is all downstream code uses.
+    _needed = list(_X_COLS) + [label_col, "bucket", "machine_id"]
+    df_h = df.loc[df[label_col].notna(), _needed].copy()
     df_h[label_col] = df_h[label_col].astype("int8")
 
     bucket_max = int(df_h["bucket"].max())
