@@ -898,6 +898,8 @@ def _train_binary_horizon(
     train_df = df_h[df_h["bucket"] <= train_max].reset_index(drop=True)
     val_df   = df_h[(df_h["bucket"] > train_max) & (df_h["bucket"] <= val_max)].reset_index(drop=True)
     test_df  = df_h[df_h["bucket"] > val_max].reset_index(drop=True)
+    del df_h  # free column-selected copy; splits are independent (reset_index)
+    gc.collect()
 
     n_neg = int((train_df[label_col] == 0).sum())
     n_pos = max(int((train_df[label_col] == 1).sum()), 1)
@@ -1154,6 +1156,12 @@ def run(
 
     train_df = df[df["bucket"] <= train_max].reset_index(drop=True)
     val_df   = df[(df["bucket"] > train_max) & (df["bucket"] <= val_max)].reset_index(drop=True)
+    # Free the full 24M-row DataFrame — train_df and val_df are independent
+    # copies (reset_index creates new allocations).  Without this, ~6–8 GB
+    # stays live when _train_model reads cluster_features.parquet again,
+    # pushing peak RAM to 25+ GB and triggering a silent OOM kill.
+    del df
+    gc.collect()
 
     # ── Hyperparameter resolution ─────────────────────────────────────────────
     # Priority:

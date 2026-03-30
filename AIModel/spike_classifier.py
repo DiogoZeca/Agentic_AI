@@ -38,6 +38,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import logging
 import sys
@@ -778,8 +779,10 @@ def train(
 
     df = pd.read_parquet(features_path)
 
-    # Drop rows without a valid label (last horizon windows per machine)
-    df = df[df["severity_in_60m"].notna()].copy()
+    # Drop rows without a valid label (last horizon windows per machine).
+    # Boolean indexing always returns a copy in pandas — .copy() is redundant
+    # and wastes ~6 GB by creating a third in-memory copy of the DataFrame.
+    df = df[df["severity_in_60m"].notna()]
     df["severity_in_60m"] = df["severity_in_60m"].astype("int8")
 
     # Time-based three-way split — never random to prevent future-data leakage.
@@ -790,6 +793,10 @@ def train(
     train_df = df[df["bucket"] <= train_max].reset_index(drop=True)
     val_df   = df[(df["bucket"] > train_max) & (df["bucket"] <= val_max)].reset_index(drop=True)
     test_df  = df[df["bucket"] > val_max].reset_index(drop=True)
+    # Free the full filtered DataFrame — splits are independent copies.
+    # Keeps ~6 GB free during the subsequent XGBoost training allocation.
+    del df
+    gc.collect()
 
     y_train = train_df["severity_in_60m"]
     y_val   = val_df["severity_in_60m"]
