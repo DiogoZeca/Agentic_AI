@@ -404,6 +404,12 @@ def _run_inference(
     """
     predictions: list[dict] = []
 
+    # Pre-compute observation counts once — avoids an O(n_machines²) scan where
+    # each machine_id triggers a full DataFrame filter over all rows.  Defined
+    # here (outside the feature_df.empty guard) so the cold-start loop can use
+    # it even when feature_df is entirely empty.
+    obs_count = input_df.groupby("machine_id").size().to_dict()
+
     if not feature_df.empty:
         # Guard: all required feature columns must be present before inference.
         # Missing columns produce silent NaN predictions, which is worse than failing fast.
@@ -451,7 +457,7 @@ def _run_inference(
 
         for machine_id, h_probs in horizon_probs.items():
             thresh = float(artifacts.thresholds.get(machine_id, artifacts.global_thresh))
-            n_obs  = int(input_df[input_df["machine_id"] == machine_id].shape[0])
+            n_obs  = int(obs_count.get(int(machine_id), 0))
 
             # 60m vector
             pv_60m = h_probs.get("60m_vec")
@@ -567,7 +573,7 @@ def _run_inference(
     # Append null entries for cold-start machines
     for machine_id, status in status_map.items():
         if status == "cold_start":
-            n_obs = int(input_df[input_df["machine_id"] == machine_id].shape[0])
+            n_obs = int(obs_count.get(int(machine_id), 0))
             predictions.append({
                 "machine_id":       machine_id,
                 "imminence":        None,

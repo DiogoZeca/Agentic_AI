@@ -55,6 +55,7 @@ import csv
 import gc
 import json
 import logging
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -721,10 +722,18 @@ def _run_optuna_search(
         ),
     )
 
-    # How many trials have already been consumed (complete, failed, or pruned).
-    # Excludes WAITING (enqueued but not started) so the budget isn't under-counted.
-    already_done = len([t for t in study.trials
-                        if t.state != optuna.trial.TrialState.WAITING])
+    # Count only truly finished trials (COMPLETE, PRUNED, FAIL).
+    # Excluding RUNNING prevents zombie trials from eating budget: after a
+    # process kill, Optuna SQLite storage leaves in-progress trials in RUNNING
+    # state permanently (no heartbeat cleanup).  A zombie counted as "done"
+    # silently steals one trial slot; if all slots are zombies, study.best_trial
+    # raises ValueError (no COMPLETE trials to return a best value from).
+    _finished = {
+        optuna.trial.TrialState.COMPLETE,
+        optuna.trial.TrialState.PRUNED,
+        optuna.trial.TrialState.FAIL,
+    }
+    already_done = len([t for t in study.trials if t.state in _finished])
     remaining    = max(0, n_trials - already_done)
 
     if already_done:
@@ -733,15 +742,26 @@ def _run_optuna_search(
             already_done, remaining,
         )
     if remaining == 0:
-        log.info("  Optuna skipped  : all %d trials already complete", n_trials)
-        best = study.best_trial
-        return {
-            "params":            dict(best.params),
-            "best_macro_pr_auc": float(best.value),
-            "n_trials":          n_trials,
-            "n_completed":       len(study.trials),
-            "resumed_from":      already_done,
-        }
+        complete_trials = [t for t in study.trials
+                           if t.state == optuna.trial.TrialState.COMPLETE]
+        if not complete_trials:
+            # All slots consumed by crashed/zombie trials — reset and re-run.
+            log.warning(
+                "  Optuna: %d slots used by non-COMPLETE trials (crashed zombies?)"
+                " — re-running all %d trials",
+                already_done, n_trials,
+            )
+            remaining = n_trials
+        else:
+            log.info("  Optuna skipped  : all %d trials already complete", n_trials)
+            best = study.best_trial
+            return {
+                "params":            dict(best.params),
+                "best_macro_pr_auc": float(best.value),
+                "n_trials":          n_trials,
+                "n_completed":       len(study.trials),
+                "resumed_from":      already_done,
+            }
 
     # ── Warm-start: enqueue previous best params as the first trial ───────────
     # Tree-structure hyperparameters (max_depth, regularisation, etc.) are largely
@@ -1146,6 +1166,14 @@ def run(
     log.info("═" * 62)
     log.info("  STEP 3 — Training")
 
+    # Copy thresholds to model_dir so inference (_load_artifacts) can find them.
+    # engineer() writes spike_thresholds.parquet to artifacts_dir/; _load_artifacts
+    # looks for it at models/spike/ (the model_dir).  Always copy — model_dir may
+    # have been created fresh without a prior thresholds file if the user cleared
+    # only the model cache.
+    shutil.copy(thresholds_path, model_dir / "spike_thresholds.parquet")
+    log.info("  Thresholds copied  : %s", model_dir / "spike_thresholds.parquet")
+
     df = pd.read_parquet(features_path)
     df = df[df["severity_in_60m"].notna()].copy()
     df["severity_in_60m"] = df["severity_in_60m"].astype("int8")
@@ -1217,6 +1245,19 @@ def run(
             train_df, n_folds, seed, cv_path, device=device, model_kwargs=model_kwargs
         )
 
+    # Compact references needed after _train_model returns.
+    # train_df is only used for metadata counts; val_df for sweep table and
+    # feature importance.  Extracting now and deleting the full DataFrames
+    # frees ~4.8 GB before _train_model re-reads cluster_features.parquet,
+    # reducing peak RAM from ~18 GB to ~10 GB.
+    n_train_rows     = len(train_df)
+    n_train_machines = int(train_df["machine_id"].nunique())
+    X_val_compact    = val_df[_X_COLS].astype("float32")  # 37-col float32 DataFrame (~700 MB)
+    y_val_compact    = val_df["severity_in_60m"].copy()   # Series (~20 MB)
+    n_val_rows       = len(val_df)
+    del train_df, val_df
+    gc.collect()
+
     # ── Final model training ──────────────────────────────────────────────────
     log.info("═" * 62)
     log.info("  FINAL TRAINING  (train=%.0f%%  val=%.0f%%  test=%.0f%%)",
@@ -1239,16 +1280,14 @@ def run(
     )
 
     # ── Alarm threshold sweep table ───────────────────────────────────────────
-    clf   = SpikeClassifier.load(model_path)
-    X_val = val_df[_X_COLS]
-    y_val = val_df["severity_in_60m"]
+    clf = SpikeClassifier.load(model_path)
 
-    sweep_rows = _threshold_sweep_table(clf, X_val, y_val, len(val_df))
+    sweep_rows = _threshold_sweep_table(clf, X_val_compact, y_val_compact, n_val_rows)
     log.info("  ALARM THRESHOLD SWEEP  (p_severe on validation set)")
     _print_threshold_table(sweep_rows, result["alarm_threshold"])
 
     # ── Feature importance ────────────────────────────────────────────────────
-    _compute_feature_importance(clf, X_val, importance_path)
+    _compute_feature_importance(clf, X_val_compact, importance_path)
 
     # ── Save spike_config.json ────────────────────────────────────────────────
     thresh_df = pd.read_parquet(thresholds_path)
@@ -1300,8 +1339,8 @@ def run(
             "thresholds_file":                 str(thresholds_path),
         },
         "data": {
-            "training_rows":     len(train_df),
-            "training_machines": int(train_df["machine_id"].nunique()),
+            "training_rows":     n_train_rows,
+            "training_machines": n_train_machines,
         },
         "environment": {
             "python_version":  sys.version.split()[0],

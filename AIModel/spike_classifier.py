@@ -777,7 +777,12 @@ def train(
     )
     log.info("═" * 62)
 
-    df = pd.read_parquet(features_path)
+    # Load only the columns used by this function (37 features + label + bucket).
+    # cluster_features.parquet contains ~55 columns including binary horizon
+    # labels not used here; loading only what's needed cuts the parquet read
+    # from ~7 GB to ~3.5 GB, reducing peak RAM during final training by ~3.5 GB.
+    _load_cols = list(_X_COLS) + ["severity_in_60m", "bucket"]
+    df = pd.read_parquet(features_path, columns=_load_cols)
 
     # Drop rows without a valid label (last horizon windows per machine).
     # Boolean indexing always returns a copy in pandas — .copy() is redundant
