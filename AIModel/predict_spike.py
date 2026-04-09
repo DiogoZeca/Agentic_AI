@@ -71,6 +71,7 @@ import os
 import pickle
 import sys
 import tempfile
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -440,6 +441,20 @@ def _run_inference(
         # Enforce feature column order — critical for inplace_predict correctness
         X = feature_df[artifacts.feature_cols].astype("float32").values
 
+        # NaN inputs are safe for XGBoost — learned default branches handle them.
+        # Log a soft warning so ops knows which features are missing data.
+        nan_cols = [
+            artifacts.feature_cols[j]
+            for j in range(X.shape[1])
+            if np.isnan(X[:, j]).any()
+        ]
+        if nan_cols:
+            log.warning(
+                "  NaN values in %d feature column(s): %s  "
+                "(XGBoost will use learned default branches — predictions valid)",
+                len(nan_cols), nan_cols,
+            )
+
         # Run all horizon boosters — collect last-bucket probability per machine
         # horizon_probs: machine_id → {"15m": p_spike, "30m": p_spike, ...}
         horizon_probs: dict[int, dict[str, float]] = {}
@@ -462,7 +477,8 @@ def _run_inference(
                         for k in range(3)
                     ])
                     row_sums = cal.sum(axis=1, keepdims=True)
-                    probas_h = np.where(row_sums > 0, cal / row_sums, cal).astype("float32")
+                    uniform  = np.full_like(cal, 1.0 / 3)
+                    probas_h = np.where(row_sums > 0, cal / row_sums, uniform).astype("float32")
             else:
                 # binary:logistic — use strict_shape=True to always get (n, 1),
                 # eliminating version-dependent shape variance.  Without it,
@@ -482,6 +498,63 @@ def _run_inference(
                     horizon_probs[mid]["60m_vec"] = probas_h[i]  # shape (3,)
                 else:
                     horizon_probs[mid][h_name] = float(probas_h[i, 1])  # P(spike)
+
+        # ── SHAP feature attribution (60m model, last bucket per machine) ────────
+        # Two-pass approach: probabilities via inplace_predict (above); SHAP via
+        # Booster.predict(DMatrix, pred_contribs=True) on last-bucket rows only.
+        # inplace_predict does not support pred_contribs — DMatrix is required.
+        # Operating on ~n_machines rows, not the full feature matrix.
+        shap_top3: dict[int, list[dict]] = {}
+        if "60m" in artifacts.boosters:
+            try:
+                last_rows = (
+                    feature_df
+                    .groupby("machine_id", sort=False)
+                    .tail(1)
+                    .reset_index(drop=True)
+                )
+                n_features = len(artifacts.feature_cols)
+                dmat = xgb.DMatrix(
+                    last_rows[artifacts.feature_cols].astype("float32").values,
+                    feature_names=artifacts.feature_cols,
+                )
+                shap_raw = artifacts.boosters["60m"].predict(dmat, pred_contribs=True)
+
+                # Handle 3 possible output shapes across XGBoost versions:
+                #   3-D (n, n_classes, n_features+1) — XGBoost 3.x multiclass
+                #   2-D flat (n, n_classes*(n_features+1)) — older multiclass
+                #   2-D (n, n_features+1) — binary (unexpected for 60m, safe fallback)
+                if shap_raw.ndim == 3:
+                    per_feature = np.abs(shap_raw[:, :, :n_features]).sum(axis=1)
+                elif shap_raw.shape[1] == n_features + 1:
+                    per_feature = np.abs(shap_raw[:, :n_features])
+                else:
+                    n_cls = shap_raw.shape[1] // (n_features + 1)
+                    per_feature = np.abs(
+                        shap_raw.reshape(len(last_rows), n_cls, n_features + 1)
+                        [:, :, :n_features]
+                    ).sum(axis=1)
+
+                # Normalise to fraction-of-total-attribution per sample so
+                # contributions are in [0, 1] regardless of log-odds scale.
+                row_sums   = per_feature.sum(axis=1, keepdims=True)
+                uniform    = np.full_like(per_feature, 1.0 / n_features)
+                normalised = np.where(row_sums > 0, per_feature / row_sums, uniform)
+
+                for i, mid in enumerate(last_rows["machine_id"].values):
+                    top3_idx = np.argsort(-normalised[i])[:3]
+                    shap_top3[int(mid)] = [
+                        {
+                            "feature":      artifacts.feature_cols[j],
+                            "contribution": round(float(normalised[i, j]), 4),
+                        }
+                        for j in top3_idx
+                    ]
+            except Exception as exc:
+                log.warning(
+                    "  SHAP attribution failed (%s: %s) — top_features will be null",
+                    type(exc).__name__, exc,
+                )
 
         for machine_id, h_probs in horizon_probs.items():
             thresh = float(artifacts.thresholds.get(machine_id, artifacts.global_thresh))
@@ -576,26 +649,45 @@ def _run_inference(
             else:
                 top_is_severe = None
 
+            # Recommended action: rule-based derivation from existing prediction signals.
+            # Gracefully handles absent 15m model (imminence.get("15m") → {}).
+            _15m_is_spike = imminence.get("15m", {}).get("is_spike")
+            if _15m_is_spike:
+                recommended_action: str = "preempt_now"
+            elif sev_cls is not None and sev_cls >= 1 and top_is_severe:
+                recommended_action = "defer_batch"
+            elif sev_cls is not None and sev_cls >= 1:
+                recommended_action = "monitor"
+            else:
+                recommended_action = "normal"
+
             predictions.append({
-                "machine_id":       machine_id,
-                "imminence":        imminence,
+                "machine_id":          machine_id,
+                "trained_at":          artifacts.trained_at,
+                "imminence":           imminence,
                 # Backward-compatible top-level fields from 60m model
-                "severity_class":   sev_cls,
-                "p_no_spike":       round(p_no,  6) if p_no  is not None else None,
-                "p_moderate":       round(p_mod, 6) if p_mod is not None else None,
-                "p_severe":         round(p_sev, 6) if p_sev is not None else None,
-                "p_severe_ovr":     round(p_sev_ovr, 6) if p_sev_ovr is not None else None,
-                "is_spike":         bool(sev_cls >= 1) if sev_cls is not None else None,
-                "is_severe":        top_is_severe,
-                "alarm_threshold":  round(artifacts.alarm_thresholds.get("60m", 0.5), 4),
-                "threshold_used":   round(thresh, 6),
-                "threshold_source": (
+                "severity_class":      sev_cls,
+                "p_no_spike":          round(p_no,  6) if p_no  is not None else None,
+                "p_moderate":          round(p_mod, 6) if p_mod is not None else None,
+                "p_severe":            round(p_sev, 6) if p_sev is not None else None,
+                "p_severe_ovr":        round(p_sev_ovr, 6) if p_sev_ovr is not None else None,
+                "is_spike":            bool(sev_cls >= 1) if sev_cls is not None else None,
+                "is_severe":           top_is_severe,
+                "alarm_threshold":     round(artifacts.alarm_thresholds.get("60m", 0.5), 4),
+                "threshold_used":      round(thresh, 6),
+                "threshold_source":    (
                     "learned"
                     if machine_id in artifacts.thresholds.index
                     else "global_fallback"
                 ),
-                "status":           status_map[machine_id],
-                "observations_used": n_obs,
+                "status":              status_map[machine_id],
+                "observations_used":   n_obs,
+                "data_quality":        {
+                    "score":  round(min(n_obs, 24) / 24, 4),
+                    "status": status_map[machine_id],
+                },
+                "recommended_action":  recommended_action,
+                "top_features":        shap_top3.get(machine_id),
             })
 
     # Append null entries for cold-start machines
@@ -603,20 +695,24 @@ def _run_inference(
         if status == "cold_start":
             n_obs = int(obs_count.get(int(machine_id), 0))
             predictions.append({
-                "machine_id":       machine_id,
-                "imminence":        None,
-                "severity_class":   None,
-                "p_no_spike":       None,
-                "p_moderate":       None,
-                "p_severe":         None,
-                "p_severe_ovr":     None,
-                "is_spike":         None,
-                "is_severe":        None,
-                "alarm_threshold":  None,
-                "threshold_used":   None,
-                "threshold_source": None,
-                "status":           "cold_start",
-                "observations_used": n_obs,
+                "machine_id":          machine_id,
+                "trained_at":          artifacts.trained_at,
+                "imminence":           None,
+                "severity_class":      None,
+                "p_no_spike":          None,
+                "p_moderate":          None,
+                "p_severe":            None,
+                "p_severe_ovr":        None,
+                "is_spike":            None,
+                "is_severe":           None,
+                "alarm_threshold":     None,
+                "threshold_used":      None,
+                "threshold_source":    None,
+                "status":              "cold_start",
+                "observations_used":   n_obs,
+                "data_quality":        None,
+                "recommended_action":  None,
+                "top_features":        None,
             })
 
     predictions.sort(key=lambda p: p["machine_id"])
@@ -656,6 +752,7 @@ def predict(input_df: pd.DataFrame, model_dir: str | Path) -> dict:
     n_cold_start  = sum(1 for p in predictions if p["status"] == "cold_start")
 
     return {
+        "batch_id":            str(uuid.uuid4()),
         "predicted_at":        datetime.now(timezone.utc).isoformat(),
         "model_dir":           str(Path(model_dir).resolve()),
         "horizon_minutes":     artifacts.horizon_minutes,
@@ -694,6 +791,7 @@ def predict_with_artifacts(input_df: pd.DataFrame, artifacts: _Artifacts) -> dic
     n_cold_start = sum(1 for p in predictions if p["status"] == "cold_start")
 
     return {
+        "batch_id":            str(uuid.uuid4()),
         "predicted_at":        datetime.now(timezone.utc).isoformat(),
         "model_dir":           str(artifacts.model_dir),
         "horizon_minutes":     artifacts.horizon_minutes,

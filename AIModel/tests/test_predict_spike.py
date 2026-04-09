@@ -186,6 +186,7 @@ def _make_fake_artifacts(
     # Rewrite 60m config with full inference fields
     config = {
         "alarm_threshold": alarm_threshold,
+        "trained_at":      "2026-01-01T00:00:00+00:00",
         "inference": {
             "bucket_duration_seconds":          300,
             "horizon_windows":                  12,
@@ -724,3 +725,249 @@ def test_imminence_has_only_15m_and_60m_horizons(tmp_path):
                 f"45m should not appear in imminence after Fix 3, got: {horizon_keys}"
             )
             assert "60m" in horizon_keys, "60m must always be in imminence"
+
+
+# ── Isotonic calibration (Fix 1) ──────────────────────────────────────────────
+
+
+def _make_fake_artifacts_with_calibrators(
+    tmp_path: Path,
+) -> tuple[Path, _Artifacts]:
+    """Build fake artifacts that include calibrators.pkl for the 60m model."""
+    import pickle
+    from sklearn.isotonic import IsotonicRegression
+
+    model_dir, arts = _make_fake_artifacts(tmp_path, thresholds={1: 0.30, 2: 0.32})
+
+    # Fit trivial calibrators (identity-ish) on synthetic data
+    rng = np.random.default_rng(0)
+    calibrators = []
+    for k in range(3):
+        p_k = rng.uniform(0.0, 1.0, 100)
+        y_k = (rng.choice([0, 1, 2], size=100, p=[0.70, 0.20, 0.10]) == k).astype("float64")
+        ir  = IsotonicRegression(out_of_bounds="clip")
+        ir.fit(p_k, y_k)
+        calibrators.append(ir)
+
+    with open(model_dir / "calibrators.pkl", "wb") as fh:
+        pickle.dump(calibrators, fh)
+
+    # Reload artifacts so calibrators_60m is populated
+    arts = _load_artifacts(model_dir)
+    return model_dir, arts
+
+
+def test_calibrators_loaded_when_pkl_present(tmp_path):
+    """_load_artifacts must populate calibrators_60m when calibrators.pkl exists."""
+    _, arts = _make_fake_artifacts_with_calibrators(tmp_path)
+    assert arts.calibrators_60m is not None
+    assert len(arts.calibrators_60m) == 3
+
+
+def test_calibrators_absent_does_not_raise(tmp_path):
+    """_load_artifacts must succeed when calibrators.pkl is absent."""
+    _, arts = _make_fake_artifacts(tmp_path, thresholds={1: 0.30})
+    assert arts.calibrators_60m is None
+
+
+def test_calibrated_probabilities_sum_to_one(tmp_path):
+    """With calibrators loaded, p_no_spike + p_moderate + p_severe ≈ 1."""
+    model_dir, _ = _make_fake_artifacts_with_calibrators(tmp_path)
+    df = _make_window_df(machine_ids=[1, 2], n_buckets=24)
+    result = predict(df, model_dir)
+    for pred in result["predictions"]:
+        if pred["status"] != "cold_start":
+            total = pred["p_no_spike"] + pred["p_moderate"] + pred["p_severe"]
+            assert abs(total - 1.0) < 1e-4, (
+                f"Calibrated probabilities must sum to 1; got {total:.6f}"
+            )
+
+
+def test_calibrated_probs_in_unit_interval(tmp_path):
+    """All calibrated probability outputs must be in [0, 1]."""
+    model_dir, _ = _make_fake_artifacts_with_calibrators(tmp_path)
+    df = _make_window_df(machine_ids=[1, 2], n_buckets=24)
+    result = predict(df, model_dir)
+    for pred in result["predictions"]:
+        if pred["status"] != "cold_start":
+            for field in ("p_no_spike", "p_moderate", "p_severe"):
+                assert 0.0 <= pred[field] <= 1.0, (
+                    f"{field}={pred[field]} out of [0, 1]"
+                )
+
+
+def test_predictions_unchanged_without_calibrators(tmp_path):
+    """Inference without calibrators must still produce valid probabilities."""
+    model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30, 2: 0.32})
+    df = _make_window_df(machine_ids=[1, 2], n_buckets=24)
+    result = predict(df, model_dir)
+    for pred in result["predictions"]:
+        if pred["status"] != "cold_start":
+            total = pred["p_no_spike"] + pred["p_moderate"] + pred["p_severe"]
+            assert abs(total - 1.0) < 1e-4
+
+
+# ── Phase 1: Extended API fields ──────────────────────────────────────────────
+
+
+def test_envelope_has_batch_id(tmp_path):
+    """predict() must include a batch_id UUID string in the response envelope."""
+    model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30})
+    df = _make_window_df(machine_ids=[1], n_buckets=24)
+    result = predict(df, model_dir)
+    assert "batch_id" in result
+    assert isinstance(result["batch_id"], str)
+    bid = result["batch_id"]
+    assert len(bid) == 36 and bid[8] == "-" and bid[13] == "-"
+
+
+def test_batch_id_differs_across_calls(tmp_path):
+    """Each call to predict() must produce a distinct batch_id."""
+    model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30})
+    df = _make_window_df(machine_ids=[1], n_buckets=24)
+    assert predict(df, model_dir)["batch_id"] != predict(df, model_dir)["batch_id"]
+
+
+def test_trained_at_propagated_to_predictions(tmp_path):
+    """trained_at from spike_config.json must appear in each non-cold-start prediction."""
+    model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30, 2: 0.32})
+    df = _make_window_df(machine_ids=[1, 2], n_buckets=24)
+    result = predict(df, model_dir)
+    for pred in result["predictions"]:
+        assert "trained_at" in pred
+        assert pred["trained_at"] == "2026-01-01T00:00:00+00:00"
+
+
+def test_trained_at_in_cold_start_predictions(tmp_path):
+    """trained_at must also be present for cold_start machines (model-level metadata)."""
+    model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30})
+    df = _make_window_df(machine_ids=[1], n_buckets=5)
+    result = predict(df, model_dir)
+    pred = result["predictions"][0]
+    assert pred["status"] == "cold_start"
+    assert "trained_at" in pred
+    assert pred["trained_at"] == "2026-01-01T00:00:00+00:00"
+
+
+def test_data_quality_score_full_window(tmp_path):
+    """24 buckets → data_quality.score == 1.0."""
+    model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30})
+    df = _make_window_df(machine_ids=[1], n_buckets=24)
+    result = predict(df, model_dir)
+    pred = result["predictions"][0]
+    assert pred["status"] == "success"
+    assert pred["data_quality"] is not None
+    assert pred["data_quality"]["score"] == 1.0
+
+
+def test_data_quality_score_degraded(tmp_path):
+    """12 buckets → data_quality.score == 0.5."""
+    model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30})
+    df = _make_window_df(machine_ids=[1], n_buckets=12)
+    result = predict(df, model_dir)
+    pred = result["predictions"][0]
+    assert pred["status"] == "cold_start_degraded"
+    assert pred["data_quality"]["score"] == pytest.approx(0.5)
+
+
+def test_data_quality_null_for_cold_start(tmp_path):
+    """cold_start machines must have data_quality == None."""
+    model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30})
+    df = _make_window_df(machine_ids=[1], n_buckets=5)
+    result = predict(df, model_dir)
+    pred = result["predictions"][0]
+    assert pred["status"] == "cold_start"
+    assert pred["data_quality"] is None
+
+
+def test_data_quality_status_matches_prediction_status(tmp_path):
+    """data_quality.status must mirror the top-level status field."""
+    model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30, 2: 0.32})
+    df_full = _make_window_df(machine_ids=[1], n_buckets=24)
+    df_part = _make_window_df(machine_ids=[2], n_buckets=15)
+    df = pd.concat([df_full, df_part], ignore_index=True)
+    result = predict(df, model_dir)
+    for pred in result["predictions"]:
+        if pred["data_quality"] is not None:
+            assert pred["data_quality"]["status"] == pred["status"]
+
+
+def test_recommended_action_valid_values(tmp_path):
+    """recommended_action must be one of the four valid strings for non-cold-start."""
+    valid = {"preempt_now", "defer_batch", "monitor", "normal"}
+    model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30, 2: 0.32})
+    df = _make_window_df(machine_ids=[1, 2], n_buckets=24)
+    result = predict(df, model_dir)
+    for pred in result["predictions"]:
+        if pred["status"] != "cold_start":
+            assert pred["recommended_action"] in valid, (
+                f"Unexpected recommended_action: {pred['recommended_action']}"
+            )
+
+
+def test_recommended_action_null_for_cold_start(tmp_path):
+    """cold_start machines must have recommended_action == None."""
+    model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30})
+    df = _make_window_df(machine_ids=[1], n_buckets=5)
+    result = predict(df, model_dir)
+    assert result["predictions"][0]["recommended_action"] is None
+
+
+def test_recommended_action_without_15m_model(tmp_path):
+    """recommended_action must not crash when the 15m model is absent."""
+    model_dir, _ = _make_fake_artifacts(
+        tmp_path, thresholds={1: 0.30}, include_binary_horizons=False
+    )
+    df = _make_window_df(machine_ids=[1], n_buckets=24)
+    result = predict(df, model_dir)
+    pred = result["predictions"][0]
+    valid = {"preempt_now", "defer_batch", "monitor", "normal"}
+    assert pred["recommended_action"] in valid
+
+
+def test_top_features_structure(tmp_path):
+    """top_features must be a list of exactly 3 dicts each with 'feature' and 'contribution'."""
+    model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30, 2: 0.32})
+    df = _make_window_df(machine_ids=[1, 2], n_buckets=24)
+    result = predict(df, model_dir)
+    for pred in result["predictions"]:
+        if pred["status"] != "cold_start":
+            assert pred["top_features"] is not None, "top_features must not be None for success"
+            assert len(pred["top_features"]) == 3
+            for entry in pred["top_features"]:
+                assert "feature" in entry
+                assert "contribution" in entry
+
+
+def test_top_features_names_in_x_cols(tmp_path):
+    """Every feature name in top_features must be a valid model feature."""
+    model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30})
+    df = _make_window_df(machine_ids=[1], n_buckets=24)
+    result = predict(df, model_dir)
+    pred = result["predictions"][0]
+    if pred["top_features"] is not None:
+        for entry in pred["top_features"]:
+            assert entry["feature"] in list(_X_COLS), (
+                f"Unknown feature in top_features: {entry['feature']}"
+            )
+
+
+def test_top_features_contributions_in_unit_interval(tmp_path):
+    """Each contribution must be in [0, 1]."""
+    model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30})
+    df = _make_window_df(machine_ids=[1], n_buckets=24)
+    result = predict(df, model_dir)
+    pred = result["predictions"][0]
+    if pred["top_features"] is not None:
+        for entry in pred["top_features"]:
+            assert 0.0 <= entry["contribution"] <= 1.0, (
+                f"contribution out of [0, 1]: {entry['contribution']}"
+            )
+
+
+def test_top_features_null_for_cold_start(tmp_path):
+    """cold_start machines must have top_features == None."""
+    model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30})
+    df = _make_window_df(machine_ids=[1], n_buckets=5)
+    result = predict(df, model_dir)
+    assert result["predictions"][0]["top_features"] is None

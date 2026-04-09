@@ -23,6 +23,7 @@ Example request (POST /predict):
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -42,9 +43,32 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── Global artefacts store (populated in lifespan) ────────────────────────────
+# ── Global state (populated in lifespan / updated on every request) ───────────
 
 _artifacts: _Artifacts | None = None
+
+# Per-machine consecutive-spike counter.  Resets to 0 when a machine does not
+# spike; increments on each spiking prediction.  Kept in memory — resets on
+# restart, which is acceptable: a short gap after a restart simply requires
+# the machine to spike again before the alarm fires.
+_consecutive_alarms: dict[int, int] = {}
+
+# Minimum number of consecutive spiking predictions before is_spike fires.
+# Prevents single-shot noise from triggering scheduler actions.
+# Override via ALARM_MIN_CONSECUTIVE env var; set to 1 to disable debouncing.
+_ALARM_MIN_CONSECUTIVE: int = int(os.environ.get("ALARM_MIN_CONSECUTIVE", "2"))
+
+# Per-machine EWMA state: smoothed p_spike = p_moderate + p_severe.
+# Initialised to the raw score on first encounter — no warm-up period needed.
+# Resets on restart (same trade-off as _consecutive_alarms).
+_ewma_scores: dict[int, float] = {}
+
+# Exponential smoothing factor.  0 < alpha <= 1.
+#   alpha = 1.0  →  no smoothing (EWMA = raw score, EWMA filter disabled).
+#   alpha = 0.5  →  each cycle contributes 50 %; last 3 cycles carry ~87.5 %.
+#   alpha = 0.3  →  slower response; 10-cycle half-life.
+# Override via EWMA_ALPHA env var.
+_EWMA_ALPHA: float = max(0.0, min(1.0, float(os.environ.get("EWMA_ALPHA", "0.5"))))
 
 
 # ── Lifespan (startup + shutdown) ─────────────────────────────────────────────
@@ -65,6 +89,111 @@ async def lifespan(app: FastAPI):
     log.info("Artefacts loaded — service ready.")
     yield
     log.info("Shutting down.")
+
+
+# ── EWMA smoothing ────────────────────────────────────────────────────────────
+
+
+def _apply_ewma_smoothing(
+    result: dict,
+    state:  dict[int, float],
+    alpha:  float,
+) -> dict:
+    """Dampen single-cycle probability spikes via per-machine EWMA.
+
+    Maintains a per-machine exponentially weighted moving average of
+    ``p_spike = p_moderate + p_severe`` across requests.  When the smoothed
+    score falls below the trained alarm threshold, the alarm fields are
+    suppressed — EWMA can only *remove* alarms, never *create* ones.
+
+    The smoothed score is written to ``p_spike_smoothed`` for transparency
+    (useful for dashboard and scheduler debugging).
+
+    Cold-start predictions are skipped — they carry no probability output.
+
+    Parameters
+    ----------
+    result : envelope dict returned by predict_with_artifacts().
+    state  : mutable EWMA score dict shared across requests
+             (machine_id → smoothed p_spike).
+    alpha  : smoothing factor in (0, 1].  1.0 = no smoothing (pass-through).
+    """
+    for pred in result["predictions"]:
+        mid = pred["machine_id"]
+
+        if pred["status"] == "cold_start" or pred.get("p_moderate") is None:
+            pred["p_spike_smoothed"] = None
+            continue
+
+        p_spike_raw = pred["p_moderate"] + pred["p_severe"]
+
+        # First encounter: seed the EWMA with the raw score so there is no
+        # artificial warm-up suppression on machines the API has not seen yet.
+        prev_smoothed       = state.get(mid, p_spike_raw)
+        smoothed            = alpha * p_spike_raw + (1.0 - alpha) * prev_smoothed
+        state[mid]          = smoothed
+        pred["p_spike_smoothed"] = round(smoothed, 6)
+
+        # Suppress alarm when the smoothed signal is below the alarm threshold.
+        # Using the per-prediction alarm_threshold keeps this consistent with
+        # how is_severe was originally determined during training.
+        alarm_threshold = pred.get("alarm_threshold", 0.5)
+        if smoothed < alarm_threshold:
+            pred["is_spike"]           = False
+            pred["is_severe"]          = False
+            pred["recommended_action"] = "normal"
+
+    return result
+
+
+# ── Alarm debounce ────────────────────────────────────────────────────────────
+
+
+def _apply_alarm_debounce(
+    result:          dict,
+    state:           dict[int, int],
+    min_consecutive: int,
+) -> dict:
+    """Suppress single-shot alarms; require min_consecutive spikes to fire.
+
+    Mutates ``state`` (machine_id → consecutive spike count) in place and
+    adds a ``consecutive_alarms`` field to every prediction dict.
+
+    Suppression only overrides the actionable fields consumed by the scheduler
+    (``is_spike``, ``is_severe``, ``recommended_action``).  Raw probabilities
+    and the ``imminence`` detail block are left unchanged so the dashboard can
+    still render the underlying model signal.
+
+    Parameters
+    ----------
+    result          : envelope dict returned by predict_with_artifacts().
+    state           : mutable counter dict shared across requests.
+    min_consecutive : number of consecutive spiking predictions required
+                      before the alarm fires.  1 = no suppression.
+    """
+    for pred in result["predictions"]:
+        mid = pred["machine_id"]
+
+        if pred["status"] == "cold_start":
+            pred["consecutive_alarms"] = 0
+            continue
+
+        if pred.get("is_spike"):
+            state[mid] = state.get(mid, 0) + 1
+        else:
+            state[mid] = 0
+
+        count = state[mid]
+        pred["consecutive_alarms"] = count
+
+        # Suppress until the streak meets the minimum threshold.
+        # count == 0 means no spike this cycle — nothing to suppress.
+        if 0 < count < min_consecutive:
+            pred["is_spike"]           = False
+            pred["is_severe"]          = False
+            pred["recommended_action"] = "normal"
+
+    return result
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -138,6 +267,8 @@ def predict(request: PredictRequest) -> dict[str, Any]:
     try:
         input_df = request.to_dataframe()
         result   = predict_with_artifacts(input_df, _artifacts)
+        result   = _apply_ewma_smoothing(result, _ewma_scores, _EWMA_ALPHA)
+        result   = _apply_alarm_debounce(result, _consecutive_alarms, _ALARM_MIN_CONSECUTIVE)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:

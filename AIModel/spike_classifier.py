@@ -318,37 +318,56 @@ class SpikeClassifier:
         """
         return self._model.predict_proba(self._to_array(X))  # shape (n, 3)
 
-    def find_alarm_threshold(self, X: pd.DataFrame, y: pd.Series) -> float:
-        """Find the p_severe threshold that maximises F1 for severe class detection.
+    def find_alarm_threshold(
+        self,
+        X:             pd.DataFrame,
+        y:             pd.Series,
+        min_precision: float = 0.0,
+    ) -> float:
+        """Find the p_severe threshold on validation data.
 
         Sweeps p_severe (column 2 of predict_proba) from 0.05 to 0.95 in steps
-        of 0.05.  Returns the threshold with the highest F1 on the binary
-        question "is this row severe?" (class 2 vs. all others).
+        of 0.05.
+
+        Default behaviour (``min_precision=0``): returns the threshold with the
+        highest F1 on the binary question "is this row severe?".
+
+        With ``min_precision > 0``: restricts candidates to thresholds where
+        precision >= ``min_precision``, then picks the one with the highest
+        recall (maximising coverage given the constraint).  Falls back to the
+        F1-maximising threshold if no sweep step achieves the target.
 
         Always call this on **validation data only** — using test labels to
         pick the threshold leaks information into the evaluation.
 
         Parameters
         ----------
-        X : DataFrame with _X_COLS columns.
-        y : integer Series {0, 1, 2} — severity labels.
-
-        Returns
-        -------
-        float alarm threshold in (0.0, 1.0).
+        X             : DataFrame with _X_COLS columns.
+        y             : integer Series {0, 1, 2} — severity labels.
+        min_precision : minimum acceptable precision (0.0 = F1-max, no constraint).
         """
-        p_severe  = self.predict_proba(X)[:, 2]
-        y_severe  = (y.values == 2).astype(int)
+        p_severe = self.predict_proba(X)[:, 2]
+        y_severe = (y.values == 2).astype(int)
 
         best_thresh = 0.5
         best_f1     = 0.0
+        # Candidates that satisfy the precision constraint: (thresh, prec, recall)
+        precision_candidates: list[tuple[float, float, float]] = []
 
         for thresh in np.arange(0.05, 1.0, 0.05):
             pred = (p_severe >= thresh).astype(int)
+            prec = float(precision_score(y_severe, pred, zero_division=0))
+            rec  = float(recall_score(y_severe, pred, zero_division=0))
             f1   = float(f1_score(y_severe, pred, zero_division=0))
             if f1 > best_f1:
                 best_f1     = f1
                 best_thresh = float(thresh)
+            if min_precision > 0.0 and prec >= min_precision:
+                precision_candidates.append((float(thresh), prec, rec))
+
+        if min_precision > 0.0 and precision_candidates:
+            # Highest recall among thresholds that meet the precision target.
+            best_thresh = max(precision_candidates, key=lambda t: t[2])[0]
 
         return best_thresh
 
@@ -581,36 +600,50 @@ class BinarySpikeClassifier:
         """
         return self._model.predict_proba(self._to_array(X))  # shape (n, 2)
 
-    def find_alarm_threshold(self, X: pd.DataFrame, y: pd.Series) -> float:
-        """Find the p_spike threshold that maximises F1 for spike detection.
+    def find_alarm_threshold(
+        self,
+        X:             pd.DataFrame,
+        y:             pd.Series,
+        min_precision: float = 0.0,
+    ) -> float:
+        """Find the p_spike threshold on validation data.
 
         Sweeps P(spike) (column 1 of predict_proba) from 0.05 to 0.95 in steps
-        of 0.05.  Returns the threshold with the highest F1 on the binary
-        "is this row a spike?" question.
+        of 0.05.
+
+        Default behaviour (``min_precision=0``): returns the threshold with the
+        highest F1.  With ``min_precision > 0``: picks the highest-recall
+        threshold that meets the precision target; falls back to F1-max if no
+        sweep step qualifies.
 
         Always call this on **validation data only**.
 
         Parameters
         ----------
-        X : DataFrame with _X_COLS columns.
-        y : binary Series {0, 1} — spike labels.
-
-        Returns
-        -------
-        float alarm threshold in (0.0, 1.0).
+        X             : DataFrame with _X_COLS columns.
+        y             : binary Series {0, 1} — spike labels.
+        min_precision : minimum acceptable precision (0.0 = F1-max, no constraint).
         """
         p_spike = self.predict_proba(X)[:, 1]
         y_vals  = y.values
 
         best_thresh = 0.5
         best_f1     = 0.0
+        precision_candidates: list[tuple[float, float, float]] = []
 
         for thresh in np.arange(0.05, 1.0, 0.05):
             pred = (p_spike >= thresh).astype(int)
+            prec = float(precision_score(y_vals, pred, zero_division=0))
+            rec  = float(recall_score(y_vals, pred, zero_division=0))
             f1   = float(f1_score(y_vals, pred, zero_division=0))
             if f1 > best_f1:
                 best_f1     = f1
                 best_thresh = float(thresh)
+            if min_precision > 0.0 and prec >= min_precision:
+                precision_candidates.append((float(thresh), prec, rec))
+
+        if min_precision > 0.0 and precision_candidates:
+            best_thresh = max(precision_candidates, key=lambda t: t[2])[0]
 
         return best_thresh
 

@@ -49,21 +49,23 @@ All commands run from `AIModel/`.
 ```bash
 cd AIModel/
 
-# Run the full test suite (244 passed, 4 skipped — runs in ~17 seconds)
+# Run the full test suite (passes in ~25 seconds)
 .venv/bin/python3 -m pytest tests/ -v
 
 # Run the full training pipeline from scratch (CPU)
 nohup .venv/bin/python3 train_spike_classifier.py \
   --data-path data/cluster_cpu_data.csv \
   --artifacts-dir data/full_run \
-  --tune-hyperparams --optuna-trials 30 > data/run_log.txt 2>&1 & echo "PID: $!"
+  --tune-hyperparams --optuna-trials 30 \
+  --n-estimators 4000 > data/run_log.txt 2>&1 & echo "PID: $!"
 
 # Resume from Step 3 (training only — skips preprocessing and feature engineering)
 nohup .venv/bin/python3 train_spike_classifier.py \
   --data-path data/cluster_cpu_data.csv \
   --artifacts-dir data/full_run \
   --from-step 3 \
-  --tune-hyperparams --optuna-trials 30 > data/run_log.txt 2>&1 & echo "PID: $!"
+  --tune-hyperparams --optuna-trials 30 \
+  --n-estimators 4000 > data/run_log.txt 2>&1 & echo "PID: $!"
 
 # Monitor training
 tail -f data/run_log.txt
@@ -74,6 +76,7 @@ tail -f data/run_log.txt
   --model-dir data/full_run/models/spike/
 
 # GPU training via Docker Compose (requires NVIDIA Container Toolkit on host)
+# Run from ~/spike on the VM
 cd ..   # back to Agentic_AI/
 docker compose --profile train run --rm --build train
 

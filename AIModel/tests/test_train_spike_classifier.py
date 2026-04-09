@@ -36,9 +36,12 @@ from spike_feature_engineer import engineer, _FEATURE_COLS
 from spike_classifier import _X_COLS, _TRAIN_RATIO, _VAL_RATIO
 from train_spike_classifier import (
     _N_FOLDS,
+    _apply_calibrators,
+    _compute_calibration_metrics,
     _fold_metrics,
     _run_optuna_search,
     _run_walk_forward_cv,
+    _select_alarm_threshold,
     _threshold_sweep_table,
     _step_needed,
     run,
@@ -359,6 +362,38 @@ class TestRunPipeline:
         assert "final_metrics" in cfg
         assert "macro_pr_auc" in cfg["final_metrics"]
 
+    def test_spike_config_has_calibration_block(self, pipeline_result):
+        """spike_config.json must have a calibration block with per-class metrics."""
+        _, arts = pipeline_result
+        cfg = json.loads((arts / "models" / "spike" / "spike_config.json").read_text())
+        assert "calibration" in cfg, "spike_config.json must have a calibration block"
+        cal = cfg["calibration"]
+        assert cal["method"]  == "isotonic_ovr"
+        assert cal["fit_on"]  == "validation_set"
+        assert "sklearn_version" in cal
+        for k in ("class_0", "class_1", "class_2"):
+            assert k in cal["per_class"], f"calibration.per_class must contain {k}"
+            cls_metrics = cal["per_class"][k]
+            assert "brier_raw" in cls_metrics
+            assert "brier_cal" in cls_metrics
+            assert "ece_cal"   in cls_metrics
+
+    def test_calibrators_pkl_written(self, pipeline_result):
+        """calibrators.pkl must be saved alongside the 60m model."""
+        _, arts = pipeline_result
+        assert (arts / "models" / "spike" / "calibrators.pkl").exists()
+
+    def test_final_metrics_has_calibrated_pr_auc(self, pipeline_result):
+        """spike_config.json final_metrics must include macro_pr_auc_calibrated."""
+        _, arts = pipeline_result
+        cfg = json.loads((arts / "models" / "spike" / "spike_config.json").read_text())
+        assert "macro_pr_auc_calibrated" in cfg["final_metrics"], (
+            "final_metrics must include macro_pr_auc_calibrated"
+        )
+        val = cfg["final_metrics"]["macro_pr_auc_calibrated"]
+        assert isinstance(val, float)
+        assert 0.0 <= val <= 1.0 or val != val  # allow NaN for tiny synthetic data
+
     def test_run_config_records_seed(self, pipeline_result):
         _, arts = pipeline_result
         cfg = json.loads((arts / "models" / "spike" / "run_config.json").read_text())
@@ -565,3 +600,127 @@ class TestHyperparameterSearch:
         assert hs["best_params"] is not None
         assert isinstance(hs["best_params"], dict)
         assert len(hs["best_params"]) == 8
+
+
+# ── Calibration helpers ───────────────────────────────────────────────────────
+
+class TestApplyCalibrators:
+    """_apply_calibrators must produce a valid probability distribution."""
+
+    @pytest.fixture(scope="class")
+    def calibrators_and_probs(self):
+        from sklearn.isotonic import IsotonicRegression
+        rng = np.random.default_rng(0)
+        # Synthetic 3-class probabilities (rows sum to 1)
+        raw = rng.dirichlet(alpha=[3, 1, 0.5], size=200).astype("float32")
+        y   = rng.choice([0, 1, 2], size=200, p=[0.70, 0.20, 0.10])
+        cals = []
+        for k in range(3):
+            ir = IsotonicRegression(out_of_bounds="clip")
+            ir.fit(raw[:, k].astype("float64"), (y == k).astype("float64"))
+            cals.append(ir)
+        return cals, raw, y
+
+    def test_output_rows_sum_to_one(self, calibrators_and_probs):
+        cals, raw, _ = calibrators_and_probs
+        cal = _apply_calibrators(cals, raw)
+        np.testing.assert_allclose(cal.sum(axis=1), np.ones(len(raw)), atol=1e-5)
+
+    def test_output_in_unit_interval(self, calibrators_and_probs):
+        cals, raw, _ = calibrators_and_probs
+        cal = _apply_calibrators(cals, raw)
+        assert (cal >= 0.0).all()
+        assert (cal <= 1.0).all()
+
+    def test_output_dtype_float32(self, calibrators_and_probs):
+        cals, raw, _ = calibrators_and_probs
+        cal = _apply_calibrators(cals, raw)
+        assert cal.dtype == np.float32
+
+    def test_zero_row_fallback_is_uniform(self):
+        """Rows where all calibrators return 0 should be uniform 1/3."""
+        from sklearn.isotonic import IsotonicRegression
+        # Calibrators that always predict 0 (fit on all-zero target)
+        cals = []
+        for _ in range(3):
+            ir = IsotonicRegression(out_of_bounds="clip")
+            ir.fit([0.0, 1.0], [0.0, 0.0])   # always returns 0
+            cals.append(ir)
+        raw = np.array([[0.01, 0.01, 0.01]], dtype="float32")
+        cal = _apply_calibrators(cals, raw)
+        np.testing.assert_allclose(cal[0], [1/3, 1/3, 1/3], atol=1e-5)
+
+
+class TestSelectAlarmThreshold:
+    """_select_alarm_threshold must return a float in (0, 1)."""
+
+    def test_returns_float_in_unit_interval(self):
+        rng     = np.random.default_rng(0)
+        p_alarm = rng.uniform(0.0, 1.0, 300)
+        y_bin   = rng.integers(0, 2, size=300)
+        thresh  = _select_alarm_threshold(p_alarm, y_bin)
+        assert isinstance(thresh, float)
+        assert 0.0 < thresh < 1.0
+
+    def test_selects_threshold_that_maximises_f1(self):
+        """When p_alarm mirrors the labels perfectly the threshold should be
+        at ~0.5 (boundary between 0 and 1) and yield perfect F1=1.0."""
+        from sklearn.metrics import f1_score
+        y_bin   = np.array([0, 0, 0, 1, 1, 1] * 10)
+        # Scores: positives all at 0.9, negatives all at 0.1
+        p_alarm = np.where(y_bin == 1, 0.9, 0.1)
+        thresh  = _select_alarm_threshold(p_alarm, y_bin)
+        pred    = (p_alarm >= thresh).astype(int)
+        assert float(f1_score(y_bin, pred, zero_division=0)) == pytest.approx(1.0)
+
+
+class TestComputeCalibrationMetrics:
+    """_compute_calibration_metrics must return structurally valid dicts."""
+
+    def test_returns_expected_keys(self):
+        rng      = np.random.default_rng(0)
+        raw      = rng.dirichlet([3, 1, 0.5], size=100)
+        y_true   = rng.choice([0, 1, 2], size=100, p=[0.70, 0.20, 0.10])
+        cal      = raw  # use raw as cal for simplicity
+        metrics  = _compute_calibration_metrics(raw, y_true, cal)
+        for k in ("class_0", "class_1", "class_2"):
+            assert k in metrics
+            for field in ("brier_raw", "brier_cal", "ece_cal"):
+                assert field in metrics[k], f"Missing {field} in {k}"
+
+    def test_brier_scores_in_unit_interval(self):
+        rng    = np.random.default_rng(1)
+        raw    = rng.dirichlet([3, 1, 0.5], size=200)
+        y_true = rng.choice([0, 1, 2], size=200, p=[0.70, 0.20, 0.10])
+        m      = _compute_calibration_metrics(raw, y_true, raw)
+        for cls in ("class_0", "class_1", "class_2"):
+            assert 0.0 <= m[cls]["brier_raw"] <= 1.0
+            assert 0.0 <= m[cls]["ece_cal"]   <= 1.0
+
+    def test_threshold_sweep_accepts_precomputed_probas(self, features_parquet):
+        """_threshold_sweep_table with probas= must produce the same structure
+        as without (internally calls predict_proba if probas=None)."""
+        from spike_classifier import SpikeClassifier
+        from sklearn.utils.class_weight import compute_sample_weight
+        df       = pd.read_parquet(features_parquet)
+        df       = df[df["severity_in_60m"].notna()].copy()
+        df["severity_in_60m"] = df["severity_in_60m"].astype("int8")
+        train_max = int(df["bucket"].max() * _TRAIN_RATIO)
+        val_max   = int(df["bucket"].max() * (_TRAIN_RATIO + _VAL_RATIO))
+        train_df  = df[df["bucket"] <= train_max]
+        val_df    = df[(df["bucket"] > train_max) & (df["bucket"] <= val_max)]
+        y_tr      = train_df["severity_in_60m"]
+        sw        = compute_sample_weight("balanced", y_tr)
+        clf       = SpikeClassifier().fit(train_df, y_tr, sample_weight=sw)
+        X_val     = val_df[_X_COLS]
+        y_val     = val_df["severity_in_60m"]
+        raw_probs = clf.predict_proba(X_val)
+
+        rows_auto     = _threshold_sweep_table(clf, X_val, y_val, len(val_df))
+        rows_explicit = _threshold_sweep_table(clf, X_val, y_val, len(val_df),
+                                               probas=raw_probs)
+
+        assert len(rows_auto) == len(rows_explicit)
+        for r_a, r_e in zip(rows_auto, rows_explicit):
+            assert r_a["threshold"] == r_e["threshold"]
+            assert abs(r_a["precision"] - r_e["precision"]) < 1e-6

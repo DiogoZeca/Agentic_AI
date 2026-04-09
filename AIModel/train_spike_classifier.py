@@ -65,11 +65,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xgboost as xgb
+import sklearn
 from scipy.stats import kendalltau
 from sklearn.isotonic import IsotonicRegression
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import (
     average_precision_score,
+    brier_score_loss,
     f1_score,
     precision_score,
     recall_score,
@@ -379,6 +381,7 @@ def _threshold_sweep_table(
     y_val:  pd.Series,
     total_val_rows: int,
     binary: bool = False,
+    probas: np.ndarray | None = None,
 ) -> list[dict]:
     """Compute precision / recall / F1 / alarms_per_day for each threshold.
 
@@ -393,8 +396,12 @@ def _threshold_sweep_table(
     y_val           : validation labels.
     total_val_rows  : total labeled validation rows (used for alarm rate scaling).
     binary          : if True, use P(spike) column 1; otherwise use P(severe) column 2.
+    probas          : pre-computed probability matrix; when provided, ``clf.predict_proba``
+                      is not called.  Pass calibrated probabilities here so the sweep
+                      reflects the actual inference distribution.
     """
-    probas          = clf.predict_proba(X_val)
+    if probas is None:
+        probas = clf.predict_proba(X_val)
     # Binary: column 1 = P(spike); 3-class: column 2 = P(severe)
     p_alarm         = probas[:, 1] if binary else probas[:, 2]
     y_binary        = (y_val.values > 0).astype(int) if binary else (y_val.values == 2).astype(int)
@@ -428,6 +435,140 @@ def _print_threshold_table(rows: list[dict], optimal_thresh: float) -> None:
             r["threshold"], r["precision"], r["recall"], r["f1"],
             r["alarms_per_day"], marker,
         )
+
+
+# ── Calibration helpers ───────────────────────────────────────────────────────
+
+
+def _apply_calibrators(
+    calibrators: list,       # list of n_classes IsotonicRegression fitted OvR
+    raw_probs:   np.ndarray, # shape (n, n_classes), float32 or float64
+) -> np.ndarray:
+    """Apply per-class isotonic calibration and renormalize to a valid distribution.
+
+    Zero row-sum rows (all calibrated values clamped to 0.0) fall back to
+    uniform 1/n_classes — the same behaviour as sklearn CalibratedClassifierCV.
+
+    Parameters
+    ----------
+    calibrators : list of fitted IsotonicRegression, one per class.
+    raw_probs   : raw softmax probabilities, shape (n, n_classes).
+
+    Returns
+    -------
+    float32 array of shape (n, n_classes) with rows summing to 1.
+    """
+    n_classes = len(calibrators)
+    cal = np.column_stack([
+        np.clip(calibrators[k].predict(raw_probs[:, k].astype("float64")), 0.0, 1.0)
+        for k in range(n_classes)
+    ])                              # (n, n_classes), float64
+    row_sums = cal.sum(axis=1, keepdims=True)
+    uniform  = np.full_like(cal, 1.0 / n_classes)
+    # Suppress divide-by-zero: np.where evaluates both branches before
+    # selecting; rows with sum=0 produce NaN in cal/row_sums but are masked.
+    with np.errstate(invalid="ignore", divide="ignore"):
+        normalized = cal / row_sums
+    return np.where(row_sums > 0, normalized, uniform).astype("float32")
+
+
+def _select_alarm_threshold(
+    p_alarm:       np.ndarray,   # 1-D — P(severe) or P(spike) column
+    y_binary:      np.ndarray,   # 1-D int — 1 = positive class
+    min_precision: float = 0.0,
+) -> float:
+    """Return the alarm threshold on validation data.
+
+    Identical sweep logic to SpikeClassifier.find_alarm_threshold() but
+    accepts pre-computed probabilities so calibrated scores can be used
+    without re-running predict_proba().
+
+    With ``min_precision > 0``: picks the highest-recall threshold that
+    achieves precision >= ``min_precision``; falls back to F1-max if no step
+    qualifies.  Logs a warning in that case so the operator knows the target
+    was not achievable.
+    """
+    best_thresh, best_f1 = 0.5, 0.0
+    precision_candidates: list[tuple[float, float, float]] = []
+
+    for thresh in np.arange(0.05, 1.0, 0.05):
+        pred = (p_alarm >= thresh).astype(int)
+        prec = float(precision_score(y_binary, pred, zero_division=0))
+        rec  = float(recall_score(y_binary, pred, zero_division=0))
+        f1   = float(f1_score(y_binary, pred, zero_division=0))
+        if f1 > best_f1:
+            best_f1     = f1
+            best_thresh = float(thresh)
+        if min_precision > 0.0 and prec >= min_precision:
+            precision_candidates.append((float(thresh), prec, rec))
+
+    if min_precision > 0.0:
+        if precision_candidates:
+            best_thresh = max(precision_candidates, key=lambda t: t[2])[0]
+        else:
+            log.warning(
+                "  No threshold achieves min_precision=%.2f — falling back to F1-max (%.2f).",
+                min_precision, best_thresh,
+            )
+
+    return best_thresh
+
+
+def _compute_calibration_metrics(
+    raw_probs: np.ndarray,  # (n, n_classes) — raw softmax output
+    y_true:    np.ndarray,  # (n,) int — class labels 0, 1, ...
+    cal_probs: np.ndarray,  # (n, n_classes) — calibrated, rows sum to 1
+    n_bins:    int = 10,
+) -> dict:
+    """Compute per-class Brier score (raw + calibrated) and ECE (calibrated).
+
+    Both raw and calibrated Brier scores are returned so the calibration gain
+    is visible in spike_config.json.  ECE uses equal-width bins on the
+    calibrated confidence values.
+
+    Parameters
+    ----------
+    raw_probs : uncalibrated probabilities from XGBoost softmax.
+    y_true    : ground-truth class labels (integer 0 .. n_classes-1).
+    cal_probs : calibrated probabilities (same shape as raw_probs).
+    n_bins    : number of equal-width confidence bins for ECE.
+
+    Returns
+    -------
+    dict with keys "class_0", "class_1", ...; each sub-dict has keys
+    "brier_raw", "brier_cal", "ece_cal".
+    """
+    n_classes  = raw_probs.shape[1]
+    bin_edges  = np.linspace(0.0, 1.0, n_bins + 1)
+    metrics: dict = {}
+
+    for k in range(n_classes):
+        y_k_true = (y_true == k).astype("float64")
+        p_raw_k  = raw_probs[:, k].astype("float64")
+        p_cal_k  = cal_probs[:, k].astype("float64")
+
+        brier_raw = float(brier_score_loss(y_k_true, p_raw_k))
+        brier_cal = float(brier_score_loss(y_k_true, p_cal_k))
+
+        # Equal-width ECE on calibrated probabilities
+        bin_idx = np.digitize(p_cal_k, bin_edges[1:-1])
+        n       = len(y_k_true)
+        ece     = 0.0
+        for b in range(n_bins):
+            mask = bin_idx == b
+            if mask.sum() == 0:
+                continue
+            acc  = float(y_k_true[mask].mean())
+            conf = float(p_cal_k[mask].mean())
+            ece += (mask.sum() / n) * abs(acc - conf)
+
+        metrics[f"class_{k}"] = {
+            "brier_raw": round(brier_raw, 6),
+            "brier_cal": round(brier_cal, 6),
+            "ece_cal":   round(ece, 6),
+        }
+
+    return metrics
 
 
 # ── Feature importance ────────────────────────────────────────────────────────
@@ -885,6 +1026,7 @@ def _train_binary_horizon(
     warmstart_params:      dict | None = None,
     n_estimators:          int         = 2000,
     early_stopping_rounds: int         = 150,
+    min_alarm_precision:   float       = 0.0,
 ) -> dict:
     """Train and evaluate a BinarySpikeClassifier for one short horizon.
 
@@ -1002,7 +1144,9 @@ def _train_binary_horizon(
     clf.fit(train_df[_X_COLS], train_df[label_col],
             eval_set=[(X_val_arr, val_df[label_col].values)])
 
-    alarm_thresh = clf.find_alarm_threshold(val_df[_X_COLS], val_df[label_col])
+    alarm_thresh = clf.find_alarm_threshold(
+        val_df[_X_COLS], val_df[label_col], min_precision=min_alarm_precision,
+    )
     m = clf.evaluate(test_df[_X_COLS], test_df[label_col], alarm_threshold=alarm_thresh)
 
     log.info("  PR-AUC         : %.3f  ← primary metric", m["pr_auc"])
@@ -1076,6 +1220,7 @@ def run(
     n_trials:              int          = 30,
     n_estimators:          int          = 2000,
     early_stopping_rounds: int          = 150,
+    min_alarm_precision:   float        = 0.0,
 ) -> dict:
     """Run the full spike classifier training pipeline.
 
@@ -1186,6 +1331,13 @@ def run(
 
     train_df = df[df["bucket"] <= train_max].reset_index(drop=True)
     val_df   = df[(df["bucket"] > train_max) & (df["bucket"] <= val_max)].reset_index(drop=True)
+    # Extract compact test features/labels before freeing the full DataFrame.
+    # Calibrated test metrics require the test set; only _X_COLS + label are
+    # kept (~750 MB) rather than the full 60+ column slice (~3 GB).
+    _test_mask     = df["bucket"] > val_max
+    X_test_compact = df.loc[_test_mask, list(_X_COLS)].astype("float32").reset_index(drop=True)
+    y_test_compact = df.loc[_test_mask, "severity_in_60m"].reset_index(drop=True)
+    del _test_mask
     # Free the full 24M-row DataFrame — train_df and val_df are independent
     # copies (reset_index creates new allocations).  Without this, ~6–8 GB
     # stays live when _train_model reads cluster_features.parquet again,
@@ -1281,18 +1433,20 @@ def run(
         early_stopping_rounds = early_stopping_rounds,
     )
 
-    # ── Alarm threshold sweep table ───────────────────────────────────────────
+    # ── Load final model ──────────────────────────────────────────────────────
     clf = SpikeClassifier.load(model_path)
 
     # ── Isotonic calibration ──────────────────────────────────────────────────
-    # Fit one IsotonicRegression per class on validation set probabilities.
-    # Calibration maps raw softmax outputs to empirical class probabilities,
-    # improving the cost-rational decisions downstream that depend on the
-    # absolute probability scale (not just ranking).
+    # Fit one IsotonicRegression per class (OvR) on validation set probabilities.
+    # Calibration maps raw softmax outputs to empirical class probabilities so
+    # that downstream cost-rational decisions work on the true probability scale.
+    # The alarm threshold is re-selected on calibrated val probabilities — this
+    # is critical for correctness: inference applies calibration, so the threshold
+    # must be selected on the same distribution that inference produces.
     log.info("  Fitting isotonic calibrators on validation set …")
-    raw_val_probs = clf.predict_proba(X_val_compact)  # shape (n, 3)
+    raw_val_probs = clf.predict_proba(X_val_compact)  # shape (n, 3), float64
     y_val_arr     = y_val_compact.values
-    calibrators   = []
+    calibrators: list = []
     for k in range(3):
         y_k = (y_val_arr == k).astype("float64")
         p_k = raw_val_probs[:, k].astype("float64")
@@ -1304,9 +1458,49 @@ def run(
         pickle.dump(calibrators, _f, protocol=pickle.HIGHEST_PROTOCOL)
     log.info("  Calibrators saved  : %s", cal_path)
 
-    sweep_rows = _threshold_sweep_table(clf, X_val_compact, y_val_compact, n_val_rows)
-    log.info("  ALARM THRESHOLD SWEEP  (p_severe on validation set)")
-    _print_threshold_table(sweep_rows, result["alarm_threshold"])
+    # Apply calibration to val and test sets
+    cal_val_probs  = _apply_calibrators(calibrators, raw_val_probs)
+    raw_test_probs = clf.predict_proba(X_test_compact)  # shape (n, 3)
+    cal_test_probs = _apply_calibrators(calibrators, raw_test_probs)
+
+    # Re-select alarm threshold on calibrated val probabilities.
+    # The raw threshold from spike_classifier.train() was selected on raw
+    # probabilities; it is incorrect for calibrated inference.
+    y_val_binary    = (y_val_arr == 2).astype(int)
+    alarm_threshold = _select_alarm_threshold(
+        cal_val_probs[:, 2], y_val_binary, min_precision=min_alarm_precision,
+    )
+    log.info(
+        "  Alarm threshold (calibrated val) : %.2f  (raw was %.2f)",
+        alarm_threshold, result["alarm_threshold"],
+    )
+
+    # Compute calibrated alarm metrics on test set
+    y_test_arr    = y_test_compact.values
+    y_test_binary = (y_test_arr == 2).astype(int)
+    alarm_pred    = (cal_test_probs[:, 2] >= alarm_threshold).astype(int)
+    cal_alarm_precision = float(precision_score(y_test_binary, alarm_pred, zero_division=0))
+    cal_alarm_recall    = float(recall_score(y_test_binary, alarm_pred, zero_division=0))
+
+    # Calibrated macro PR-AUC on test (for operational reporting)
+    n_test_present = len(np.unique(y_test_arr))
+    if n_test_present >= 2:
+        macro_pr_auc_calibrated = float(
+            average_precision_score(y_test_arr, cal_test_probs, average="macro")
+        )
+    else:
+        macro_pr_auc_calibrated = float("nan")
+
+    # Calibration quality metrics (Brier + ECE per class)
+    cal_metrics = _compute_calibration_metrics(raw_val_probs, y_val_arr, cal_val_probs)
+
+    # ── Alarm threshold sweep (calibrated) ───────────────────────────────────
+    sweep_rows = _threshold_sweep_table(
+        clf, X_val_compact, y_val_compact, n_val_rows,
+        probas=cal_val_probs,
+    )
+    log.info("  ALARM THRESHOLD SWEEP  (p_severe calibrated, validation set)")
+    _print_threshold_table(sweep_rows, alarm_threshold)
 
     # ── Feature importance ────────────────────────────────────────────────────
     _compute_feature_importance(clf, X_val_compact, importance_path)
@@ -1317,7 +1511,9 @@ def run(
     _global_p99_fallback = float(thresh_df["threshold_p99"].median())
 
     spike_config = {
-        "alarm_threshold":   result["alarm_threshold"],
+        # alarm_threshold is selected on calibrated val probabilities so it is
+        # consistent with the calibrated inference path.
+        "alarm_threshold":   alarm_threshold,
         "train_ratio":       train_ratio,
         "val_ratio":         val_ratio,
         "test_ratio":        round(1.0 - train_ratio - val_ratio, 4),
@@ -1327,6 +1523,7 @@ def run(
         "class_rates_val":   {k: round(v, 6) for k, v in result["class_rates_val"].items()},
         "class_rates_test":  {k: round(v, 6) for k, v in result["class_rates_test"].items()},
         "final_metrics": {
+            # Raw metrics from spike_classifier.train() — kept for cross-run comparison
             "macro_pr_auc":   round(result["macro_pr_auc"], 6),
             "macro_roc_auc":  round(result["macro_roc_auc"], 6),
             "pr_auc_class_0": round(result["pr_auc_class_0"], 6),
@@ -1334,8 +1531,17 @@ def run(
             "pr_auc_class_2": round(result["pr_auc_class_2"], 6),
             "weighted_f1":    round(result["weighted_f1"], 6),
             "macro_f1":       round(result["macro_f1"], 6),
-            "alarm_precision": round(result["alarm_precision"], 6),
-            "alarm_recall":    round(result["alarm_recall"], 6),
+            # Calibrated operational metrics — used for reporting actual deployment performance
+            "macro_pr_auc_calibrated": round(macro_pr_auc_calibrated, 6),
+            "alarm_threshold":         round(alarm_threshold, 6),
+            "alarm_precision":         round(cal_alarm_precision, 6),
+            "alarm_recall":            round(cal_alarm_recall, 6),
+        },
+        "calibration": {
+            "method":          "isotonic_ovr",
+            "fit_on":          "validation_set",
+            "sklearn_version": sklearn.__version__,
+            "per_class":       cal_metrics,
         },
         "cv_summary":            cv_summary,
         "alarm_threshold_sweep": sweep_rows,
@@ -1375,8 +1581,9 @@ def run(
     config_path.write_text(json.dumps(spike_config, indent=2))
     log.info("  Spike config saved : %s", config_path)
 
-    # Release 60m model and large DataFrames from memory before training binary models
-    del clf
+    # Release 60m model and compact arrays from memory before training binary models
+    del clf, X_val_compact, y_val_compact, X_test_compact, y_test_compact
+    del raw_val_probs, cal_val_probs, raw_test_probs, cal_test_probs
     gc.collect()
 
     # Binary models (binary:logistic) run on CPU even when the 60m model used CUDA.
@@ -1405,6 +1612,16 @@ def run(
     # The `df` in scope here only has severity_in_60m rows; reload to include
     # rows where binary labels are valid but severity_in_60m may be NaN.
     df_all = pd.read_parquet(features_path)
+
+    # Pre-slice OVR columns now, while the heap is still clean.  The parquet
+    # reader (pyarrow) needs 2-3× the final size as temporary decompression
+    # buffers.  After two XGBoost training runs the heap is fragmented enough
+    # that a second pd.read_parquet call at the end of the pipeline triggers
+    # the Linux OOM killer even when total free RAM looks sufficient.
+    # Slicing from the already-loaded df_all costs only the copy itself
+    # (~3.7 GB) with no temporary buffer overhead.
+    _ovr_needed = list(_X_COLS) + ["severity_in_60m", "bucket", "machine_id"]
+    df_ovr = df_all[_ovr_needed].copy()
 
     # Warm-start binary models from 60m best_params (tree structure is portable).
     # Strip n_estimators — binary final training uses 2000 with early stopping.
@@ -1444,8 +1661,26 @@ def run(
             warmstart_params      = binary_warmstart,
             n_estimators          = n_estimators,
             early_stopping_rounds = early_stopping_rounds,
+            min_alarm_precision   = min_alarm_precision,
         )
         binary_results[h_name] = h_result
+
+    # Free df_all before OVR.  df_all is the full 60-col × 24M-row features
+    # DataFrame (~8-10 GB).  Keeping it live across the 15m loop (which itself
+    # runs SHAP on 50K rows) pushes peak RSS above VM RAM and triggers the Linux
+    # OOM killer.  We only need a slim subset for OVR, so delete and reload.
+    del df_all
+    gc.collect()
+
+    try:
+        import psutil
+        _ram = psutil.virtual_memory()
+        log.info(
+            "  Memory after 15m loop (df_all freed): %.1f%% used  (%.1f GB free)",
+            _ram.percent, _ram.available / 1e9,
+        )
+    except ImportError:
+        pass
 
     # ── OVR severe binary model ────────────────────────────────────────────────
     # Trains a dedicated binary classifier for "will a *severe* (p99) spike occur
@@ -1453,18 +1688,21 @@ def run(
     # OVR model is optimised end-to-end for the severe-vs-all distinction.
     # Label is derived from severity_in_60m — NaN preserved so _train_binary_horizon
     # can filter via notna() as it does for all other binary horizons.
+    #
+    # df_ovr was pre-sliced from df_all at load time (before binary training) to
+    # avoid a second parquet read on a fragmented heap — see comment above.
     log.info("  Starting OVR severe binary model (severe_ovr)")
-    sev_col = df_all["severity_in_60m"]
+    sev_col = df_ovr["severity_in_60m"]
     # Use float32 NaN to keep the column float32 (consistent with other feature
     # columns).  np.nan is float64 and would upcast the whole column.
-    df_all["spike_severe_ovr"] = np.where(
+    df_ovr["spike_severe_ovr"] = np.where(
         sev_col.notna(),
         (sev_col == 2).astype("float32"),
         np.float32("nan"),
     )
     ovr_model_dir = artifacts_dir / "models" / "spike_severe_ovr"
     ovr_result = _train_binary_horizon(
-        df                    = df_all,
+        df                    = df_ovr,
         label_col             = "spike_severe_ovr",
         horizon_name          = "severe_ovr",
         cv_gap                = _CV_GAP,
@@ -1481,18 +1719,20 @@ def run(
         warmstart_params      = binary_warmstart,
         n_estimators          = n_estimators,
         early_stopping_rounds = early_stopping_rounds,
+        min_alarm_precision   = min_alarm_precision,
     )
+    del df_ovr
+    gc.collect()
     binary_results["severe_ovr"] = ovr_result
 
     elapsed = (time.perf_counter() - t_pipeline) / 60
     log.info("═" * 62)
     log.info("  PIPELINE COMPLETE  (total %.1f min)", elapsed)
-    log.info("  60m Macro PR-AUC : %.3f", result["macro_pr_auc"])
-    log.info("  60m Severe PR-AUC: %.3f", result["pr_auc_class_2"])
-    log.info("  60m Alarm thresh : %.2f  →  P %.3f  R %.3f",
-             result["alarm_threshold"],
-             result["alarm_precision"],
-             result["alarm_recall"])
+    log.info("  60m Macro PR-AUC (raw)  : %.3f", result["macro_pr_auc"])
+    log.info("  60m Macro PR-AUC (cal)  : %.3f", macro_pr_auc_calibrated)
+    log.info("  60m Severe PR-AUC (raw) : %.3f", result["pr_auc_class_2"])
+    log.info("  60m Alarm thresh (cal)  : %.2f  →  P %.3f  R %.3f",
+             alarm_threshold, cal_alarm_precision, cal_alarm_recall)
     for h_name, h_res in binary_results.items():
         log.info("  %s PR-AUC        : %.3f  (alarm %.2f)",
                  h_name, h_res.get("pr_auc", float("nan")), h_res.get("alarm_threshold", 0.5))
@@ -1657,24 +1897,39 @@ def _parse_args() -> argparse.Namespace:
             "spike_config.json (model has not converged)."
         ),
     )
+    p.add_argument(
+        "--min-alarm-precision",
+        dest    = "min_alarm_precision",
+        type    = float,
+        default = 0.0,
+        metavar = "P",
+        help    = (
+            "Minimum precision target for alarm threshold selection  (default: 0.0 = F1-max). "
+            "When > 0, the threshold sweep selects the highest-recall threshold that achieves "
+            "at least this precision on the validation set, trading recall for fewer false alarms. "
+            "Falls back to F1-max with a warning if no threshold meets the target. "
+            "Recommended range: 0.50–0.65.  Applies to all three models (60m, 15m, OVR)."
+        ),
+    )
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
     run(
-        data_path        = args.data_path,
-        artifacts_dir    = args.artifacts_dir,
-        train_ratio      = args.train_ratio,
-        val_ratio        = args.val_ratio,
-        n_folds          = args.n_folds,
-        walk_forward     = args.walk_forward,
-        from_step        = args.from_step,
-        force            = args.force,
-        seed             = args.seed,
-        device           = args.device,
-        target_pos_rate  = args.target_pos_rate,
-        tune_hyperparams = args.tune_hyperparams,
-        n_trials         = args.n_trials,
-        n_estimators     = args.n_estimators,
+        data_path            = args.data_path,
+        artifacts_dir        = args.artifacts_dir,
+        train_ratio          = args.train_ratio,
+        val_ratio            = args.val_ratio,
+        n_folds              = args.n_folds,
+        walk_forward         = args.walk_forward,
+        from_step            = args.from_step,
+        force                = args.force,
+        seed                 = args.seed,
+        device               = args.device,
+        target_pos_rate      = args.target_pos_rate,
+        tune_hyperparams     = args.tune_hyperparams,
+        n_trials             = args.n_trials,
+        n_estimators         = args.n_estimators,
+        min_alarm_precision  = args.min_alarm_precision,
     )
