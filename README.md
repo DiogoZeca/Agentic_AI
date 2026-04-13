@@ -20,8 +20,61 @@ The output feeds a workload scheduler that can defer batch jobs, pre-empt runnin
 | 15m binary | 0.584 ± 0.008 | 0.575 | 0.911 |
 | OVR severe (binary) | — | 0.362 | — |
 
-Random baseline for macro PR-AUC ≈ mean class prevalence (~0.25). All models are well above random.  
 At the default alarm threshold (0.55): Precision 0.385 · Recall 0.444 · ~18 alarms/day across 12,555 machines.
+
+---
+
+## Understanding the metrics
+
+These metrics measure how well the model performs. Here is what each one means in plain terms.
+
+### Precision and Recall — the core trade-off
+
+These two are in permanent tension: improving one typically worsens the other.
+
+**Precision** answers: *"Of all the alarms we fired, how many were real spikes?"*  
+- Precision = 0.385 means 38.5% of our alarms turn out to be real spikes. The other 61.5% are false alarms — the scheduler acts pre-emptively but no spike was coming.  
+- High precision = fewer false alarms. Low precision = the scheduler cries wolf too often.
+
+**Recall** answers: *"Of all actual spikes that happened, how many did we catch?"*  
+- Recall = 0.444 means we caught 44.4% of all real spikes before they happened. We missed 55.6%.  
+- High recall = fewer missed spikes. Low recall = many spikes happen without warning.
+
+**The alarm threshold (default 0.55)** is the knob that controls this trade-off. Raising it fires fewer but more reliable alarms (higher precision, lower recall). Lowering it catches more spikes but with more false alarms (lower precision, higher recall). The Streamlit dashboard has an interactive slider to explore this.
+
+**False positives (false alarms)** are cases where the model predicted a spike but none came. These cause unnecessary scheduler actions (e.g., deferring a batch job that would have run fine). The alarm debounce — requiring 2 consecutive spike predictions before firing — reduces these.
+
+---
+
+### PR-AUC — the summary metric
+
+**PR-AUC** (Area Under the Precision-Recall Curve) summarises the entire precision/recall trade-off across all possible alarm thresholds into a single number from 0 to 1.
+
+- **Random baseline** ≈ the fraction of samples that are actually spikes (class prevalence). For our 3-class model, the macro average random baseline is ~0.25.  
+- **Our 60m model: 0.574** — more than 2× above random. A perfect model would score 1.0.  
+- **Why we use this, not accuracy**: Only ~15% of 5-minute windows contain a spike. A model that always predicts "no spike" would be 85% accurate but completely useless — PR-AUC correctly scores it near the random baseline.  
+- **CV PR-AUC** is computed with walk-forward cross-validation (training on past, validating on future) — a more honest estimate of real-world performance than a single train/test split. The ± value is the standard deviation across 5 folds.  
+- **Macro PR-AUC** averages the per-class scores equally — the rare "severe" class counts the same as the common "no spike" class. This prevents the model from ignoring rare but important events.
+
+---
+
+### ROC-AUC — the rank-ordering metric
+
+**ROC-AUC** (Area Under the Receiver Operating Characteristic curve) measures whether the model correctly ranks high-risk machines above low-risk ones, regardless of any specific threshold.
+
+- A score of **1.0** = perfect ranking. **0.5** = random. Our 60m model scores **0.839**.  
+- Intuition: pick any two machines at random — one that will spike and one that won't. ROC-AUC 0.839 means there is an 83.9% chance the model assigns a higher probability to the one that will actually spike.  
+- **Why ROC-AUC matters for cross-domain comparisons**: unlike PR-AUC, the ROC-AUC baseline is always 0.5 regardless of class imbalance. This makes it the right metric when comparing results across different datasets (e.g., when evaluating the model on a new production cluster where the spike rate might be different from the training data).
+
+---
+
+### Calibration — do the probabilities mean what they say?
+
+The model outputs probabilities (e.g., "70% chance of a moderate spike in 60 minutes"). **Calibration** checks whether those probabilities are trustworthy.
+
+- A well-calibrated model: when it says 70%, spikes happen ~70% of the time.  
+- We apply **isotonic regression calibration** on the validation set. After calibration, the Brier score (a calibration quality measure) halved for all classes, and the Expected Calibration Error (ECE) dropped below 0.025.  
+- Calibrated probabilities are what the alarm threshold is applied to. Using an uncalibrated threshold on calibrated probabilities (or vice versa) produces systematically wrong alarm rates.
 
 ---
 

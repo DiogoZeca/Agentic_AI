@@ -46,6 +46,10 @@ docs/
 .env.*
 !.env.example
 
+# ─── Zabbix data scripts (contain hardcoded credentials) ─────────────────────
+AIModel/data/explore_zabbix.py
+AIModel/data/fetch_zabbix_data.py
+
 # ─── Jupyter ─────────────────────────────────────────────────────────────────
 .ipynb_checkpoints/
 
