@@ -1221,23 +1221,28 @@ def run(
     n_estimators:          int          = 2000,
     early_stopping_rounds: int          = 150,
     min_alarm_precision:   float        = 0.0,
+    min_future_windows:    int          = 1,
 ) -> dict:
     """Run the full spike classifier training pipeline.
 
     Parameters
     ----------
-    data_path       : path to cluster_cpu_data.csv (raw Google Cluster Traces).
-    artifacts_dir   : directory for all intermediate and output files.
-    train_ratio     : fraction of buckets for the training split (default 0.6).
-    val_ratio       : fraction of buckets for the validation split (default 0.2).
-    n_folds         : walk-forward CV folds (default 5).
-    walk_forward    : whether to run walk-forward CV before final training.
-    from_step       : skip steps before this number (1=preprocess, 2=features, 3=train).
-    force           : re-run all steps, ignoring existing cache files.
-    seed            : random seed for reproducibility.
-    target_pos_rate : expected deployment spike rate for label-shift correction.
-                      See ``spike_classifier.train()`` for the full derivation.
-                      When ``None`` (default) no correction is applied.
+    data_path          : path to cluster_cpu_data.csv (raw Google Cluster Traces).
+    artifacts_dir      : directory for all intermediate and output files.
+    train_ratio        : fraction of buckets for the training split (default 0.6).
+    val_ratio          : fraction of buckets for the validation split (default 0.2).
+    n_folds            : walk-forward CV folds (default 5).
+    walk_forward       : whether to run walk-forward CV before final training.
+    from_step          : skip steps before this number (1=preprocess, 2=features, 3=train).
+    force              : re-run all steps, ignoring existing cache files.
+    seed               : random seed for reproducibility.
+    target_pos_rate    : expected deployment spike rate for label-shift correction.
+                         See ``spike_classifier.train()`` for the full derivation.
+                         When ``None`` (default) no correction is applied.
+    min_future_windows : K-of-N label threshold for severity_in_60m.
+                         At least this many of the 12 future windows must exceed
+                         the threshold for a positive label.  Default=1 (current
+                         any-exceedance behaviour).  Use 2 or 3 for ablation runs.
 
     Returns
     -------
@@ -1302,10 +1307,11 @@ def run(
         log.info("  STEP 2 — Feature engineering")
         t0 = time.perf_counter()
         engineer(
-            input_path      = agg_path,
-            output_path     = features_path,
-            thresholds_path = thresholds_path,
-            train_ratio     = train_ratio,
+            input_path          = agg_path,
+            output_path         = features_path,
+            thresholds_path     = thresholds_path,
+            train_ratio         = train_ratio,
+            min_future_windows  = min_future_windows,
         )
         log.info("  Step 2 done in %.1f min", (time.perf_counter() - t0) / 60)
 
@@ -1911,6 +1917,23 @@ def _parse_args() -> argparse.Namespace:
             "Recommended range: 0.50–0.65.  Applies to all three models (60m, 15m, OVR)."
         ),
     )
+    p.add_argument(
+        "--min-future-windows",
+        dest    = "min_future_windows",
+        type    = int,
+        default = 1,
+        choices = [1, 2, 3],
+        metavar = "K",
+        help    = (
+            "K-of-N label threshold for severity_in_60m  (default: 1). "
+            "At least K of the 12 future 5-min windows must exceed p95/p99 for a "
+            "positive label.  K=1 is the original any-exceedance behaviour.  "
+            "K=2 or K=3 filter out transient single-bucket spikes — use these for "
+            "ablation experiments to measure whether label persistence improves "
+            "CV macro PR-AUC.  Only affects severity_in_60m; binary labels "
+            "(spike_in_15m/30m/45m) always use K=1."
+        ),
+    )
     return p.parse_args()
 
 
@@ -1932,4 +1955,5 @@ if __name__ == "__main__":
         n_trials             = args.n_trials,
         n_estimators         = args.n_estimators,
         min_alarm_precision  = args.min_alarm_precision,
+        min_future_windows   = args.min_future_windows,
     )

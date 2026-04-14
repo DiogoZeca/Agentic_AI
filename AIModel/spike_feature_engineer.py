@@ -154,6 +154,9 @@ _FEATURE_COLS: list[str] = [
     "spike_severe_in_last_1", # was t-1 a severe spike? (binary, shift(1) guarded)
     "spike_severe_in_last_3", # any severe spike in t-3..t-1? (binary)
     "spike_severe_in_last_6", # any severe spike in t-6..t-1? (binary)
+    # streak persistence features — consecutive-run signal not captured by rate/history
+    "current_spike_streak",    # consecutive buckets above p95 ending at t-1
+    "max_spike_streak_24h",    # longest p95 run in previous 24 windows
     # multi-horizon binary labels (Phase 4 — binary spike flag at shorter horizons)
     "spike_in_15m",    # binary: any p95 exceedance in next  3 windows (15 min)
     "spike_in_30m",    # binary: any p95 exceedance in next  6 windows (30 min)
@@ -243,6 +246,24 @@ def _compute_thresholds(df: pd.DataFrame, train_bucket_max: int) -> pd.DataFrame
         log.info("  Enforced min 10%% p99/p95 gap for %d machines", n_adjusted)
 
     return thresh_df
+
+
+def _max_consecutive_run(arr: np.ndarray) -> float:
+    """Return the longest consecutive run of nonzero values in ``arr``.
+
+    Used with ``Series.rolling(...).apply(_max_consecutive_run, raw=True)``
+    to compute max_spike_streak_24h in O(n × window) time without Python
+    object overhead (raw=True passes a numpy array directly).
+    """
+    best = cur = 0
+    for v in arr:
+        if v:
+            cur += 1
+            if cur > best:
+                best = cur
+        else:
+            cur = 0
+    return float(best)
 
 
 def _engineer_machine(
@@ -420,16 +441,41 @@ def _engineer_machine(
         .astype("float32")
     )
 
+    # ── Streak persistence features ──────────────────────────────────────────
+    # Both `exc` (p95) and `exc_sev` (p99) are already shifted by 1, so
+    # exc[t] = spike_now[t-1].  A run of 1s in exc ending at position t
+    # means t-1, t-2, ... were consecutively above threshold — exactly the
+    # streak count we want without touching the leakage firewall.
+    #
+    # Pattern: group consecutive identical values, cumcount within each group.
+    # where(exc > 0, ...) zeroes out positions that are NOT in a spike run.
+    _streak_id  = (exc != exc.shift(1)).cumsum()
+    _run_cumlen = exc.groupby(_streak_id).cumcount() + 1
+    g["current_spike_streak"] = (
+        _run_cumlen.where(exc > 0, 0.0).astype("float32")
+    )
+
+    # max_spike_streak_24h: longest p95 consecutive run in the last 24 windows.
+    # rolling().apply(raw=True) passes a numpy array to _max_consecutive_run,
+    # which avoids pandas Series overhead.  Window = _MAX_TIME_SINCE_SPIKE (24)
+    # keeps this feature on the same time scale as time_since_last_spike.
+    g["max_spike_streak_24h"] = (
+        exc.rolling(_MAX_TIME_SINCE_SPIKE, min_periods=1)
+           .apply(_max_consecutive_run, raw=True)
+           .astype("float32")
+    )
+
     return g.reset_index()   # "bucket" becomes a column again
 
 
 def _add_label(
-    df:             pd.DataFrame,
-    threshold_p95:  float,
-    threshold_p99:  float,
-    horizon:        int,
-    output_col:     str  = "severity_in_60m",
-    binary:         bool = False,
+    df:                 pd.DataFrame,
+    threshold_p95:      float,
+    threshold_p99:      float,
+    horizon:            int,
+    output_col:         str  = "severity_in_60m",
+    binary:             bool = False,
+    min_future_windows: int  = 1,
 ) -> pd.DataFrame:
     """Add a spike label column to a full (gap-filled) machine series.
 
@@ -440,25 +486,30 @@ def _add_label(
     Uses prefix-sum passes for O(n) look-ahead:
 
     When ``binary=False`` (default — 3-class severity):
-        output_col[i] = 2   if any(total_cpu[i+1..i+horizon] > threshold_p99)
-                       = 1   elif any(total_cpu[i+1..i+horizon] > threshold_p95)
+        output_col[i] = 2   if COUNT(total_cpu[i+1..i+horizon] > threshold_p99) >= min_future_windows
+                       = 1   elif COUNT(total_cpu[i+1..i+horizon] > threshold_p95) >= min_future_windows
                        = 0   otherwise
                        = NaN for the last `horizon` rows (incomplete look-ahead)
 
     When ``binary=True`` (binary spike flag):
-        output_col[i] = 1   if any(total_cpu[i+1..i+horizon] > threshold_p95)
+        output_col[i] = 1   if COUNT(total_cpu[i+1..i+horizon] > threshold_p95) >= min_future_windows
                        = 0   otherwise
                        = NaN for the last `horizon` rows (incomplete look-ahead)
 
     Parameters
     ----------
-    df            : full reindexed series for one machine, sorted by bucket.
-    threshold_p95 : CPU level above which a window counts as a spike.
-    threshold_p99 : CPU level above which a window is severe.
-                    Ignored when binary=True.
-    horizon       : number of future windows to examine (e.g. 12 = 60 min).
-    output_col    : name of the label column to create (default "severity_in_60m").
-    binary        : if True, produce binary {0, 1} labels using p95 only.
+    df                 : full reindexed series for one machine, sorted by bucket.
+    threshold_p95      : CPU level above which a window counts as a spike.
+    threshold_p99      : CPU level above which a window is severe.
+                         Ignored when binary=True.
+    horizon            : number of future windows to examine (e.g. 12 = 60 min).
+    output_col         : name of the label column to create (default "severity_in_60m").
+    binary             : if True, produce binary {0, 1} labels using p95 only.
+    min_future_windows : K-of-N threshold — at least this many future windows must
+                         exceed the threshold for a positive label.  Default=1
+                         preserves the original any-exceedance behaviour.
+                         Use K=2 or K=3 for ablation experiments that require
+                         sustained spikes before labelling a window as positive.
     """
     df  = df.copy()
     n   = len(df)
@@ -478,13 +529,13 @@ def _add_label(
         # future_sums[i] = sum of exceeds[i+1 .. i+horizon]
         future_mild = cs_mild[1 + horizon : 1 + horizon + valid] - cs_mild[1 : 1 + valid]
         if binary:
-            labels[:valid] = (future_mild > 0).astype(np.float64)
+            labels[:valid] = (future_mild >= min_future_windows).astype(np.float64)
         else:
             cs_severe     = _prefix_sum((cpu > threshold_p99).astype(np.float64))
             future_severe = cs_severe[1 + horizon : 1 + horizon + valid] - cs_severe[1 : 1 + valid]
             labels[:valid] = np.where(
-                future_severe > 0, 2,
-                np.where(future_mild > 0, 1, 0),
+                future_severe >= min_future_windows, 2,
+                np.where(future_mild >= min_future_windows, 1, 0),
             ).astype(np.float64)
 
     df[output_col] = labels
@@ -581,23 +632,29 @@ def _add_time_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def engineer(
-    input_path:      str | Path = "data/cluster_agg.parquet",
-    output_path:     str | Path = "data/cluster_features.parquet",
-    thresholds_path: str | Path = "data/spike_thresholds.parquet",
-    train_ratio:     float      = _TRAIN_RATIO,
-    horizon:         int        = _HORIZON,
+    input_path:         str | Path = "data/cluster_agg.parquet",
+    output_path:        str | Path = "data/cluster_features.parquet",
+    thresholds_path:    str | Path = "data/spike_thresholds.parquet",
+    train_ratio:        float      = _TRAIN_RATIO,
+    horizon:            int        = _HORIZON,
+    min_future_windows: int        = 1,
 ) -> pd.DataFrame:
     """Engineer features and spike labels from the node-level aggregation.
 
     Parameters
     ----------
-    input_path      : path to cluster_agg.parquet (output of spike_preprocessor).
-    output_path     : destination for cluster_features.parquet.
-    thresholds_path : destination for spike_thresholds.parquet.
-    train_ratio     : fraction of the time range used to compute spike thresholds.
-                      Must match spike_classifier._TRAIN_RATIO (default 0.6) so that
-                      thresholds are not contaminated by val/test-period observations.
-    horizon         : look-ahead windows for the spike label (default 12 = 60 min).
+    input_path         : path to cluster_agg.parquet (output of spike_preprocessor).
+    output_path        : destination for cluster_features.parquet.
+    thresholds_path    : destination for spike_thresholds.parquet.
+    train_ratio        : fraction of the time range used to compute spike thresholds.
+                         Must match spike_classifier._TRAIN_RATIO (default 0.6) so that
+                         thresholds are not contaminated by val/test-period observations.
+    horizon            : look-ahead windows for the spike label (default 12 = 60 min).
+    min_future_windows : K-of-N threshold for severity_in_60m — at least this many
+                         future windows must exceed the threshold to fire the label.
+                         Default=1 preserves current any-exceedance behaviour.
+                         Only applied to the 60m multiclass label; binary short-horizon
+                         labels (spike_in_15m/30m/45m) always use K=1.
 
     Returns
     -------
@@ -622,6 +679,7 @@ def engineer(
     log.info("  Thresholds : %s", thresholds_path)
     log.info("  Horizon    : %d windows (%d min)", horizon, horizon * 5)
     log.info("  Train ratio: %.0f%%  (thresholds computed from this window only)", train_ratio * 100)
+    log.info("  Label K-of-N: min_future_windows=%d", min_future_windows)
     log.info("═" * 62)
 
     df = pd.read_parquet(input_path)
@@ -670,7 +728,8 @@ def engineer(
         full_series = _engineer_machine(group.copy(), int(machine_id), threshold_p95, threshold_p99=threshold_p99)
         # 3-class severity label for the primary 60-min horizon
         labeled = _add_label(full_series, threshold_p95, threshold_p99, horizon=12,
-                             output_col="severity_in_60m", binary=False)
+                             output_col="severity_in_60m", binary=False,
+                             min_future_windows=min_future_windows)
         # Binary spike labels for shorter horizons (Phase 4)
         labeled = _add_label(labeled, threshold_p95, threshold_p99, horizon=3,
                              output_col="spike_in_15m",  binary=True)

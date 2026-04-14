@@ -209,7 +209,8 @@ class TestFoldMetrics:
         clf, X, y = fitted_binary_clf
         m = _fold_metrics(clf, X, y, alarm_threshold=0.5, binary=True)
         for key, val in m.items():
-            assert 0.0 <= val <= 1.0 or np.isnan(val), f"{key}={val}"
+            # 1e-9 tolerance: average_precision_score can return 1.0 + ε on tiny data
+            assert 0.0 <= val <= 1.0 + 1e-9 or np.isnan(val), f"{key}={val}"
 
     def test_metrics_in_unit_interval(self, fitted_clf):
         clf, X, y = fitted_clf

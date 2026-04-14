@@ -11,10 +11,11 @@
 #   are both written to the host filesystem via the mount point.
 #
 #   Environment variables (all optional — match train_spike_classifier.py CLI):
-#     DEVICE          compute device: "cpu" (default) or "cuda" for GPU VM
-#     DATA_PATH       path to input CSV inside container (default: data/cluster_cpu_data.csv)
-#     ARTIFACTS_DIR   output directory for trained artifacts  (default: data/full_run)
-#     OPTUNA_TRIALS   number of Optuna hyperparameter trials  (default: 30)
+#     DEVICE              compute device: "cpu" (default) or "cuda" for GPU VM
+#     DATA_PATH           path to input CSV inside container (default: data/cluster_cpu_data.csv)
+#     ARTIFACTS_DIR       output directory for trained artifacts  (default: data/full_run)
+#     OPTUNA_TRIALS       number of Optuna hyperparameter trials  (default: 30)
+#     MIN_FUTURE_WINDOWS  K-of-N label threshold for severity_in_60m (default: 1)
 #
 #   GPU notes:
 #     - Base image ships CUDA 12.4 runtime; XGBoost pip wheel includes pre-compiled
@@ -54,10 +55,12 @@ ENV DEVICE=cpu
 ENV DATA_PATH=data/cluster_cpu_data.csv
 ENV ARTIFACTS_DIR=data/full_run
 ENV OPTUNA_TRIALS=30
+ENV MIN_FUTURE_WINDOWS=1
 
 CMD python3 -u train_spike_classifier.py \
-    --data-path     "$DATA_PATH" \
-    --artifacts-dir "$ARTIFACTS_DIR" \
+    --data-path          "$DATA_PATH" \
+    --artifacts-dir      "$ARTIFACTS_DIR" \
     --tune-hyperparams \
-    --optuna-trials "$OPTUNA_TRIALS" \
-    --device        "$DEVICE"
+    --optuna-trials      "$OPTUNA_TRIALS" \
+    --device             "$DEVICE" \
+    --min-future-windows "$MIN_FUTURE_WINDOWS"

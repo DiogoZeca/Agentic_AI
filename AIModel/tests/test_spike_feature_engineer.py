@@ -754,6 +754,204 @@ class TestOutputSchema:
         nan_15m = int(df["spike_in_15m"].isna().sum())
         assert nan_15m < nan_60m
 
+    def test_streak_features_present_in_output(self, eng_result):
+        """Streak features must be present in the full engineer() output."""
+        df, _, _ = eng_result
+        for col in ("current_spike_streak", "max_spike_streak_24h"):
+            assert col in df.columns, f"{col} missing from engineer() output"
+
+    def test_streak_features_are_float32(self, eng_result):
+        """Streak features must be float32."""
+        df, _, _ = eng_result
+        for col in ("current_spike_streak", "max_spike_streak_24h"):
+            assert df[col].dtype == np.float32, f"{col} should be float32"
+
+
+# ── Fixtures for streak and K-of-N tests ─────────────────────────────────────
+
+@pytest.fixture(scope="module")
+def streak_group() -> pd.DataFrame:
+    """Machine 1 — 20 contiguous buckets, consecutive spikes at buckets 5, 6, 7.
+
+    With threshold=0.5 (p95):
+      spike_now[5]=1, spike_now[6]=1, spike_now[7]=1
+      exc (shifted by 1): exc[6]=1, exc[7]=1, exc[8]=1, exc[9]=0
+
+    Expected current_spike_streak values (at key buckets):
+      bucket 5 → 0  (exc[5] = spike_now[4] = 0, no prior spike)
+      bucket 8 → 3  (exc[6,7,8] all 1: run of 3 ending at bucket 8)
+      bucket 9 → 0  (exc[9] = spike_now[8] = 0, run broken)
+    """
+    rows = [
+        _make_agg_row(1, b, total_cpu=(0.9 if 5 <= b <= 7 else 0.1))
+        for b in range(1, 21)
+    ]
+    return _make_agg_df(rows)
+
+
+@pytest.fixture(scope="module")
+def two_spike_group() -> pd.DataFrame:
+    """Machine 1 — 25 contiguous buckets, spikes at buckets 6 AND 8 (non-consecutive).
+
+    Used for K-of-N label tests.
+    With threshold_p95=0.5: future_mild[bucket=1] = 2 (buckets 6 and 8 in look-ahead).
+      K=1 → label ≥ 1 (any spike fires)
+      K=2 → label ≥ 1 (exactly 2 spikes, meets K=2)
+      K=3 → label = 0 (only 2 spikes, below K=3)
+    """
+    rows = [
+        _make_agg_row(1, b, total_cpu=(0.9 if b in (6, 8) else 0.1))
+        for b in range(1, 26)
+    ]
+    return _make_agg_df(rows)
+
+
+# ── Streak feature tests ──────────────────────────────────────────────────────
+
+class TestStreakFeatures:
+    """Steps 1 and 3: current_spike_streak, max_spike_streak_24h."""
+
+    _THRESHOLD_P95 = 0.5   # 0.1 < threshold < 0.9 — below/above CPU values in fixture
+    _THRESHOLD_P99 = 0.95  # above 0.9, so severe streak should stay 0 throughout
+
+    @pytest.fixture(scope="class")
+    def full_series(self, streak_group):
+        return _engineer_machine(streak_group, 1,
+                                 threshold=self._THRESHOLD_P95,
+                                 threshold_p99=self._THRESHOLD_P99)
+
+    def test_streak_zero_before_first_spike(self, full_series):
+        """At bucket 5 (first spike bucket), no prior spike → current_spike_streak = 0.
+
+        exc[5] = spike_now[4] = (0.1 > 0.5) = 0.  No consecutive run ending here.
+        """
+        row = full_series[full_series["bucket"] == 5].iloc[0]
+        assert float(row["current_spike_streak"]) == pytest.approx(0.0)
+
+    def test_streak_one_after_first_spike(self, full_series):
+        """At bucket 6, exc[6] = spike_now[5] = 1 → streak of 1 (run just started)."""
+        row = full_series[full_series["bucket"] == 6].iloc[0]
+        assert float(row["current_spike_streak"]) == pytest.approx(1.0)
+
+    def test_streak_increments_through_run(self, full_series):
+        """At bucket 8, exc[6,7,8] = [1,1,1] → consecutive run of 3 ending here."""
+        row = full_series[full_series["bucket"] == 8].iloc[0]
+        assert float(row["current_spike_streak"]) == pytest.approx(3.0)
+
+    def test_streak_resets_after_gap(self, full_series):
+        """At bucket 9, exc[9] = spike_now[8] = 0 → run broken, streak resets to 0."""
+        row = full_series[full_series["bucket"] == 9].iloc[0]
+        assert float(row["current_spike_streak"]) == pytest.approx(0.0)
+
+    def test_max_streak_captures_longest_run(self, full_series):
+        """At bucket 9 (just after the run ends), max_spike_streak_24h must be ≥ 3."""
+        row = full_series[full_series["bucket"] == 9].iloc[0]
+        assert float(row["max_spike_streak_24h"]) >= 3.0
+
+    def test_max_streak_not_reset_by_later_non_spike(self, full_series):
+        """After the run ends, max still remembers the historical best within the window."""
+        row = full_series[full_series["bucket"] == 15].iloc[0]
+        # The 3-bucket run (exc at 6,7,8) is within the last 24 windows of bucket 15.
+        assert float(row["max_spike_streak_24h"]) >= 3.0
+
+    def test_streak_features_are_nonnegative(self, full_series):
+        """All streak features must be ≥ 0 everywhere."""
+        for col in ("current_spike_streak", "max_spike_streak_24h"):
+            assert (full_series[col] >= 0).all(), f"{col} has negative values"
+
+    def test_max_streak_ge_current_streak(self, full_series):
+        """max_spike_streak_24h ≥ current_spike_streak at every row (by definition)."""
+        assert (full_series["max_spike_streak_24h"] >= full_series["current_spike_streak"]).all()
+
+
+# ── K-of-N label tests ────────────────────────────────────────────────────────
+
+class TestAddLabelMinFutureWindows:
+    """Step 4: min_future_windows parameter on _add_label()."""
+
+    _P95 = 0.5
+    _P99 = 0.6
+
+    @pytest.fixture(scope="class")
+    def single_spike_labeled_k1(self, label_group):
+        """label_group (1 spike at b6), K=1 — should match default behaviour."""
+        full = _engineer_machine(label_group, 1, threshold=self._P95)
+        return _add_label(full, threshold_p95=self._P95, threshold_p99=self._P99,
+                          horizon=12, min_future_windows=1)
+
+    @pytest.fixture(scope="class")
+    def single_spike_labeled_k2(self, label_group):
+        """label_group (1 spike at b6), K=2."""
+        full = _engineer_machine(label_group, 1, threshold=self._P95)
+        return _add_label(full, threshold_p95=self._P95, threshold_p99=self._P99,
+                          horizon=12, min_future_windows=2)
+
+    @pytest.fixture(scope="class")
+    def two_spike_labeled_k2(self, two_spike_group):
+        """two_spike_group (spikes at b6 and b8), K=2."""
+        full = _engineer_machine(two_spike_group, 1, threshold=self._P95)
+        return _add_label(full, threshold_p95=self._P95, threshold_p99=self._P99,
+                          horizon=12, min_future_windows=2)
+
+    @pytest.fixture(scope="class")
+    def two_spike_labeled_k3(self, two_spike_group):
+        """two_spike_group (spikes at b6 and b8), K=3."""
+        full = _engineer_machine(two_spike_group, 1, threshold=self._P95)
+        return _add_label(full, threshold_p95=self._P95, threshold_p99=self._P99,
+                          horizon=12, min_future_windows=3)
+
+    def test_k1_matches_default_signature(self, label_group):
+        """min_future_windows=1 must produce identical labels to calling without the param."""
+        full     = _engineer_machine(label_group, 1, threshold=self._P95)
+        default  = _add_label(full, threshold_p95=self._P95, threshold_p99=self._P99, horizon=12)
+        explicit = _add_label(full, threshold_p95=self._P95, threshold_p99=self._P99,
+                              horizon=12, min_future_windows=1)
+        pd.testing.assert_series_equal(
+            default["severity_in_60m"].reset_index(drop=True),
+            explicit["severity_in_60m"].reset_index(drop=True),
+        )
+
+    def test_k1_fires_on_single_spike(self, single_spike_labeled_k1):
+        """K=1 (default): bucket 1 looks ahead to 2-13; bucket 6 is in range → label ≥ 1."""
+        row = single_spike_labeled_k1[single_spike_labeled_k1["bucket"] == 1].iloc[0]
+        assert float(row["severity_in_60m"]) >= 1.0
+
+    def test_k2_single_spike_no_longer_fires(self, single_spike_labeled_k2):
+        """K=2: label_group has exactly 1 spike in the 60m window → future_mild=1 < 2 → label=0."""
+        row = single_spike_labeled_k2[single_spike_labeled_k2["bucket"] == 1].iloc[0]
+        assert float(row["severity_in_60m"]) == pytest.approx(0.0)
+
+    def test_k2_two_spikes_fires(self, two_spike_labeled_k2):
+        """K=2: two_spike_group has 2 spikes (b6, b8) in look-ahead of bucket 1 → label ≥ 1."""
+        row = two_spike_labeled_k2[two_spike_labeled_k2["bucket"] == 1].iloc[0]
+        assert float(row["severity_in_60m"]) >= 1.0
+
+    def test_k3_two_spikes_no_longer_fires(self, two_spike_labeled_k3):
+        """K=3: only 2 spikes in the window → future_mild=2 < 3 → label=0."""
+        row = two_spike_labeled_k3[two_spike_labeled_k3["bucket"] == 1].iloc[0]
+        assert float(row["severity_in_60m"]) == pytest.approx(0.0)
+
+    def test_nan_count_unchanged_by_k(self, single_spike_labeled_k1, single_spike_labeled_k2):
+        """Changing K must not affect the number of NaN rows (last horizon rows)."""
+        nan_k1 = int(single_spike_labeled_k1["severity_in_60m"].isna().sum())
+        nan_k2 = int(single_spike_labeled_k2["severity_in_60m"].isna().sum())
+        assert nan_k1 == nan_k2
+
+    def test_k2_binary_mode_unaffected_by_min_future_windows(self, label_group):
+        """Binary short-horizon labels must be computed with their own min_future_windows=1.
+
+        This test calls _add_label with binary=True and min_future_windows=2 directly
+        to confirm the parameter works for binary mode too (the internal wiring in
+        engineer() passes K=1 for binary labels, but _add_label itself must support it).
+        """
+        full    = _engineer_machine(label_group, 1, threshold=self._P95)
+        result  = _add_label(full, threshold_p95=self._P95, threshold_p99=self._P99,
+                             horizon=3, output_col="spike_in_15m", binary=True,
+                             min_future_windows=2)
+        # bucket 4 looks at buckets 5,6,7 — only bucket 6 spikes → future_mild=1 < 2 → 0
+        row = result[result["bucket"] == 4].iloc[0]
+        assert float(row["spike_in_15m"]) == pytest.approx(0.0)
+
     def test_thresholds_file_has_correct_columns(self, eng_result):
         _, _, thr_p = eng_result
         thresh = pd.read_parquet(thr_p)
