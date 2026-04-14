@@ -42,7 +42,7 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY requirements-inference.txt requirements-train.txt .
+COPY requirements-inference.txt requirements-train.txt ./
 RUN pip3 install --no-cache-dir -r requirements-train.txt
 
 # Copy all source files needed for training
