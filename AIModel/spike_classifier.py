@@ -104,14 +104,19 @@ _X_COLS: list[str] = [
     "spike_in_last_6",        # any spike in t-6..t-1?
     "time_since_last_spike",  # windows since last exceedance (capped at 24)
     "cpu_spike_rate_24",      # fraction of previous 24 windows spiking (Phase 2)
-    # streak persistence features
-    "current_spike_streak",   # consecutive buckets above p95 ending at t-1
-    "max_spike_streak_24h",   # longest p95 run in previous 24 windows
     # cluster-level (cross-sectional, same bucket t — not temporal leakage)
     "cluster_cpu_p90",          # p90 CPU across all machines at this timestamp
     "machine_rank_in_cluster",  # percentile rank of this machine at this timestamp
     # time-of-day (harmonic encoding; dow dropped in Phase 5 — confound on 7-day dataset)
     "hour_sin", "hour_cos",
+    # spectral features (Phase 8) — FFT-based from 24-bucket total_cpu window
+    # No monotone constraints: relationship to spike probability is non-monotone
+    # (e.g. mid-band energy could indicate a settling workload or an escalating one)
+    "spec_dominant_freq",
+    "spec_energy_low",
+    "spec_energy_mid",
+    "spec_energy_high",
+    "spec_entropy",
 ]
 
 _TRAIN_RATIO:  float = 0.6   # must match spike_feature_engineer._TRAIN_RATIO
@@ -150,9 +155,6 @@ _BINARY_MONOTONE_MAP: dict[str, int] = {
     "spike_in_last_3":       +1,
     "spike_in_last_6":       +1,
     "cpu_spike_rate_24":     +1,
-    # streak persistence — longer consecutive run → more likely to continue
-    "current_spike_streak":  +1,
-    "max_spike_streak_24h":  +1,
     # longer time since last spike → less imminent
     "time_since_last_spike": -1,
 }

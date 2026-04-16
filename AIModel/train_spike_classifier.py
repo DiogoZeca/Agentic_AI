@@ -1009,7 +1009,6 @@ def _run_optuna_search(
 
 
 def _train_binary_horizon(
-    df:                    pd.DataFrame,
     label_col:             str,
     horizon_name:          str,
     cv_gap:                int,
@@ -1047,12 +1046,22 @@ def _train_binary_horizon(
     config_path     = model_dir / "spike_config.json"
     best_params_path = model_dir / "best_params.json"
 
-    # Filter to rows with a valid label for this horizon.
-    # Select only the columns needed for binary training — copying all columns of
-    # df_all (60+ cols × 24M rows ≈ 7-8 GB) alongside the existing df_all causes
-    # OOM.  _X_COLS + label + bucket + machine_id is all downstream code uses.
-    _needed = list(_X_COLS) + [label_col, "bucket", "machine_id"]
-    df_h = df.loc[df[label_col].notna(), _needed].copy()
+    # Read only the columns needed for this binary model directly from parquet.
+    # This avoids holding the full 60-col × 24M-row DataFrame in memory
+    # alongside the caller's other DataFrames, which previously caused a
+    # simultaneous ~22 GB peak and OOM-killed the process.
+    _SEV_OVR = "spike_severe_ovr"
+    if label_col == _SEV_OVR:
+        # OVR label is not stored in parquet — derive it from severity_in_60m.
+        _parquet_cols = list(_X_COLS) + ["severity_in_60m", "bucket", "machine_id"]
+        df_h = pd.read_parquet(features_path, columns=_parquet_cols)
+        df_h = df_h[df_h["severity_in_60m"].notna()].copy()
+        df_h[_SEV_OVR] = (df_h["severity_in_60m"] == 2).astype("float32")
+        df_h.drop(columns=["severity_in_60m"], inplace=True)
+    else:
+        _parquet_cols = list(_X_COLS) + [label_col, "bucket", "machine_id"]
+        df_h = pd.read_parquet(features_path, columns=_parquet_cols)
+        df_h = df_h[df_h[label_col].notna()].copy()
     df_h[label_col] = df_h[label_col].astype("int8")
 
     bucket_max = int(df_h["bucket"].max())
@@ -1614,21 +1623,6 @@ def run(
     except ImportError:
         pass
 
-    # Full feature DataFrame needed (includes binary label columns from Phase 4).
-    # The `df` in scope here only has severity_in_60m rows; reload to include
-    # rows where binary labels are valid but severity_in_60m may be NaN.
-    df_all = pd.read_parquet(features_path)
-
-    # Pre-slice OVR columns now, while the heap is still clean.  The parquet
-    # reader (pyarrow) needs 2-3× the final size as temporary decompression
-    # buffers.  After two XGBoost training runs the heap is fragmented enough
-    # that a second pd.read_parquet call at the end of the pipeline triggers
-    # the Linux OOM killer even when total free RAM looks sufficient.
-    # Slicing from the already-loaded df_all costs only the copy itself
-    # (~3.7 GB) with no temporary buffer overhead.
-    _ovr_needed = list(_X_COLS) + ["severity_in_60m", "bucket", "machine_id"]
-    df_ovr = df_all[_ovr_needed].copy()
-
     # Warm-start binary models from 60m best_params (tree structure is portable).
     # Strip n_estimators — binary final training uses 2000 with early stopping.
     binary_warmstart: dict | None = None
@@ -1650,7 +1644,6 @@ def run(
 
         log.info("  Starting binary horizon model: %s (%s)", h_name, h_label)
         h_result = _train_binary_horizon(
-            df                    = df_all,
             label_col             = h_label,
             horizon_name          = h_name,
             cv_gap                = h_cv_gap,
@@ -1671,44 +1664,15 @@ def run(
         )
         binary_results[h_name] = h_result
 
-    # Free df_all before OVR.  df_all is the full 60-col × 24M-row features
-    # DataFrame (~8-10 GB).  Keeping it live across the 15m loop (which itself
-    # runs SHAP on 50K rows) pushes peak RSS above VM RAM and triggers the Linux
-    # OOM killer.  We only need a slim subset for OVR, so delete and reload.
-    del df_all
-    gc.collect()
-
-    try:
-        import psutil
-        _ram = psutil.virtual_memory()
-        log.info(
-            "  Memory after 15m loop (df_all freed): %.1f%% used  (%.1f GB free)",
-            _ram.percent, _ram.available / 1e9,
-        )
-    except ImportError:
-        pass
-
     # ── OVR severe binary model ────────────────────────────────────────────────
     # Trains a dedicated binary classifier for "will a *severe* (p99) spike occur
     # in the next 60 minutes?"  Unlike the 3-class model's softmax column 2, this
     # OVR model is optimised end-to-end for the severe-vs-all distinction.
-    # Label is derived from severity_in_60m — NaN preserved so _train_binary_horizon
-    # can filter via notna() as it does for all other binary horizons.
-    #
-    # df_ovr was pre-sliced from df_all at load time (before binary training) to
-    # avoid a second parquet read on a fragmented heap — see comment above.
+    # _train_binary_horizon derives spike_severe_ovr from severity_in_60m internally,
+    # reading only the needed columns from parquet (no full-DataFrame preloading).
     log.info("  Starting OVR severe binary model (severe_ovr)")
-    sev_col = df_ovr["severity_in_60m"]
-    # Use float32 NaN to keep the column float32 (consistent with other feature
-    # columns).  np.nan is float64 and would upcast the whole column.
-    df_ovr["spike_severe_ovr"] = np.where(
-        sev_col.notna(),
-        (sev_col == 2).astype("float32"),
-        np.float32("nan"),
-    )
     ovr_model_dir = artifacts_dir / "models" / "spike_severe_ovr"
     ovr_result = _train_binary_horizon(
-        df                    = df_ovr,
         label_col             = "spike_severe_ovr",
         horizon_name          = "severe_ovr",
         cv_gap                = _CV_GAP,
@@ -1727,8 +1691,6 @@ def run(
         early_stopping_rounds = early_stopping_rounds,
         min_alarm_precision   = min_alarm_precision,
     )
-    del df_ovr
-    gc.collect()
     binary_results["severe_ovr"] = ovr_result
 
     elapsed = (time.perf_counter() - t_pipeline) / 60

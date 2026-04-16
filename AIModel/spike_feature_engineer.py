@@ -7,7 +7,7 @@ Reads cluster_agg.parquet (output of spike_preprocessor.py) and produces:
   spike_thresholds.parquet  — per-machine p95 CPU threshold, computed from
                                training windows only to prevent label leakage.
 
-Feature set (30 columns)
+Feature set (42 columns)
 ------------------------
 Raw signals at time t:
   total_cpu, peak_cpu, total_mem, peak_mem, disk_io, n_tasks
@@ -49,6 +49,13 @@ Cluster-level (cross-sectional, same timestamp t):
 Time-of-day / day-of-week (harmonic encoding from bucket index):
   hour_sin, hour_cos — sin/cos of position within 24-hour day
   dow_sin,  dow_cos  — sin/cos of position within 7-day week
+
+Spectral features (Phase 8 — FFT of the 24-bucket CPU window):
+  spec_dominant_freq — FFT bin index (1–12) with peak power (DC excluded)
+  spec_energy_low    — normalised power in bins 1–2  (60–120 min cycle periods)
+  spec_energy_mid    — normalised power in bins 3–5  (24–40 min cycle periods)
+  spec_energy_high   — normalised power in bins 6–12 (10–20 min cycle periods)
+  spec_entropy       — Shannon entropy of the normalised power spectrum
 
 Severity label (Phase 3)
 ------------------------
@@ -112,6 +119,21 @@ _SPIKE_QUANTILE_P99:   float = 0.99   # severe exceedance boundary (Phase 3)
 _MAX_TIME_SINCE_SPIKE: int   = 24    # cap for time_since_last_spike (24 × 5 min = 2 h)
 _BUCKETS_PER_DAY:      int   = 288   # 24 h × 12 buckets/h (5-min windows)
 
+# ── FFT spectral constants (Phase 8) ──────────────────────────────────────────
+# N=24 buckets × 5 min = 120-min window.  rfft produces 13 bins (0..12).
+# Bin k corresponds to a cycle period of  (N × 5) / k  minutes:
+#   bin 0  → DC (mean)         — excluded; redundant with cpu_ewma features
+#   bin 1  → 120-min period    }
+#   bin 2  →  60-min period    } "low" band (slow oscillations)
+#   bins 3–5 → 24–40-min       } "mid" band (workload-burst timescales)
+#   bins 6–12 → 10–20-min      } "high" band (fine-grained noise / fast bursts)
+_FFT_WINDOW: int       = 24
+_HANN_24: np.ndarray   = np.hanning(_FFT_WINDOW).astype("float64")
+_HANN_SUM: float       = float(_HANN_24.sum())
+_FFT_LOW_SLICE         = slice(1, 3)    # bins 1–2  → 60–120 min
+_FFT_MID_SLICE         = slice(3, 6)    # bins 3–5  → 24–40 min
+_FFT_HIGH_SLICE        = slice(6, None) # bins 6–12 → 10–20 min
+
 # Time-interval window sizes — grouped here so tuning one value updates all usages.
 # All sizes are in 5-min bucket units.  The horizon (12 buckets = 60 min) sets the
 # upper bound on look-ahead; all look-back windows should stay ≤ _HORIZON to avoid
@@ -154,9 +176,12 @@ _FEATURE_COLS: list[str] = [
     "spike_severe_in_last_1", # was t-1 a severe spike? (binary, shift(1) guarded)
     "spike_severe_in_last_3", # any severe spike in t-3..t-1? (binary)
     "spike_severe_in_last_6", # any severe spike in t-6..t-1? (binary)
-    # streak persistence features — consecutive-run signal not captured by rate/history
-    "current_spike_streak",    # consecutive buckets above p95 ending at t-1
-    "max_spike_streak_24h",    # longest p95 run in previous 24 windows
+    # spectral features (Phase 8) — FFT-based from 24-bucket total_cpu window
+    "spec_dominant_freq",    # FFT bin index (1–12) with peak power; DC excluded
+    "spec_energy_low",       # normalised power in bins 1–2  (60–120 min periods)
+    "spec_energy_mid",       # normalised power in bins 3–5  (24–40 min periods)
+    "spec_energy_high",      # normalised power in bins 6–12 (10–20 min periods)
+    "spec_entropy",          # Shannon entropy of normalised power spectrum
     # multi-horizon binary labels (Phase 4 — binary spike flag at shorter horizons)
     "spike_in_15m",    # binary: any p95 exceedance in next  3 windows (15 min)
     "spike_in_30m",    # binary: any p95 exceedance in next  6 windows (30 min)
@@ -248,22 +273,79 @@ def _compute_thresholds(df: pd.DataFrame, train_bucket_max: int) -> pd.DataFrame
     return thresh_df
 
 
-def _max_consecutive_run(arr: np.ndarray) -> float:
-    """Return the longest consecutive run of nonzero values in ``arr``.
 
-    Used with ``Series.rolling(...).apply(_max_consecutive_run, raw=True)``
-    to compute max_spike_streak_24h in O(n × window) time without Python
-    object overhead (raw=True passes a numpy array directly).
+def _engineer_spectral(
+    cpu_values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Compute 5 FFT-based spectral features for each position in a CPU series.
+
+    Uses a Hann-windowed real FFT over the trailing ``_FFT_WINDOW`` (24) buckets.
+    The Hann window reduces spectral leakage by 8–10× vs a rectangular window —
+    important for N=24 short sequences where leakage would blur band boundaries.
+
+    All five output arrays are float32 and match the length of ``cpu_values``.
+    The first ``_FFT_WINDOW - 1`` positions are NaN (insufficient history);
+    XGBoost routes NaN values via its default split direction, so no imputation
+    is required before training.
+
+    Flat signals (total power < 1e-10) are assigned ``dom_freq=1`` and all
+    energy/entropy values set to 0.0 — a degenerate but numerically stable
+    representation of "no periodic structure".
+
+    Parameters
+    ----------
+    cpu_values : 1-D float array of total_cpu values, ordered by bucket.
+
+    Returns
+    -------
+    (dom_freq, energy_low, energy_mid, energy_high, entropy)
+        Five float32 arrays of length len(cpu_values).
+
+        dom_freq     — dominant FFT bin index in [1, 12] (DC excluded)
+        energy_low   — fraction of total power in bins 1–2  (slow oscillations)
+        energy_mid   — fraction of total power in bins 3–5  (burst timescales)
+        energy_high  — fraction of total power in bins 6–12 (fast / noise)
+        entropy      — Shannon entropy of the full normalised power spectrum
     """
-    best = cur = 0
-    for v in arr:
-        if v:
-            cur += 1
-            if cur > best:
-                best = cur
-        else:
-            cur = 0
-    return float(best)
+    n      = len(cpu_values)
+    _nan32 = np.float32("nan")
+
+    dom_freq    = np.full(n, _nan32, dtype="float32")
+    energy_low  = np.full(n, _nan32, dtype="float32")
+    energy_mid  = np.full(n, _nan32, dtype="float32")
+    energy_high = np.full(n, _nan32, dtype="float32")
+    entropy     = np.full(n, _nan32, dtype="float32")
+
+    for i in range(_FFT_WINDOW - 1, n):
+        window     = cpu_values[i - _FFT_WINDOW + 1 : i + 1].astype("float64")
+        fft_coeffs = np.fft.rfft(window * _HANN_24)
+        # Energy-correct by dividing by Hann sum so total_energy is on the same
+        # scale as the raw signal variance (not inflated by window amplitude).
+        power      = (np.abs(fft_coeffs) ** 2) / _HANN_SUM
+        total_energy = power.sum()
+
+        if total_energy < 1e-10:
+            # Flat signal — no periodic structure
+            dom_freq[i]    = np.float32(1)
+            energy_low[i]  = energy_mid[i] = energy_high[i] = entropy[i] = np.float32(0.0)
+            continue
+
+        # Dominant frequency: argmax of power[1:] + 1 (skip DC bin 0)
+        dom_freq[i] = np.float32(1 + int(np.argmax(power[1:])))
+
+        inv_total      = 1.0 / total_energy
+        energy_low[i]  = np.float32(power[_FFT_LOW_SLICE].sum()  * inv_total)
+        energy_mid[i]  = np.float32(power[_FFT_MID_SLICE].sum()  * inv_total)
+        energy_high[i] = np.float32(power[_FFT_HIGH_SLICE].sum() * inv_total)
+
+        # Shannon entropy over the normalised spectrum (all 13 bins, DC included).
+        # Only bins with p > threshold contribute — avoids log(0) without masking
+        # valid signal below some arbitrary floor.
+        p     = power * inv_total
+        p_pos = p[p > 1e-12]
+        entropy[i] = np.float32(-np.sum(p_pos * np.log(p_pos)))
+
+    return dom_freq, energy_low, energy_mid, energy_high, entropy
 
 
 def _engineer_machine(
@@ -441,29 +523,13 @@ def _engineer_machine(
         .astype("float32")
     )
 
-    # ── Streak persistence features ──────────────────────────────────────────
-    # Both `exc` (p95) and `exc_sev` (p99) are already shifted by 1, so
-    # exc[t] = spike_now[t-1].  A run of 1s in exc ending at position t
-    # means t-1, t-2, ... were consecutively above threshold — exactly the
-    # streak count we want without touching the leakage firewall.
-    #
-    # Pattern: group consecutive identical values, cumcount within each group.
-    # where(exc > 0, ...) zeroes out positions that are NOT in a spike run.
-    _streak_id  = (exc != exc.shift(1)).cumsum()
-    _run_cumlen = exc.groupby(_streak_id).cumcount() + 1
-    g["current_spike_streak"] = (
-        _run_cumlen.where(exc > 0, 0.0).astype("float32")
-    )
-
-    # max_spike_streak_24h: longest p95 consecutive run in the last 24 windows.
-    # rolling().apply(raw=True) passes a numpy array to _max_consecutive_run,
-    # which avoids pandas Series overhead.  Window = _MAX_TIME_SINCE_SPIKE (24)
-    # keeps this feature on the same time scale as time_since_last_spike.
-    g["max_spike_streak_24h"] = (
-        exc.rolling(_MAX_TIME_SINCE_SPIKE, min_periods=1)
-           .apply(_max_consecutive_run, raw=True)
-           .astype("float32")
-    )
+    # ── Spectral features (Phase 8) ───────────────────────────────────────────
+    dom, e_low, e_mid, e_high, ent = _engineer_spectral(cpu.values)
+    g["spec_dominant_freq"] = dom
+    g["spec_energy_low"]    = e_low
+    g["spec_energy_mid"]    = e_mid
+    g["spec_energy_high"]   = e_high
+    g["spec_entropy"]       = ent
 
     return g.reset_index()   # "bucket" becomes a column again
 
@@ -773,6 +839,9 @@ def engineer(
         # spike history (all already cast inline, including cpu_spike_rate_24)
         "spike_now", "spike_in_last_1", "spike_in_last_3", "spike_in_last_6",
         "time_since_last_spike",
+        # spectral features (Phase 8 — already float32 from _engineer_spectral)
+        "spec_dominant_freq", "spec_energy_low", "spec_energy_mid",
+        "spec_energy_high", "spec_entropy",
     ]
     for col in float32_cols:
         final[col] = final[col].astype("float32")

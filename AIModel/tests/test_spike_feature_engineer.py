@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from spike_feature_engineer import (
     _BUCKETS_PER_DAY,
     _FEATURE_COLS,
+    _FFT_WINDOW,
     _HORIZON,
     _LAGS,
     _MAX_TIME_SINCE_SPIKE,
@@ -44,6 +45,7 @@ from spike_feature_engineer import (
     _add_label,
     _compute_thresholds,
     _engineer_machine,
+    _engineer_spectral,
     engineer,
 )
 from spike_classifier import _X_COLS
@@ -723,6 +725,9 @@ class TestOutputSchema:
             "time_since_last_spike", "cpu_spike_rate_24",
             "cluster_cpu_p90", "machine_rank_in_cluster",
             "hour_sin", "hour_cos",
+            # spectral features (Phase 8)
+            "spec_dominant_freq", "spec_energy_low", "spec_energy_mid",
+            "spec_energy_high", "spec_entropy",
         ]
         for col in float32_cols:
             assert df[col].dtype == np.float32, f"{col} should be float32"
@@ -754,40 +759,8 @@ class TestOutputSchema:
         nan_15m = int(df["spike_in_15m"].isna().sum())
         assert nan_15m < nan_60m
 
-    def test_streak_features_present_in_output(self, eng_result):
-        """Streak features must be present in the full engineer() output."""
-        df, _, _ = eng_result
-        for col in ("current_spike_streak", "max_spike_streak_24h"):
-            assert col in df.columns, f"{col} missing from engineer() output"
 
-    def test_streak_features_are_float32(self, eng_result):
-        """Streak features must be float32."""
-        df, _, _ = eng_result
-        for col in ("current_spike_streak", "max_spike_streak_24h"):
-            assert df[col].dtype == np.float32, f"{col} should be float32"
-
-
-# ── Fixtures for streak and K-of-N tests ─────────────────────────────────────
-
-@pytest.fixture(scope="module")
-def streak_group() -> pd.DataFrame:
-    """Machine 1 — 20 contiguous buckets, consecutive spikes at buckets 5, 6, 7.
-
-    With threshold=0.5 (p95):
-      spike_now[5]=1, spike_now[6]=1, spike_now[7]=1
-      exc (shifted by 1): exc[6]=1, exc[7]=1, exc[8]=1, exc[9]=0
-
-    Expected current_spike_streak values (at key buckets):
-      bucket 5 → 0  (exc[5] = spike_now[4] = 0, no prior spike)
-      bucket 8 → 3  (exc[6,7,8] all 1: run of 3 ending at bucket 8)
-      bucket 9 → 0  (exc[9] = spike_now[8] = 0, run broken)
-    """
-    rows = [
-        _make_agg_row(1, b, total_cpu=(0.9 if 5 <= b <= 7 else 0.1))
-        for b in range(1, 21)
-    ]
-    return _make_agg_df(rows)
-
+# ── Fixtures for K-of-N tests ─────────────────────────────────────────────────
 
 @pytest.fixture(scope="module")
 def two_spike_group() -> pd.DataFrame:
@@ -804,64 +777,6 @@ def two_spike_group() -> pd.DataFrame:
         for b in range(1, 26)
     ]
     return _make_agg_df(rows)
-
-
-# ── Streak feature tests ──────────────────────────────────────────────────────
-
-class TestStreakFeatures:
-    """Steps 1 and 3: current_spike_streak, max_spike_streak_24h."""
-
-    _THRESHOLD_P95 = 0.5   # 0.1 < threshold < 0.9 — below/above CPU values in fixture
-    _THRESHOLD_P99 = 0.95  # above 0.9, so severe streak should stay 0 throughout
-
-    @pytest.fixture(scope="class")
-    def full_series(self, streak_group):
-        return _engineer_machine(streak_group, 1,
-                                 threshold=self._THRESHOLD_P95,
-                                 threshold_p99=self._THRESHOLD_P99)
-
-    def test_streak_zero_before_first_spike(self, full_series):
-        """At bucket 5 (first spike bucket), no prior spike → current_spike_streak = 0.
-
-        exc[5] = spike_now[4] = (0.1 > 0.5) = 0.  No consecutive run ending here.
-        """
-        row = full_series[full_series["bucket"] == 5].iloc[0]
-        assert float(row["current_spike_streak"]) == pytest.approx(0.0)
-
-    def test_streak_one_after_first_spike(self, full_series):
-        """At bucket 6, exc[6] = spike_now[5] = 1 → streak of 1 (run just started)."""
-        row = full_series[full_series["bucket"] == 6].iloc[0]
-        assert float(row["current_spike_streak"]) == pytest.approx(1.0)
-
-    def test_streak_increments_through_run(self, full_series):
-        """At bucket 8, exc[6,7,8] = [1,1,1] → consecutive run of 3 ending here."""
-        row = full_series[full_series["bucket"] == 8].iloc[0]
-        assert float(row["current_spike_streak"]) == pytest.approx(3.0)
-
-    def test_streak_resets_after_gap(self, full_series):
-        """At bucket 9, exc[9] = spike_now[8] = 0 → run broken, streak resets to 0."""
-        row = full_series[full_series["bucket"] == 9].iloc[0]
-        assert float(row["current_spike_streak"]) == pytest.approx(0.0)
-
-    def test_max_streak_captures_longest_run(self, full_series):
-        """At bucket 9 (just after the run ends), max_spike_streak_24h must be ≥ 3."""
-        row = full_series[full_series["bucket"] == 9].iloc[0]
-        assert float(row["max_spike_streak_24h"]) >= 3.0
-
-    def test_max_streak_not_reset_by_later_non_spike(self, full_series):
-        """After the run ends, max still remembers the historical best within the window."""
-        row = full_series[full_series["bucket"] == 15].iloc[0]
-        # The 3-bucket run (exc at 6,7,8) is within the last 24 windows of bucket 15.
-        assert float(row["max_spike_streak_24h"]) >= 3.0
-
-    def test_streak_features_are_nonnegative(self, full_series):
-        """All streak features must be ≥ 0 everywhere."""
-        for col in ("current_spike_streak", "max_spike_streak_24h"):
-            assert (full_series[col] >= 0).all(), f"{col} has negative values"
-
-    def test_max_streak_ge_current_streak(self, full_series):
-        """max_spike_streak_24h ≥ current_spike_streak at every row (by definition)."""
-        assert (full_series["max_spike_streak_24h"] >= full_series["current_spike_streak"]).all()
 
 
 # ── K-of-N label tests ────────────────────────────────────────────────────────
@@ -1217,3 +1132,173 @@ class TestClusterP90TrainingOnly:
     def test_cluster_p90_is_float32(self, mixed_cluster_df):
         result = _add_cluster_features(mixed_cluster_df, train_bucket_max=5)
         assert result["cluster_cpu_p90"].dtype == np.float32
+
+
+# ── Spectral features (Phase 8) ───────────────────────────────────────────────
+
+class TestSpectralFeatures:
+    """Tests for _engineer_spectral() and the 5 spec_* features in engineer().
+
+    The FFT window requires _FFT_WINDOW (24) history values, so the first
+    _FFT_WINDOW - 1 rows of each machine will be NaN — XGBoost handles NaN
+    natively via default split direction.
+
+    A sinusoidal signal at a known frequency provides exact ground-truth for
+    dom_freq and band energy.  A flat (zero) signal tests the degenerate path.
+    """
+
+    _SPEC_COLS = (
+        "spec_dominant_freq", "spec_energy_low",
+        "spec_energy_mid", "spec_energy_high", "spec_entropy",
+    )
+
+    # ── _engineer_spectral unit tests ─────────────────────────────────────────
+
+    def test_output_length_matches_input(self):
+        """All five output arrays must have the same length as the input."""
+        cpu = np.random.rand(50).astype("float32")
+        results = _engineer_spectral(cpu)
+        for arr in results:
+            assert len(arr) == 50
+
+    def test_output_dtype_is_float32(self):
+        """All five output arrays must be float32."""
+        cpu = np.random.rand(50).astype("float32")
+        for arr in _engineer_spectral(cpu):
+            assert arr.dtype == np.float32
+
+    def test_first_window_minus_one_rows_are_nan(self):
+        """First _FFT_WINDOW - 1 rows must be NaN (insufficient history)."""
+        n   = 50
+        cpu = np.ones(n, dtype="float32")
+        for arr in _engineer_spectral(cpu):
+            assert np.all(np.isnan(arr[:_FFT_WINDOW - 1])), (
+                f"Rows 0..{_FFT_WINDOW - 2} must be NaN, got {arr[:_FFT_WINDOW - 1]}"
+            )
+
+    def test_rows_from_window_onward_are_not_nan(self):
+        """Rows from index _FFT_WINDOW - 1 onward must be finite (not NaN)."""
+        cpu = np.ones(50, dtype="float32") * 0.5
+        for arr in _engineer_spectral(cpu):
+            finite = arr[_FFT_WINDOW - 1:]
+            assert np.all(np.isfinite(finite)), (
+                f"Rows >= {_FFT_WINDOW - 1} must be finite, got {finite}"
+            )
+
+    def test_zero_signal_sets_energy_to_zero(self):
+        """An all-zero signal triggers the degenerate path (total_energy < 1e-10).
+        All energy bands must be 0 and not NaN.
+
+        Note: a *nonzero* constant is NOT equivalent — multiplying by the Hann
+        window creates a bell-shaped waveform with real AC power even if the
+        original signal is uniform.  Only a truly zero signal has zero energy.
+        """
+        cpu              = np.zeros(50, dtype="float32")
+        _, e_low, e_mid, e_high, entropy = _engineer_spectral(cpu)
+        for name, arr in (("e_low", e_low), ("e_mid", e_mid), ("e_high", e_high)):
+            np.testing.assert_allclose(
+                arr[_FFT_WINDOW - 1:], 0.0, atol=1e-5,
+                err_msg=f"{name} must be 0 for zero signal",
+            )
+
+    def test_zero_signal_entropy_is_zero(self):
+        """An all-zero signal has no spectral structure → entropy = 0 (degenerate path)."""
+        cpu = np.zeros(50, dtype="float32")
+        *_, entropy = _engineer_spectral(cpu)
+        np.testing.assert_allclose(entropy[_FFT_WINDOW - 1:], 0.0, atol=1e-5)
+
+    def test_zero_signal_dom_freq_is_one(self):
+        """Zero signal degenerate path assigns dom_freq = 1 (index of first AC bin)."""
+        cpu      = np.zeros(50, dtype="float32")
+        dom_freq = _engineer_spectral(cpu)[0]
+        np.testing.assert_array_equal(dom_freq[_FFT_WINDOW - 1:], 1.0)
+
+    def test_energy_bands_sum_leq_one(self):
+        """Low + mid + high energy must be ≤ 1 (DC bin excluded from numerator
+        but included in denominator), for any non-flat signal."""
+        rng = np.random.default_rng(42)
+        cpu = rng.random(100).astype("float32")
+        _, e_low, e_mid, e_high, _ = _engineer_spectral(cpu)
+        valid = _FFT_WINDOW - 1
+        total_band = (
+            e_low[valid:].astype("float64")
+            + e_mid[valid:].astype("float64")
+            + e_high[valid:].astype("float64")
+        )
+        assert np.all(total_band <= 1.0 + 1e-5), (
+            f"Band sum exceeded 1.0: max={total_band.max():.6f}"
+        )
+
+    def test_dom_freq_in_valid_range(self):
+        """dom_freq must be an integer in [1, 12] (bins 1..N//2)."""
+        rng = np.random.default_rng(0)
+        cpu = rng.random(80).astype("float32")
+        dom_freq = _engineer_spectral(cpu)[0]
+        valid = dom_freq[_FFT_WINDOW - 1:]
+        assert np.all(valid >= 1), f"dom_freq below 1: {valid[valid < 1]}"
+        assert np.all(valid <= _FFT_WINDOW // 2), (
+            f"dom_freq above {_FFT_WINDOW // 2}: {valid[valid > _FFT_WINDOW // 2]}"
+        )
+
+    def test_energy_nonnegative(self):
+        """All energy values must be >= 0."""
+        rng = np.random.default_rng(7)
+        cpu = rng.random(80).astype("float32")
+        _, e_low, e_mid, e_high, _ = _engineer_spectral(cpu)
+        for name, arr in (("e_low", e_low), ("e_mid", e_mid), ("e_high", e_high)):
+            assert np.all(arr[_FFT_WINDOW - 1:] >= -1e-6), f"{name} has negative values"
+
+    def test_entropy_nonnegative(self):
+        """Shannon entropy is >= 0 by definition."""
+        rng = np.random.default_rng(3)
+        cpu = rng.random(60).astype("float32")
+        *_, entropy = _engineer_spectral(cpu)
+        assert np.all(entropy[_FFT_WINDOW - 1:] >= -1e-5)
+
+    def test_single_short_input_all_nan(self):
+        """Input shorter than _FFT_WINDOW must be all NaN (no valid window)."""
+        cpu = np.ones(_FFT_WINDOW - 1, dtype="float32") * 0.5
+        for arr in _engineer_spectral(cpu):
+            assert np.all(np.isnan(arr))
+
+    def test_exactly_window_length_produces_one_valid_row(self):
+        """Input of length exactly _FFT_WINDOW gives one non-NaN output at the last index."""
+        cpu = np.ones(_FFT_WINDOW, dtype="float32") * 0.4
+        for arr in _engineer_spectral(cpu):
+            assert np.isnan(arr[:-1]).all()
+            assert np.isfinite(arr[-1])
+
+    # ── Integration test: spectral features via engineer() ────────────────────
+
+    def test_spectral_cols_present_in_engineer_output(self, eng_result):
+        """All 5 spec_* columns must appear in the engineer() output DataFrame."""
+        df, _, _ = eng_result
+        for col in self._SPEC_COLS:
+            assert col in df.columns, f"Missing spectral column: {col}"
+
+    def test_spectral_cols_are_float32_in_engineer_output(self, eng_result):
+        df, _, _ = eng_result
+        for col in self._SPEC_COLS:
+            assert df[col].dtype == np.float32, f"{col} should be float32"
+
+    def test_spectral_cols_have_some_valid_values(self, eng_result):
+        """With 25 buckets per machine, at least _FFT_WINDOW rows per machine
+        have valid (non-NaN) spectral values."""
+        df, _, _ = eng_result
+        for col in self._SPEC_COLS:
+            n_valid = int(df[col].notna().sum())
+            assert n_valid > 0, f"{col}: no valid (non-NaN) rows found"
+
+    def test_spectral_nan_only_in_first_window_rows(self, eng_result):
+        """NaN rows in spectral columns must only occur among the first
+        _FFT_WINDOW - 1 rows per machine (insufficient history)."""
+        df, _, _ = eng_result
+        for mid, mdf in df.groupby("machine_id"):
+            mdf = mdf.sort_values("bucket").reset_index(drop=True)
+            for col in self._SPEC_COLS:
+                nan_idx = mdf.index[mdf[col].isna()].tolist()
+                for idx in nan_idx:
+                    assert idx < _FFT_WINDOW - 1, (
+                        f"machine {mid}: unexpected NaN at row {idx} in {col} "
+                        f"(only rows 0..{_FFT_WINDOW - 2} should be NaN)"
+                    )
