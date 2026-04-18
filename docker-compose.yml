@@ -52,6 +52,8 @@ services:
       - DATA_PATH=data/cluster_cpu_data.csv
       - ARTIFACTS_DIR=data/full_run
       - OPTUNA_TRIALS=150
+      - MIN_FUTURE_WINDOWS=2
+      - N_ESTIMATORS=4000
     volumes:
       # Input CSV (read) + artifact output (write) both under the same mount.
       # Trained models are accessible from the host at ./AIModel/data/full_run/.

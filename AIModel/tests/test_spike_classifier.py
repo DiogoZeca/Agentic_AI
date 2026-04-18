@@ -26,6 +26,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import xgboost as xgb
+
 from spike_classifier import (
     _MIN_POSITIVE,
     _TRAIN_RATIO,
@@ -35,6 +37,7 @@ from spike_classifier import (
     _BINARY_MONOTONE_STR,
     SpikeClassifier,
     BinarySpikeClassifier,
+    focal_binary_obj,
     train,
 )
 
@@ -479,3 +482,101 @@ class TestBinaryMonotoneConstraints:
                 f"_BINARY_MONOTONE[{i}]={v} for _X_COLS[{i}]={_X_COLS[i]}: "
                 "must be -1, 0, or +1"
             )
+
+
+class TestFocalBinaryObj:
+    """Unit tests for the focal_binary_obj custom XGBoost objective."""
+
+    def _make_dtrain(self, y: np.ndarray) -> xgb.DMatrix:
+        X = np.zeros((len(y), 1), dtype="float32")
+        return xgb.DMatrix(X, label=y.astype("float32"))
+
+    def test_hessian_always_positive(self):
+        """Hessian approximation must be > 0 for all inputs (XGBoost requirement)."""
+        rng   = np.random.default_rng(0)
+        preds = rng.standard_normal(100).astype("float64")
+        y     = (rng.random(100) > 0.5).astype("float32")
+        _, hess = focal_binary_obj(preds, self._make_dtrain(y))
+        assert np.all(hess > 0), f"Non-positive hessian values found: {hess[hess <= 0]}"
+
+    def test_gamma_zero_recovers_cross_entropy_gradient(self):
+        """With gamma=0, focal loss reduces to weighted cross-entropy.
+        The gradient for y=1 is alpha*(p-1) and for y=0 is (1-alpha)*p."""
+        rng     = np.random.default_rng(1)
+        logits  = rng.standard_normal(200).astype("float64")
+        y       = (rng.random(200) > 0.5).astype("float32")
+        alpha   = 0.25
+        eps     = 1e-7
+        p       = np.clip(1.0 / (1.0 + np.exp(-logits)), eps, 1.0 - eps)
+        grad_fl, _ = focal_binary_obj(logits, self._make_dtrain(y), alpha=alpha, gamma=0.0)
+        grad_ce = np.where(y == 1, alpha * (p - 1.0), (1.0 - alpha) * p)
+        np.testing.assert_allclose(grad_fl, grad_ce, atol=1e-5)
+
+    def test_positive_class_gradient_sign(self):
+        """For y=1 with logit < 0 (model uncertain/wrong), gradient must be negative
+        (loss decreasing in the direction of increasing logit)."""
+        y      = np.ones(50, dtype="float32")
+        logits = np.full(50, -2.0)
+        grad, _ = focal_binary_obj(logits, self._make_dtrain(y))
+        assert np.all(grad < 0), "Gradient for y=1, logit<0 should be negative"
+
+    def test_negative_class_gradient_sign(self):
+        """For y=0 with logit > 0 (model predicts positive), gradient must be positive."""
+        y      = np.zeros(50, dtype="float32")
+        logits = np.full(50, 2.0)
+        grad, _ = focal_binary_obj(logits, self._make_dtrain(y))
+        assert np.all(grad > 0), "Gradient for y=0, logit>0 should be positive"
+
+    def test_output_shapes_match_input(self):
+        """grad and hess must have the same shape as preds."""
+        preds = np.zeros(30, dtype="float64")
+        y     = np.zeros(30, dtype="float32")
+        grad, hess = focal_binary_obj(preds, self._make_dtrain(y))
+        assert grad.shape == (30,) and hess.shape == (30,)
+
+
+class TestBinarySpikeClassifierFocalLoss:
+    """Integration tests for BinarySpikeClassifier with use_focal_loss=True."""
+
+    def test_focal_fit_predict_proba_shape(self, binary_clf_data):
+        X, y = binary_clf_data
+        clf  = BinarySpikeClassifier(use_focal_loss=True, n_estimators=50)
+        clf.fit(X, y)
+        proba = clf.predict_proba(X)
+        assert proba.shape == (len(X), 2)
+
+    def test_focal_probabilities_sum_to_one(self, binary_clf_data):
+        X, y = binary_clf_data
+        clf  = BinarySpikeClassifier(use_focal_loss=True, n_estimators=50)
+        clf.fit(X, y)
+        row_sums = clf.predict_proba(X).sum(axis=1)
+        np.testing.assert_allclose(row_sums, 1.0, atol=1e-6)
+
+    def test_focal_probabilities_in_zero_one(self, binary_clf_data):
+        X, y = binary_clf_data
+        clf  = BinarySpikeClassifier(use_focal_loss=True, n_estimators=50)
+        clf.fit(X, y)
+        proba = clf.predict_proba(X)
+        assert np.all(proba >= 0.0) and np.all(proba <= 1.0)
+
+    def test_focal_save_load_restores_predictions(self, binary_clf_data, tmp_path):
+        X, y = binary_clf_data
+        clf  = BinarySpikeClassifier(use_focal_loss=True, n_estimators=50)
+        clf.fit(X, y)
+        path = tmp_path / "focal_model.json"
+        clf.save(path)
+        loaded = BinarySpikeClassifier.load(path)
+        np.testing.assert_allclose(
+            clf.predict_proba(X),
+            loaded.predict_proba(X),
+            rtol=1e-5,
+        )
+
+    def test_focal_meta_records_use_focal_loss(self, binary_clf_data, tmp_path):
+        X, y = binary_clf_data
+        clf  = BinarySpikeClassifier(use_focal_loss=True, n_estimators=50)
+        clf.fit(X, y)
+        path = tmp_path / "focal_model.json"
+        clf.save(path)
+        meta = json.loads(path.with_suffix(".meta.json").read_text())
+        assert meta.get("use_focal_loss") is True

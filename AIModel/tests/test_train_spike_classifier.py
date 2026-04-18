@@ -420,16 +420,15 @@ class TestRunPipeline:
         assert result["train_bucket_max"] < result["val_bucket_max"]
 
     def test_binary_horizon_model_dirs_written(self, pipeline_result):
-        """spike_15m and spike_severe_ovr model dirs must exist; 30m/45m must not."""
+        """spike_15m / 30m / 45m and spike_severe_ovr model dirs must all exist."""
         _, arts = pipeline_result
-        assert (arts / "models" / "spike_15m" / "spike_model.json").exists()
-        assert (arts / "models" / "spike_severe_ovr" / "spike_model.json").exists(), (
-            "OVR severe model (Phase 5) must be trained alongside 15m"
-        )
-        for removed in ("spike_30m", "spike_45m"):
-            assert not (arts / "models" / removed).exists(), (
-                f"{removed} should not be trained"
+        for horizon in ("spike_15m", "spike_30m", "spike_45m"):
+            assert (arts / "models" / horizon / "spike_model.json").exists(), (
+                f"{horizon} model must be trained"
             )
+        assert (arts / "models" / "spike_severe_ovr" / "spike_model.json").exists(), (
+            "OVR severe model (Phase 5) must be trained alongside binary horizons"
+        )
 
 
 # ── Walk-forward enabled in run() ─────────────────────────────────────────────

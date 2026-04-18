@@ -1,0 +1,514 @@
+{
+  "run_at": "2026-04-18T18:18:53.574099+00:00",
+  "source_pr_auc": 0.547,
+  "zabbix_agg_path": "data/zabbix_eval/zabbix_agg.parquet",
+  "artifacts_dir": "data/full_run",
+  "eda": [
+    {
+      "machine_id": 0,
+      "n_buckets": 24842,
+      "mean_cpu": 23.0874,
+      "std_cpu": 25.1175,
+      "idle_fraction": 0.5308,
+      "burstiness_B": 0.0421,
+      "pmr": 2.51,
+      "cv": 1.0879,
+      "biz_ratio": 0.99,
+      "acf_lag1": 0.9867,
+      "acf_lag12": 0.9551,
+      "spike_rate": 0.05,
+      "mean_ep_len": 1.39,
+      "p95_cpu": 53.1581
+    },
+    {
+      "machine_id": 1,
+      "n_buckets": 24843,
+      "mean_cpu": 0.0146,
+      "std_cpu": 0.0452,
+      "idle_fraction": 0.9458,
+      "burstiness_B": 0.5115,
+      "pmr": 11.29,
+      "cv": 3.0941,
+      "biz_ratio": 1.05,
+      "acf_lag1": 0.5211,
+      "acf_lag12": 0.5154,
+      "spike_rate": 0.05,
+      "mean_ep_len": 9.28,
+      "p95_cpu": 0.0397
+    },
+    {
+      "machine_id": 2,
+      "n_buckets": 24838,
+      "mean_cpu": 0.3457,
+      "std_cpu": 0.0692,
+      "idle_fraction": 0.0,
+      "burstiness_B": -0.6664,
+      "pmr": 1.79,
+      "cv": 0.2002,
+      "biz_ratio": 1.01,
+      "acf_lag1": 0.76,
+      "acf_lag12": 0.6716,
+      "spike_rate": 0.05,
+      "mean_ep_len": 4.93,
+      "p95_cpu": 0.4968
+    },
+    {
+      "machine_id": 3,
+      "n_buckets": 24834,
+      "mean_cpu": 0.2944,
+      "std_cpu": 0.3056,
+      "idle_fraction": 0.0,
+      "burstiness_B": 0.0186,
+      "pmr": 3.26,
+      "cv": 1.0379,
+      "biz_ratio": 1.16,
+      "acf_lag1": 0.7753,
+      "acf_lag12": 0.0688,
+      "spike_rate": 0.0228,
+      "mean_ep_len": 1.26,
+      "p95_cpu": 0.48
+    },
+    {
+      "machine_id": 4,
+      "n_buckets": 24828,
+      "mean_cpu": 0.2987,
+      "std_cpu": 0.1404,
+      "idle_fraction": 0.0,
+      "burstiness_B": -0.3605,
+      "pmr": 2.07,
+      "cv": 0.47,
+      "biz_ratio": 0.98,
+      "acf_lag1": 0.5938,
+      "acf_lag12": 0.772,
+      "spike_rate": 0.05,
+      "mean_ep_len": 1.08,
+      "p95_cpu": 0.5308
+    },
+    {
+      "machine_id": 5,
+      "n_buckets": 24828,
+      "mean_cpu": 0.6513,
+      "std_cpu": 0.1022,
+      "idle_fraction": 0.0,
+      "burstiness_B": -0.7288,
+      "pmr": 1.4,
+      "cv": 0.1569,
+      "biz_ratio": 1.01,
+      "acf_lag1": 0.5607,
+      "acf_lag12": 0.517,
+      "spike_rate": 0.05,
+      "mean_ep_len": 1.22,
+      "p95_cpu": 0.7802
+    },
+    {
+      "machine_id": 6,
+      "n_buckets": 24856,
+      "mean_cpu": 0.2461,
+      "std_cpu": 0.0836,
+      "idle_fraction": 0.0,
+      "burstiness_B": -0.4929,
+      "pmr": 2.01,
+      "cv": 0.3397,
+      "biz_ratio": 1.0,
+      "acf_lag1": 0.8561,
+      "acf_lag12": 0.8822,
+      "spike_rate": 0.05,
+      "mean_ep_len": 3.78,
+      "p95_cpu": 0.4298
+    },
+    {
+      "machine_id": 7,
+      "n_buckets": 24838,
+      "mean_cpu": 0.2614,
+      "std_cpu": 0.1322,
+      "idle_fraction": 0.0,
+      "burstiness_B": -0.3283,
+      "pmr": 2.38,
+      "cv": 0.5057,
+      "biz_ratio": 0.99,
+      "acf_lag1": 0.9649,
+      "acf_lag12": 0.9516,
+      "spike_rate": 0.05,
+      "mean_ep_len": 7.76,
+      "p95_cpu": 0.5412
+    },
+    {
+      "machine_id": 8,
+      "n_buckets": 24847,
+      "mean_cpu": 0.1588,
+      "std_cpu": 1.344,
+      "idle_fraction": 0.5866,
+      "burstiness_B": 0.7886,
+      "pmr": 13.55,
+      "cv": 8.4623,
+      "biz_ratio": 0.97,
+      "acf_lag1": 0.9626,
+      "acf_lag12": 0.7061,
+      "spike_rate": 0.05,
+      "mean_ep_len": 2.96,
+      "p95_cpu": 0.0806
+    },
+    {
+      "machine_id": 9,
+      "n_buckets": 24789,
+      "mean_cpu": 0.2384,
+      "std_cpu": 0.5106,
+      "idle_fraction": 0.7491,
+      "burstiness_B": 0.3634,
+      "pmr": 5.22,
+      "cv": 2.1419,
+      "biz_ratio": 1.1,
+      "acf_lag1": 0.7455,
+      "acf_lag12": 0.715,
+      "spike_rate": 0.05,
+      "mean_ep_len": 2.04,
+      "p95_cpu": 1.2288
+    },
+    {
+      "machine_id": 10,
+      "n_buckets": 24855,
+      "mean_cpu": 12.0199,
+      "std_cpu": 20.9824,
+      "idle_fraction": 0.7411,
+      "burstiness_B": 0.2716,
+      "pmr": 4.32,
+      "cv": 1.7456,
+      "biz_ratio": 1.11,
+      "acf_lag1": 0.9975,
+      "acf_lag12": 0.9811,
+      "spike_rate": 0.05,
+      "mean_ep_len": 1.38,
+      "p95_cpu": 50.7553
+    }
+  ],
+  "eda_warnings": [
+    "5/11 nodes have idle_fraction > 40% (Google 2011: ~15\u201320%). Per-machine p95 features may cluster at 0 during idle.",
+    "All nodes have similar spike_rate (std=0.008). cluster_cpu_p90 and machine_rank_in_cluster may carry less signal than across Google's 12,555 diverse machines."
+  ],
+  "psi": [
+    {
+      "feature": "task_dominance",
+      "psi": 8.2831,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "band_width",
+      "psi": 4.364,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "cluster_cpu_p90",
+      "psi": 3.1534,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "n_tasks",
+      "psi": 2.6904,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "total_mem",
+      "psi": 2.568,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "disk_io",
+      "psi": 1.6656,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "peak_mem",
+      "psi": 1.3562,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "cpu_ewma_24",
+      "psi": 1.1284,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "cpu_ewma_6",
+      "psi": 1.0331,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "total_cpu",
+      "psi": 1.021,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "cpu_lag_1",
+      "psi": 1.0188,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "cpu_lag_12",
+      "psi": 0.9875,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "peak_cpu",
+      "psi": 0.9318,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "cpu_lag_24",
+      "psi": 0.901,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "peak_cpu_vs_p99",
+      "psi": 0.8828,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "cpu_rolling_std_6",
+      "psi": 0.8553,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "cpu_per_task",
+      "psi": 0.8503,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "cpu_vs_p99",
+      "psi": 0.765,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "cpu_vs_p95",
+      "psi": 0.6503,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "peak_cpu_vs_p95",
+      "psi": 0.4978,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "cpu_delta_2",
+      "psi": 0.4883,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "cpu_delta_1",
+      "psi": 0.4598,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "cpu_vs_p95_delta",
+      "psi": 0.3072,
+      "interpretation": "MAJOR"
+    },
+    {
+      "feature": "spike_severe_in_last_1",
+      "psi": 0.1385,
+      "interpretation": "moderate"
+    },
+    {
+      "feature": "spike_severe_now",
+      "psi": 0.1376,
+      "interpretation": "moderate"
+    },
+    {
+      "feature": "time_since_last_spike",
+      "psi": 0.1334,
+      "interpretation": "moderate"
+    },
+    {
+      "feature": "spike_in_last_3",
+      "psi": 0.1233,
+      "interpretation": "moderate"
+    },
+    {
+      "feature": "spike_in_last_1",
+      "psi": 0.12,
+      "interpretation": "moderate"
+    },
+    {
+      "feature": "spike_now",
+      "psi": 0.1197,
+      "interpretation": "moderate"
+    },
+    {
+      "feature": "spike_in_last_6",
+      "psi": 0.1197,
+      "interpretation": "moderate"
+    },
+    {
+      "feature": "spike_severe_in_last_3",
+      "psi": 0.1158,
+      "interpretation": "moderate"
+    },
+    {
+      "feature": "spike_severe_in_last_6",
+      "psi": 0.0968,
+      "interpretation": "minor"
+    },
+    {
+      "feature": "cpu_spike_rate_24",
+      "psi": 0.0812,
+      "interpretation": "minor"
+    },
+    {
+      "feature": "machine_rank_in_cluster",
+      "psi": 0.0564,
+      "interpretation": "minor"
+    },
+    {
+      "feature": "band_position",
+      "psi": 0.0004,
+      "interpretation": "minor"
+    },
+    {
+      "feature": "hour_sin",
+      "psi": 0.0,
+      "interpretation": "minor"
+    },
+    {
+      "feature": "hour_cos",
+      "psi": 0.0,
+      "interpretation": "minor"
+    }
+  ],
+  "results_60m": {
+    "n_test": 56262,
+    "pr_auc_class_0": 0.94,
+    "roc_auc_class_0": 0.95,
+    "pr_auc_class_1": 0.7049,
+    "roc_auc_class_1": 0.8529,
+    "pr_auc_class_2": 0.8341,
+    "roc_auc_class_2": 0.9249,
+    "macro_pr_auc": 0.8264,
+    "macro_roc_auc": 0.9093,
+    "rate_class_0": 0.5079,
+    "rate_class_1": 0.2672,
+    "rate_class_2": 0.2248
+  },
+  "results_15m": {
+    "n_test": 56361,
+    "n_pos": 21436,
+    "pos_rate": 0.3803,
+    "pr_auc": 0.9571,
+    "roc_auc": 0.9664
+  },
+  "results_30m": {
+    "n_test": 56328,
+    "n_pos": 24433,
+    "pos_rate": 0.4338,
+    "pr_auc": 0.9565,
+    "roc_auc": 0.9596
+  },
+  "results_45m": {
+    "n_test": 56295,
+    "n_pos": 26251,
+    "pos_rate": 0.4663,
+    "pr_auc": 0.9569,
+    "roc_auc": 0.9549
+  },
+  "results_severe_ovr": {
+    "n_test": 56394,
+    "n_pos": 12649,
+    "pos_rate": 0.2243,
+    "pr_auc": 0.9263,
+    "roc_auc": 0.9546
+  },
+  "decision": {
+    "retention_pct": "151%",
+    "action": "**Recalibrate on Zabbix val split and deploy.** Model transfers well."
+  },
+  "recal_60m": {
+    "alarm_threshold": 0.4,
+    "alarm_precision": 0.799,
+    "alarm_recall": 0.6403,
+    "alarm_f1": 0.7109,
+    "macro_pr_auc": 0.848,
+    "macro_roc_auc": 0.9218,
+    "per_class": {
+      "class_0": {
+        "pr_auc": 0.9322,
+        "roc_auc": 0.9449,
+        "pr_auc_ci95": [
+          0.9291,
+          0.9352
+        ]
+      },
+      "class_1": {
+        "pr_auc": 0.7676,
+        "roc_auc": 0.892,
+        "pr_auc_ci95": [
+          0.7606,
+          0.7749
+        ]
+      },
+      "class_2": {
+        "pr_auc": 0.8443,
+        "roc_auc": 0.9284,
+        "pr_auc_ci95": [
+          0.8363,
+          0.8519
+        ]
+      }
+    },
+    "n_val": 56337,
+    "n_test": 56262,
+    "calibrators_path": "data/zabbix_eval/zabbix_calibrators.pkl"
+  },
+  "recal_15m": {
+    "alarm_threshold": 0.7,
+    "alarm_precision": 0.8143,
+    "alarm_recall": 0.8513,
+    "alarm_f1": 0.8324,
+    "pr_auc": 0.9571,
+    "roc_auc": 0.9664,
+    "pr_auc_ci95": [
+      0.9553,
+      0.9588
+    ],
+    "n_val": 56337,
+    "n_test": 56361
+  },
+  "recal_30m": {
+    "alarm_threshold": 0.5,
+    "alarm_precision": 0.8274,
+    "alarm_recall": 0.8963,
+    "alarm_f1": 0.8605,
+    "pr_auc": 0.9565,
+    "roc_auc": 0.9596,
+    "pr_auc_ci95": [
+      0.9549,
+      0.9581
+    ],
+    "n_val": 56337,
+    "n_test": 56328
+  },
+  "recal_45m": {
+    "alarm_threshold": 0.35,
+    "alarm_precision": 0.8368,
+    "alarm_recall": 0.9259,
+    "alarm_f1": 0.8791,
+    "pr_auc": 0.9569,
+    "roc_auc": 0.9549,
+    "pr_auc_ci95": [
+      0.9551,
+      0.9585
+    ],
+    "n_val": 56337,
+    "n_test": 56295
+  },
+  "recal_ovr": {
+    "alarm_threshold": 0.65,
+    "alarm_precision": 0.8134,
+    "alarm_recall": 0.7325,
+    "alarm_f1": 0.7708,
+    "pr_auc": 0.9263,
+    "roc_auc": 0.9546,
+    "pr_auc_ci95": [
+      0.9215,
+      0.9306
+    ],
+    "n_val": 56337,
+    "n_test": 56394
+  }
+}

@@ -1,8 +1,9 @@
 """Inference script for the CPU spike classifier.
 
-2-model architecture: a 15m binary classifier (BinarySpikeClassifier) and a
-60m 3-class severity classifier (SpikeClassifier).  The 30m and 45m binary
-models were dropped in Fix 3 (architecture simplification).
+5-model architecture: 15m / 30m / 45m binary classifiers (BinarySpikeClassifier),
+a 60m 3-class severity classifier (SpikeClassifier), and an OVR severe binary
+classifier.  The 30m / 45m models are optional — inference degrades gracefully
+when they are absent (loaded if present as sibling directories spike_30m / spike_45m).
 
 Accepts a CSV of per-machine aggregated 5-minute CPU data (last 120 min,
 24 buckets per machine) and produces spike-probability predictions for each
@@ -110,7 +111,7 @@ _INPUT_COLS: tuple[str, ...] = (
 
 # Short-horizon binary models used for imminence scoring, in ascending order.
 # The 60m severity model is handled separately and is always required.
-_BINARY_HORIZONS_ORDERED: list[str] = ["15m"]
+_BINARY_HORIZONS_ORDERED: list[str] = ["15m", "30m", "45m"]
 
 
 # ── Artefacts dataclass ───────────────────────────────────────────────────────
@@ -213,7 +214,7 @@ def _load_artifacts(model_dir: Path) -> _Artifacts:
     #                 exceedances; overrides is_severe from the 60m softmax column
     #                 when present (Phase 5).
     models_parent = model_dir.parent
-    for h_name in ("15m", "severe_ovr"):
+    for h_name in ("15m", "30m", "45m", "severe_ovr"):
         h_dir = models_parent / f"spike_{h_name}"
         if (h_dir / "spike_model.json").exists():
             try:
@@ -649,13 +650,20 @@ def _run_inference(
             else:
                 top_is_severe = None
 
-            # Recommended action: rule-based derivation from existing prediction signals.
-            # Gracefully handles absent 15m model (imminence.get("15m") → {}).
-            _15m_is_spike = imminence.get("15m", {}).get("is_spike")
-            if _15m_is_spike:
-                recommended_action: str = "preempt_now"
+            # Recommended action derived from multi-horizon cascade.
+            # Earliest alarm horizon determines lead-time and action urgency.
+            # Gracefully handles absent 30m/45m models (imminence.get → {}).
+            _15m_alarm = imminence.get("15m", {}).get("is_spike")
+            _30m_alarm = imminence.get("30m", {}).get("is_spike")
+            _45m_alarm = imminence.get("45m", {}).get("is_spike")
+            if _15m_alarm:
+                recommended_action: str = "preempt_now"      # spike imminent (<15 min)
+            elif _30m_alarm:
+                recommended_action = "migrate_jobs"           # ~15–30 min window
+            elif _45m_alarm:
+                recommended_action = "defer_new_jobs"         # ~30–45 min window
             elif sev_cls is not None and sev_cls >= 1 and top_is_severe:
-                recommended_action = "defer_batch"
+                recommended_action = "defer_batch"            # 60m severe, no short alarms
             elif sev_cls is not None and sev_cls >= 1:
                 recommended_action = "monitor"
             else:

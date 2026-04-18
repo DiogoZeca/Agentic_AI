@@ -36,7 +36,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from spike_feature_engineer import (
     _BUCKETS_PER_DAY,
     _FEATURE_COLS,
-    _FFT_WINDOW,
     _HORIZON,
     _LAGS,
     _MAX_TIME_SINCE_SPIKE,
@@ -45,7 +44,6 @@ from spike_feature_engineer import (
     _add_label,
     _compute_thresholds,
     _engineer_machine,
-    _engineer_spectral,
     engineer,
 )
 from spike_classifier import _X_COLS
@@ -725,9 +723,6 @@ class TestOutputSchema:
             "time_since_last_spike", "cpu_spike_rate_24",
             "cluster_cpu_p90", "machine_rank_in_cluster",
             "hour_sin", "hour_cos",
-            # spectral features (Phase 8)
-            "spec_dominant_freq", "spec_energy_low", "spec_energy_mid",
-            "spec_energy_high", "spec_entropy",
         ]
         for col in float32_cols:
             assert df[col].dtype == np.float32, f"{col} should be float32"
@@ -1136,169 +1131,3 @@ class TestClusterP90TrainingOnly:
 
 # ── Spectral features (Phase 8) ───────────────────────────────────────────────
 
-class TestSpectralFeatures:
-    """Tests for _engineer_spectral() and the 5 spec_* features in engineer().
-
-    The FFT window requires _FFT_WINDOW (24) history values, so the first
-    _FFT_WINDOW - 1 rows of each machine will be NaN — XGBoost handles NaN
-    natively via default split direction.
-
-    A sinusoidal signal at a known frequency provides exact ground-truth for
-    dom_freq and band energy.  A flat (zero) signal tests the degenerate path.
-    """
-
-    _SPEC_COLS = (
-        "spec_dominant_freq", "spec_energy_low",
-        "spec_energy_mid", "spec_energy_high", "spec_entropy",
-    )
-
-    # ── _engineer_spectral unit tests ─────────────────────────────────────────
-
-    def test_output_length_matches_input(self):
-        """All five output arrays must have the same length as the input."""
-        cpu = np.random.rand(50).astype("float32")
-        results = _engineer_spectral(cpu)
-        for arr in results:
-            assert len(arr) == 50
-
-    def test_output_dtype_is_float32(self):
-        """All five output arrays must be float32."""
-        cpu = np.random.rand(50).astype("float32")
-        for arr in _engineer_spectral(cpu):
-            assert arr.dtype == np.float32
-
-    def test_first_window_minus_one_rows_are_nan(self):
-        """First _FFT_WINDOW - 1 rows must be NaN (insufficient history)."""
-        n   = 50
-        cpu = np.ones(n, dtype="float32")
-        for arr in _engineer_spectral(cpu):
-            assert np.all(np.isnan(arr[:_FFT_WINDOW - 1])), (
-                f"Rows 0..{_FFT_WINDOW - 2} must be NaN, got {arr[:_FFT_WINDOW - 1]}"
-            )
-
-    def test_rows_from_window_onward_are_not_nan(self):
-        """Rows from index _FFT_WINDOW - 1 onward must be finite (not NaN)."""
-        cpu = np.ones(50, dtype="float32") * 0.5
-        for arr in _engineer_spectral(cpu):
-            finite = arr[_FFT_WINDOW - 1:]
-            assert np.all(np.isfinite(finite)), (
-                f"Rows >= {_FFT_WINDOW - 1} must be finite, got {finite}"
-            )
-
-    def test_zero_signal_sets_energy_to_zero(self):
-        """An all-zero signal triggers the degenerate path (total_energy < 1e-10).
-        All energy bands must be 0 and not NaN.
-
-        Note: a *nonzero* constant is NOT equivalent — multiplying by the Hann
-        window creates a bell-shaped waveform with real AC power even if the
-        original signal is uniform.  Only a truly zero signal has zero energy.
-        """
-        cpu              = np.zeros(50, dtype="float32")
-        _, e_low, e_mid, e_high, entropy = _engineer_spectral(cpu)
-        for name, arr in (("e_low", e_low), ("e_mid", e_mid), ("e_high", e_high)):
-            np.testing.assert_allclose(
-                arr[_FFT_WINDOW - 1:], 0.0, atol=1e-5,
-                err_msg=f"{name} must be 0 for zero signal",
-            )
-
-    def test_zero_signal_entropy_is_zero(self):
-        """An all-zero signal has no spectral structure → entropy = 0 (degenerate path)."""
-        cpu = np.zeros(50, dtype="float32")
-        *_, entropy = _engineer_spectral(cpu)
-        np.testing.assert_allclose(entropy[_FFT_WINDOW - 1:], 0.0, atol=1e-5)
-
-    def test_zero_signal_dom_freq_is_one(self):
-        """Zero signal degenerate path assigns dom_freq = 1 (index of first AC bin)."""
-        cpu      = np.zeros(50, dtype="float32")
-        dom_freq = _engineer_spectral(cpu)[0]
-        np.testing.assert_array_equal(dom_freq[_FFT_WINDOW - 1:], 1.0)
-
-    def test_energy_bands_sum_leq_one(self):
-        """Low + mid + high energy must be ≤ 1 (DC bin excluded from numerator
-        but included in denominator), for any non-flat signal."""
-        rng = np.random.default_rng(42)
-        cpu = rng.random(100).astype("float32")
-        _, e_low, e_mid, e_high, _ = _engineer_spectral(cpu)
-        valid = _FFT_WINDOW - 1
-        total_band = (
-            e_low[valid:].astype("float64")
-            + e_mid[valid:].astype("float64")
-            + e_high[valid:].astype("float64")
-        )
-        assert np.all(total_band <= 1.0 + 1e-5), (
-            f"Band sum exceeded 1.0: max={total_band.max():.6f}"
-        )
-
-    def test_dom_freq_in_valid_range(self):
-        """dom_freq must be an integer in [1, 12] (bins 1..N//2)."""
-        rng = np.random.default_rng(0)
-        cpu = rng.random(80).astype("float32")
-        dom_freq = _engineer_spectral(cpu)[0]
-        valid = dom_freq[_FFT_WINDOW - 1:]
-        assert np.all(valid >= 1), f"dom_freq below 1: {valid[valid < 1]}"
-        assert np.all(valid <= _FFT_WINDOW // 2), (
-            f"dom_freq above {_FFT_WINDOW // 2}: {valid[valid > _FFT_WINDOW // 2]}"
-        )
-
-    def test_energy_nonnegative(self):
-        """All energy values must be >= 0."""
-        rng = np.random.default_rng(7)
-        cpu = rng.random(80).astype("float32")
-        _, e_low, e_mid, e_high, _ = _engineer_spectral(cpu)
-        for name, arr in (("e_low", e_low), ("e_mid", e_mid), ("e_high", e_high)):
-            assert np.all(arr[_FFT_WINDOW - 1:] >= -1e-6), f"{name} has negative values"
-
-    def test_entropy_nonnegative(self):
-        """Shannon entropy is >= 0 by definition."""
-        rng = np.random.default_rng(3)
-        cpu = rng.random(60).astype("float32")
-        *_, entropy = _engineer_spectral(cpu)
-        assert np.all(entropy[_FFT_WINDOW - 1:] >= -1e-5)
-
-    def test_single_short_input_all_nan(self):
-        """Input shorter than _FFT_WINDOW must be all NaN (no valid window)."""
-        cpu = np.ones(_FFT_WINDOW - 1, dtype="float32") * 0.5
-        for arr in _engineer_spectral(cpu):
-            assert np.all(np.isnan(arr))
-
-    def test_exactly_window_length_produces_one_valid_row(self):
-        """Input of length exactly _FFT_WINDOW gives one non-NaN output at the last index."""
-        cpu = np.ones(_FFT_WINDOW, dtype="float32") * 0.4
-        for arr in _engineer_spectral(cpu):
-            assert np.isnan(arr[:-1]).all()
-            assert np.isfinite(arr[-1])
-
-    # ── Integration test: spectral features via engineer() ────────────────────
-
-    def test_spectral_cols_present_in_engineer_output(self, eng_result):
-        """All 5 spec_* columns must appear in the engineer() output DataFrame."""
-        df, _, _ = eng_result
-        for col in self._SPEC_COLS:
-            assert col in df.columns, f"Missing spectral column: {col}"
-
-    def test_spectral_cols_are_float32_in_engineer_output(self, eng_result):
-        df, _, _ = eng_result
-        for col in self._SPEC_COLS:
-            assert df[col].dtype == np.float32, f"{col} should be float32"
-
-    def test_spectral_cols_have_some_valid_values(self, eng_result):
-        """With 25 buckets per machine, at least _FFT_WINDOW rows per machine
-        have valid (non-NaN) spectral values."""
-        df, _, _ = eng_result
-        for col in self._SPEC_COLS:
-            n_valid = int(df[col].notna().sum())
-            assert n_valid > 0, f"{col}: no valid (non-NaN) rows found"
-
-    def test_spectral_nan_only_in_first_window_rows(self, eng_result):
-        """NaN rows in spectral columns must only occur among the first
-        _FFT_WINDOW - 1 rows per machine (insufficient history)."""
-        df, _, _ = eng_result
-        for mid, mdf in df.groupby("machine_id"):
-            mdf = mdf.sort_values("bucket").reset_index(drop=True)
-            for col in self._SPEC_COLS:
-                nan_idx = mdf.index[mdf[col].isna()].tolist()
-                for idx in nan_idx:
-                    assert idx < _FFT_WINDOW - 1, (
-                        f"machine {mid}: unexpected NaN at row {idx} in {col} "
-                        f"(only rows 0..{_FFT_WINDOW - 2} should be NaN)"
-                    )

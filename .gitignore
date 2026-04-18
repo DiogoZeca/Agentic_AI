@@ -28,6 +28,13 @@ AIModel/data/*.csv
 AIModel/data/full_run/
 AIModel/data/*.txt
 
+# ─── Experiment ablation artifacts (large model weights, regeneratable) ──────
+AIModel/data/experiments/
+
+# ─── Binary data and model artifact files ────────────────────────────────────
+*.parquet
+*.pkl
+
 # ─── Databases (Optuna SQLite) ───────────────────────────────────────────────
 *.db
 

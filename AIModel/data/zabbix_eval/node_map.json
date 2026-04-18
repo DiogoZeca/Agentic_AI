@@ -1,0 +1,13 @@
+{
+  "atari": 0,
+  "atnog-bkpConfigs": 1,
+  "atnog-docker": 2,
+  "atnog-nas": 3,
+  "atnog-webphp": 4,
+  "jarvis-controller": 5,
+  "jarvis-node1": 6,
+  "jarvis-node2": 7,
+  "sega": 8,
+  "skynet": 9,
+  "xbox": 10
+}

@@ -55,6 +55,7 @@ import csv
 import gc
 import json
 import logging
+import os
 import pickle
 import shutil
 import sys
@@ -119,6 +120,8 @@ _MAX_BINARY_TRIALS:      int = 75
 # boundaries (the validation window starts after a full horizon gap).
 _HORIZON_CONFIGS: list[dict] = [
     {"horizon": "15m", "label_col": "spike_in_15m",    "n_windows": 3,  "cv_gap": 3,  "binary": True},
+    {"horizon": "30m", "label_col": "spike_in_30m",    "n_windows": 6,  "cv_gap": 6,  "binary": True},
+    {"horizon": "45m", "label_col": "spike_in_45m",    "n_windows": 9,  "cv_gap": 9,  "binary": True},
     {"horizon": "60m", "label_col": "severity_in_60m", "n_windows": 12, "cv_gap": 12, "binary": False},
 ]
 
@@ -187,15 +190,16 @@ _CV_GAP: int = 12   # default 12 × 5-min buckets = 60 min prediction horizon
 
 
 def _run_walk_forward_cv(
-    train_df:    pd.DataFrame,
-    n_folds:     int,
-    seed:        int,
-    output_path: Path,
-    device:      str        = "cpu",
-    model_kwargs: dict | None = None,
-    label_col:   str        = "severity_in_60m",
-    cv_gap:      int        = _CV_GAP,
-    binary:      bool       = False,
+    train_df:       pd.DataFrame,
+    n_folds:        int,
+    seed:           int,
+    output_path:    Path,
+    device:         str        = "cpu",
+    model_kwargs:   dict | None = None,
+    label_col:      str        = "severity_in_60m",
+    cv_gap:         int        = _CV_GAP,
+    binary:         bool       = False,
+    use_focal_loss: bool       = False,
 ) -> dict[str, float]:
     """Run walk-forward CV on the training split.
 
@@ -261,14 +265,15 @@ def _run_walk_forward_cv(
         val_spike_rate   = float((y_val > 0).mean())
 
         if binary:
-            # Binary model: scale_pos_weight from fold training data only
             n_neg = int((y_tr == 0).sum())
             n_pos = max(int((y_tr == 1).sum()), 1)
             spw   = float(n_neg / n_pos)
+            # Focal loss handles class weighting via alpha; skip scale_pos_weight.
             clf   = BinarySpikeClassifier(
                 device           = device,
                 random_state     = seed,
-                scale_pos_weight = spw,
+                scale_pos_weight = 1.0 if use_focal_loss else spw,
+                use_focal_loss   = use_focal_loss,
                 **(model_kwargs or {}),
             )
             clf.fit(X_tr, y_tr)
@@ -747,6 +752,7 @@ def _run_optuna_search(
     binary:                bool       = False,
     n_estimators:          int        = 2000,
     early_stopping_rounds: int        = 150,
+    use_focal_loss:        bool       = False,
 ) -> dict:
     """Bayesian hyperparameter search using Optuna TPE sampler.
 
@@ -952,13 +958,21 @@ def _run_optuna_search(
         if len(np.unique(y_inner_val)) < 2:
             return 0.0
         if binary:
+            focal_kwargs: dict = {}
+            if use_focal_loss:
+                focal_kwargs = {
+                    "use_focal_loss": True,
+                    "focal_alpha":    trial.suggest_float("focal_alpha", 0.1, 0.5),
+                    "focal_gamma":    trial.suggest_float("focal_gamma", 0.5, 4.0),
+                }
             clf = BinarySpikeClassifier(
                 device                = device,
                 random_state          = seed,
-                scale_pos_weight      = spw_inner,
+                scale_pos_weight      = 1.0 if use_focal_loss else spw_inner,
                 n_estimators          = n_estimators,
                 early_stopping_rounds = early_stopping_rounds,
                 **params,
+                **focal_kwargs,
             )
             clf.fit(X_inner_tr_arr, y_inner_tr_arr,
                     eval_set=[(X_inner_val_arr, y_inner_val_arr)])
@@ -1026,6 +1040,7 @@ def _train_binary_horizon(
     n_estimators:          int         = 2000,
     early_stopping_rounds: int         = 150,
     min_alarm_precision:   float       = 0.0,
+    use_focal_loss:        bool        = False,
 ) -> dict:
     """Train and evaluate a BinarySpikeClassifier for one short horizon.
 
@@ -1116,6 +1131,7 @@ def _train_binary_horizon(
             binary                = True,
             n_estimators          = n_estimators,
             early_stopping_rounds = early_stopping_rounds,
+            use_focal_loss        = use_focal_loss,
         )
         best_params_path.write_text(json.dumps(search_result, indent=2))
         model_kwargs: dict = search_result["params"]
@@ -1130,24 +1146,34 @@ def _train_binary_horizon(
     if walk_forward:
         cv_summary = _run_walk_forward_cv(
             train_df, n_folds, seed, cv_path,
-            device       = device,
-            model_kwargs = model_kwargs,
-            label_col    = label_col,
-            cv_gap       = cv_gap,
-            binary       = True,
+            device          = device,
+            model_kwargs    = model_kwargs,
+            label_col       = label_col,
+            cv_gap          = cv_gap,
+            binary          = True,
+            use_focal_loss  = use_focal_loss,
         )
 
     # Final model training — strip any cached n_estimators so the explicit
     # parameter value (default 2000, overridable for tests) takes precedence.
     final_model_kwargs = {k: v for k, v in (model_kwargs or {}).items()
                           if k != "n_estimators"}
+    focal_kwargs: dict = {}
+    if use_focal_loss:
+        # Extract focal hyperparams from Optuna best_params (or keep defaults).
+        focal_kwargs = {
+            "use_focal_loss": True,
+            "focal_alpha":    float(final_model_kwargs.pop("focal_alpha", 0.25)),
+            "focal_gamma":    float(final_model_kwargs.pop("focal_gamma", 2.0)),
+        }
     clf = BinarySpikeClassifier(
         device                = device,
         random_state          = seed,
-        scale_pos_weight      = spw,
+        scale_pos_weight      = 1.0 if use_focal_loss else spw,
         n_estimators          = n_estimators,
         early_stopping_rounds = early_stopping_rounds,
         **final_model_kwargs,
+        **focal_kwargs,
     )
     X_val_arr = val_df[_X_COLS].astype("float32").values
     clf.fit(train_df[_X_COLS], train_df[label_col],
@@ -1231,6 +1257,7 @@ def run(
     early_stopping_rounds: int          = 150,
     min_alarm_precision:   float        = 0.0,
     min_future_windows:    int          = 1,
+    use_focal_loss:        bool         = False,
 ) -> dict:
     """Run the full spike classifier training pipeline.
 
@@ -1252,6 +1279,9 @@ def run(
                          At least this many of the 12 future windows must exceed
                          the threshold for a positive label.  Default=1 (current
                          any-exceedance behaviour).  Use 2 or 3 for ablation runs.
+    use_focal_loss      : when True, trains binary models with focal loss instead of
+                         binary cross-entropy.  focal_alpha and focal_gamma are added
+                         to the Optuna search space automatically.  Default=False.
 
     Returns
     -------
@@ -1624,7 +1654,6 @@ def run(
         pass
 
     # Warm-start binary models from 60m best_params (tree structure is portable).
-    # Strip n_estimators — binary final training uses 2000 with early stopping.
     binary_warmstart: dict | None = None
     if best_params_path.exists():
         try:
@@ -1661,6 +1690,7 @@ def run(
             n_estimators          = n_estimators,
             early_stopping_rounds = early_stopping_rounds,
             min_alarm_precision   = min_alarm_precision,
+            use_focal_loss        = use_focal_loss,
         )
         binary_results[h_name] = h_result
 
@@ -1690,6 +1720,7 @@ def run(
         n_estimators          = n_estimators,
         early_stopping_rounds = early_stopping_rounds,
         min_alarm_precision   = min_alarm_precision,
+        use_focal_loss        = use_focal_loss,
     )
     binary_results["severe_ovr"] = ovr_result
 
@@ -1805,13 +1836,14 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--device",
-        default = "cpu",
+        default = os.environ.get("DEVICE", "cpu"),
         choices = ["cpu", "cuda"],
         help    = (
-            "Compute device for XGBoost training  (default: cpu). "
+            "Compute device for XGBoost training  (default: env DEVICE or 'cpu'). "
             "Use 'cuda' on a VM with a CUDA-capable GPU — falls back to CPU "
             "automatically if no GPU is detected.  The saved model is "
-            "device-agnostic and loads on any machine regardless of this setting."
+            "device-agnostic and loads on any machine regardless of this setting.  "
+            "Note: an invalid DEVICE env var (e.g. 'gpu') will fail here — use 'cuda'."
         ),
     )
     p.add_argument(
@@ -1896,6 +1928,18 @@ def _parse_args() -> argparse.Namespace:
             "(spike_in_15m/30m/45m) always use K=1."
         ),
     )
+    p.add_argument(
+        "--use-focal-loss",
+        dest    = "use_focal_loss",
+        action  = "store_true",
+        default = False,
+        help    = (
+            "Train binary models (15m, 30m, 45m, OVR severe) with focal loss instead "
+            "of binary cross-entropy.  focal_alpha ∈ [0.1, 0.5] and focal_gamma ∈ "
+            "[0.5, 4.0] are added to the Optuna search space automatically.  "
+            "Disables scale_pos_weight (focal alpha handles class weighting directly)."
+        ),
+    )
     return p.parse_args()
 
 
@@ -1918,4 +1962,5 @@ if __name__ == "__main__":
         n_estimators         = args.n_estimators,
         min_alarm_precision  = args.min_alarm_precision,
         min_future_windows   = args.min_future_windows,
+        use_focal_loss       = args.use_focal_loss,
     )
