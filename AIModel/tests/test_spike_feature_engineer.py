@@ -1129,5 +1129,139 @@ class TestClusterP90TrainingOnly:
         assert result["cluster_cpu_p90"].dtype == np.float32
 
 
-# ── Spectral features (Phase 8) ───────────────────────────────────────────────
+# ── Rate-of-approach features ─────────────────────────────────────────────────
+
+
+class TestRateOfApproachFeatures:
+    """Tests for cpu_vs_p95_slope_3, cpu_vs_p95_slope_6, and time_to_p95_3.
+
+    These features measure how fast the machine is approaching its p95 threshold,
+    providing horizon-differentiating signal for the 15m/30m/45m binary models.
+    """
+
+    _THRESHOLD     = 0.4   # p95
+    _THRESHOLD_P99 = 0.6   # p99 (must be >= p95 * 1.10)
+
+    @pytest.fixture(scope="class")
+    def rising_series(self):
+        """CPU rising steadily from 0.1 to 0.5 over 10 buckets, then flat."""
+        rows = []
+        for b in range(1, 20):
+            cpu = min(0.1 + (b - 1) * 0.04, 0.5)   # rises 0.04/bucket for first 10
+            rows.append(_make_agg_row(1, b, total_cpu=cpu, peak_cpu=cpu + 0.05))
+        return _make_agg_df(rows)
+
+    @pytest.fixture(scope="class")
+    def declining_series(self):
+        """CPU declining from 0.5 to 0.1 — slope is negative throughout."""
+        rows = []
+        for b in range(1, 20):
+            cpu = max(0.5 - (b - 1) * 0.03, 0.1)
+            rows.append(_make_agg_row(1, b, total_cpu=cpu, peak_cpu=cpu + 0.05))
+        return _make_agg_df(rows)
+
+    @pytest.fixture(scope="class")
+    def above_threshold_series(self):
+        """CPU already above p95 (threshold=0.4) throughout."""
+        rows = [
+            _make_agg_row(1, b, total_cpu=0.6, peak_cpu=0.65)
+            for b in range(1, 20)
+        ]
+        return _make_agg_df(rows)
+
+    @pytest.fixture(scope="class")
+    def flat_series(self):
+        """CPU perfectly flat at 0.2 — slope must be 0 after warmup."""
+        rows = [
+            _make_agg_row(1, b, total_cpu=0.2, peak_cpu=0.25)
+            for b in range(1, 20)
+        ]
+        return _make_agg_df(rows)
+
+    def test_columns_present_and_dtype(self, eng_result):
+        """All 3 rate-of-approach columns must be in output with dtype float32."""
+        df, _, _ = eng_result
+        for col in ("cpu_vs_p95_slope_3", "cpu_vs_p95_slope_6", "time_to_p95_3"):
+            assert col in df.columns, f"Missing column: {col}"
+            assert df[col].dtype == np.float32, f"{col} should be float32, got {df[col].dtype}"
+
+    def test_slope_3_positive_when_rising(self, rising_series):
+        """Rising CPU → slope_3 must be positive while the series is still climbing.
+        The rising_series rises for 10 buckets (cpu reaches 0.5 at bucket 11) then
+        plateaus, so only check buckets 4–11 (warmup done, still ascending)."""
+        result = _engineer_machine(rising_series, 1,
+                                   threshold=self._THRESHOLD,
+                                   threshold_p99=self._THRESHOLD_P99)
+        rising_window = result[(result["bucket"] > 4) & (result["bucket"] <= 11)]
+        assert (rising_window["cpu_vs_p95_slope_3"] > 0).all(), (
+            "slope_3 should be positive while CPU is monotonically rising"
+        )
+
+    def test_slope_6_positive_when_rising(self, rising_series):
+        """Rising CPU → slope_6 must be positive while the series is still climbing.
+        Check buckets 7–11 (6-bucket warmup done, still ascending)."""
+        result = _engineer_machine(rising_series, 1,
+                                   threshold=self._THRESHOLD,
+                                   threshold_p99=self._THRESHOLD_P99)
+        rising_window = result[(result["bucket"] > 7) & (result["bucket"] <= 11)]
+        assert (rising_window["cpu_vs_p95_slope_6"] > 0).all()
+
+    def test_slope_3_zero_when_flat(self, flat_series):
+        """Flat CPU → slope_3 must be 0.0 after the 3-bucket warmup."""
+        result = _engineer_machine(flat_series, 1,
+                                   threshold=self._THRESHOLD,
+                                   threshold_p99=self._THRESHOLD_P99)
+        late_rows = result[result["bucket"] > 4]
+        assert (late_rows["cpu_vs_p95_slope_3"].abs() < 1e-6).all()
+
+    def test_slope_3_steeper_than_slope_6_on_sudden_spike(self):
+        """Sharp 3-bucket rise: slope_3 should capture steepness that slope_6 dilutes."""
+        rows = (
+            [_make_agg_row(1, b, total_cpu=0.1) for b in range(1, 8)]   # 7 flat buckets
+            + [_make_agg_row(1, b, total_cpu=0.35) for b in range(8, 11)]  # 3-bucket spike
+        )
+        df     = _make_agg_df(rows)
+        result = _engineer_machine(df, 1,
+                                   threshold=self._THRESHOLD,
+                                   threshold_p99=self._THRESHOLD_P99)
+        row10  = result[result["bucket"] == 10].iloc[0]
+        assert abs(float(row10["cpu_vs_p95_slope_3"])) > abs(float(row10["cpu_vs_p95_slope_6"])), (
+            "A sudden 3-bucket spike must produce a steeper slope_3 than slope_6"
+        )
+
+    def test_time_to_p95_3_negative_when_above_threshold(self, above_threshold_series):
+        """CPU flat at 0.6 (> threshold 0.4) → slope_3 → 0 after warmup.
+        With slope ≤ 0.01 and distance < 0, the code defaults to -24.0."""
+        result = _engineer_machine(above_threshold_series, 1,
+                                   threshold=self._THRESHOLD,
+                                   threshold_p99=self._THRESHOLD_P99)
+        late_rows = result[result["bucket"] > 4]
+        assert (late_rows["time_to_p95_3"] < 0).all(), (
+            "time_to_p95_3 must be negative when CPU is stably above p95"
+        )
+
+    def test_time_to_p95_3_capped_at_24_when_declining(self, declining_series):
+        """Declining CPU (slope ≤ 0.01) and below threshold → time_to_p95_3 = 24.0."""
+        result = _engineer_machine(declining_series, 1,
+                                   threshold=self._THRESHOLD,
+                                   threshold_p99=self._THRESHOLD_P99)
+        # Declining series: cpu goes from 0.5 down to 0.1.
+        # After bucket 7 (warmup), CPU is below threshold=0.4 and falling → ttx=24.0.
+        late_rows = result[result["bucket"] > 7]
+        assert ((late_rows["time_to_p95_3"] - 24.0).abs() < 1e-5).all(), (
+            "time_to_p95_3 should be 24.0 when machine is declining below threshold"
+        )
+
+    def test_time_to_p95_3_clipped_to_minus_24(self, above_threshold_series):
+        """time_to_p95_3 must never go below -24.0 (lower clip bound)."""
+        result = _engineer_machine(above_threshold_series, 1,
+                                   threshold=self._THRESHOLD,
+                                   threshold_p99=self._THRESHOLD_P99)
+        assert (result["time_to_p95_3"] >= -24.0).all()
+
+    def test_no_nan_in_rate_features(self, eng_result):
+        """Rate-of-approach features must contain no NaN values."""
+        df, _, _ = eng_result
+        for col in ("cpu_vs_p95_slope_3", "cpu_vs_p95_slope_6", "time_to_p95_3"):
+            assert df[col].notna().all(), f"{col} contains NaN values"
 

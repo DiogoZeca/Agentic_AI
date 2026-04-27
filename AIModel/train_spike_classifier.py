@@ -268,11 +268,10 @@ def _run_walk_forward_cv(
             n_neg = int((y_tr == 0).sum())
             n_pos = max(int((y_tr == 1).sum()), 1)
             spw   = float(n_neg / n_pos)
-            # Focal loss handles class weighting via alpha; skip scale_pos_weight.
             clf   = BinarySpikeClassifier(
                 device           = device,
                 random_state     = seed,
-                scale_pos_weight = 1.0 if use_focal_loss else spw,
+                scale_pos_weight = spw,
                 use_focal_loss   = use_focal_loss,
                 **(model_kwargs or {}),
             )
@@ -600,7 +599,11 @@ def _compute_feature_importance(
     X_val       : validation feature DataFrame (used for SHAP background sample).
     output_path : destination for feature_importance.csv.
     """
-    booster  = clf._model.get_booster()
+    # The focal-loss path stores the fitted booster in clf._booster (xgb.Booster);
+    # the standard path stores it inside clf._model (XGBClassifier). Both expose
+    # an identical xgb.Booster API, so the rest of this function is path-agnostic.
+    booster  = (clf._booster if getattr(clf, "_booster", None) is not None
+                else clf._model.get_booster())
     gain_raw = booster.get_score(importance_type="gain")
 
     # XGBoost stores features as "f0", "f1", ... when the model is trained on
@@ -633,7 +636,8 @@ def _compute_feature_importance(
             idx = rng.choice(len(X_sample), 50_000, replace=False)
             X_sample = X_sample.iloc[idx]
 
-        booster  = clf._model.get_booster()
+        booster  = (clf._booster if getattr(clf, "_booster", None) is not None
+                    else clf._model.get_booster())
         contribs = booster.predict(xgb.DMatrix(X_sample.values), pred_contribs=True)
 
         n_features = len(_X_COLS)
@@ -962,13 +966,13 @@ def _run_optuna_search(
             if use_focal_loss:
                 focal_kwargs = {
                     "use_focal_loss": True,
-                    "focal_alpha":    trial.suggest_float("focal_alpha", 0.1, 0.5),
+                    "focal_alpha":    0.5,  # neutral; scale_pos_weight handles class weighting
                     "focal_gamma":    trial.suggest_float("focal_gamma", 0.5, 4.0),
                 }
             clf = BinarySpikeClassifier(
                 device                = device,
                 random_state          = seed,
-                scale_pos_weight      = 1.0 if use_focal_loss else spw_inner,
+                scale_pos_weight      = spw_inner,
                 n_estimators          = n_estimators,
                 early_stopping_rounds = early_stopping_rounds,
                 **params,
@@ -1041,6 +1045,7 @@ def _train_binary_horizon(
     early_stopping_rounds: int         = 150,
     min_alarm_precision:   float       = 0.0,
     use_focal_loss:        bool        = False,
+    cascade_stage2:        bool        = False,
 ) -> dict:
     """Train and evaluate a BinarySpikeClassifier for one short horizon.
 
@@ -1071,6 +1076,12 @@ def _train_binary_horizon(
         _parquet_cols = list(_X_COLS) + ["severity_in_60m", "bucket", "machine_id"]
         df_h = pd.read_parquet(features_path, columns=_parquet_cols)
         df_h = df_h[df_h["severity_in_60m"].notna()].copy()
+        if cascade_stage2:
+            # Stage 2 cascade: restrict training to spike-positive rows only
+            # (moderate OR severe).  Severe becomes ~19% of training data vs
+            # 2.4% in the OVR framing, so scale_pos_weight auto-computes to
+            # ~4.3 instead of ~40 — no focal loss or custom weighting needed.
+            df_h = df_h[df_h["severity_in_60m"] > 0].copy()
         df_h[_SEV_OVR] = (df_h["severity_in_60m"] == 2).astype("float32")
         df_h.drop(columns=["severity_in_60m"], inplace=True)
     else:
@@ -1160,16 +1171,17 @@ def _train_binary_horizon(
                           if k != "n_estimators"}
     focal_kwargs: dict = {}
     if use_focal_loss:
-        # Extract focal hyperparams from Optuna best_params (or keep defaults).
+        # Extract focal_gamma from Optuna best_params (focal_alpha is fixed at 0.5).
         focal_kwargs = {
             "use_focal_loss": True,
-            "focal_alpha":    float(final_model_kwargs.pop("focal_alpha", 0.25)),
+            "focal_alpha":    0.5,  # neutral; scale_pos_weight handles class weighting
             "focal_gamma":    float(final_model_kwargs.pop("focal_gamma", 2.0)),
         }
+        final_model_kwargs.pop("focal_alpha", None)  # purge stale cached value if present
     clf = BinarySpikeClassifier(
         device                = device,
         random_state          = seed,
-        scale_pos_weight      = 1.0 if use_focal_loss else spw,
+        scale_pos_weight      = spw,
         n_estimators          = n_estimators,
         early_stopping_rounds = early_stopping_rounds,
         **final_model_kwargs,
@@ -1198,6 +1210,7 @@ def _train_binary_horizon(
     spike_config = {
         "horizon":            horizon_name,
         "label_col":          label_col,
+        "cascade_stage2":     cascade_stage2,
         "alarm_threshold":    alarm_thresh,
         "train_ratio":        train_ratio,
         "val_ratio":          val_ratio,
@@ -1258,6 +1271,9 @@ def run(
     min_alarm_precision:   float        = 0.0,
     min_future_windows:    int          = 1,
     use_focal_loss:        bool         = False,
+    use_focal_loss_ovr:    bool         = False,
+    cascade_stage2_ovr:    bool         = False,
+    train_ovr_only:        bool         = False,
 ) -> dict:
     """Run the full spike classifier training pipeline.
 
@@ -1279,9 +1295,25 @@ def run(
                          At least this many of the 12 future windows must exceed
                          the threshold for a positive label.  Default=1 (current
                          any-exceedance behaviour).  Use 2 or 3 for ablation runs.
-    use_focal_loss      : when True, trains binary models with focal loss instead of
-                         binary cross-entropy.  focal_alpha and focal_gamma are added
-                         to the Optuna search space automatically.  Default=False.
+    use_focal_loss      : when True, trains ALL binary models (15m, 30m, 45m, OVR severe)
+                         with focal loss instead of binary cross-entropy.  focal_gamma
+                         is Optuna-tuned; focal_alpha is fixed at 0.5 so scale_pos_weight
+                         continues to handle class weighting.  Default=False.
+    use_focal_loss_ovr  : when True, applies focal loss ONLY to the OVR severe model,
+                         leaving the 15m/30m/45m models unchanged.  Intended for targeted
+                         experiments on the rare-class (2.4%) model without risking
+                         regressions on the better-balanced horizon models.  Default=False.
+    cascade_stage2_ovr  : when True, trains the OVR severe model as Stage 2 of a cascade.
+                         Training is restricted to spike-positive rows (moderate + severe)
+                         only, raising the severe class fraction from ~2.4% to ~19% and
+                         letting scale_pos_weight auto-compute to ~4.3.  The model learns
+                         to distinguish severe from moderate rather than severe from
+                         everything.  Default=False.
+    train_ovr_only      : when True, skip the 60m and binary horizon (15m/30m/45m) models
+                         and train only the OVR severe model.  Intended for fast cascade
+                         experiments where the full_run parquets are reused via from_step=3
+                         and only Stage 2 needs to be re-trained.  Reduces a 20h full run
+                         to ~2-4h.  Default=False.
 
     Returns
     -------
@@ -1365,6 +1397,41 @@ def run(
     # only the model cache.
     shutil.copy(thresholds_path, model_dir / "spike_thresholds.parquet")
     log.info("  Thresholds copied  : %s", model_dir / "spike_thresholds.parquet")
+
+    # ── Fast path: OVR severe only ────────────────────────────────────────────
+    if train_ovr_only:
+        log.info("  train_ovr_only=True — skipping 60m and binary horizon models")
+        _binary_device = "cpu" if device == "cuda" else device
+        _ovr_dir       = artifacts_dir / "models" / "spike_severe_ovr"
+        _ovr_result    = _train_binary_horizon(
+            label_col             = "spike_severe_ovr",
+            horizon_name          = "severe_ovr",
+            cv_gap                = _CV_GAP,
+            model_dir             = _ovr_dir,
+            features_path         = features_path,
+            train_ratio           = train_ratio,
+            val_ratio             = val_ratio,
+            n_folds               = n_folds,
+            walk_forward          = walk_forward,
+            seed                  = seed,
+            device                = _binary_device,
+            tune_hyperparams      = tune_hyperparams,
+            n_trials              = n_trials,
+            warmstart_params      = None,
+            n_estimators          = n_estimators,
+            early_stopping_rounds = early_stopping_rounds,
+            min_alarm_precision   = min_alarm_precision,
+            use_focal_loss        = use_focal_loss or use_focal_loss_ovr,
+            cascade_stage2        = cascade_stage2_ovr,
+        )
+        elapsed = (time.perf_counter() - t_pipeline) / 60
+        log.info("═" * 62)
+        log.info("  OVR ONLY COMPLETE  (%.1f min)", elapsed)
+        log.info("  OVR severe PR-AUC : %.3f  (alarm %.2f)",
+                 _ovr_result.get("pr_auc", float("nan")),
+                 _ovr_result.get("alarm_threshold", 0.5))
+        log.info("═" * 62)
+        return _ovr_result
 
     df = pd.read_parquet(features_path)
     df = df[df["severity_in_60m"].notna()].copy()
@@ -1720,7 +1787,8 @@ def run(
         n_estimators          = n_estimators,
         early_stopping_rounds = early_stopping_rounds,
         min_alarm_precision   = min_alarm_precision,
-        use_focal_loss        = use_focal_loss,
+        use_focal_loss        = use_focal_loss or use_focal_loss_ovr,
+        cascade_stage2        = cascade_stage2_ovr,
     )
     binary_results["severe_ovr"] = ovr_result
 
@@ -1934,10 +2002,52 @@ def _parse_args() -> argparse.Namespace:
         action  = "store_true",
         default = False,
         help    = (
-            "Train binary models (15m, 30m, 45m, OVR severe) with focal loss instead "
-            "of binary cross-entropy.  focal_alpha ∈ [0.1, 0.5] and focal_gamma ∈ "
-            "[0.5, 4.0] are added to the Optuna search space automatically.  "
-            "Disables scale_pos_weight (focal alpha handles class weighting directly)."
+            "Train ALL binary models (15m, 30m, 45m, OVR severe) with focal loss instead "
+            "of binary cross-entropy.  focal_gamma ∈ [0.5, 4.0] is added to the Optuna "
+            "search space; focal_alpha is fixed at 0.5 (neutral) so scale_pos_weight "
+            "continues to handle class weighting.  "
+            "Use --focal-loss-ovr-only to restrict focal loss to the OVR severe model only."
+        ),
+    )
+    p.add_argument(
+        "--focal-loss-ovr-only",
+        dest    = "use_focal_loss_ovr",
+        action  = "store_true",
+        default = os.environ.get("FOCAL_LOSS_OVR", "false").lower() == "true",
+        help    = (
+            "Apply focal loss ONLY to the OVR severe model, leaving the 15m/30m/45m "
+            "models trained with standard binary cross-entropy + scale_pos_weight.  "
+            "Recommended for targeted experiments: the OVR severe model has 2.4%% "
+            "positive rate while the horizon models have 7.9–14.9%%, where focal loss "
+            "adds complexity without clear benefit.  "
+            "Also reads env var FOCAL_LOSS_OVR=true (docker-compose override)."
+        ),
+    )
+    p.add_argument(
+        "--cascade-stage2-ovr",
+        dest    = "cascade_stage2_ovr",
+        action  = "store_true",
+        default = os.environ.get("CASCADE_STAGE2_OVR", "false").lower() == "true",
+        help    = (
+            "Train the OVR severe model as Stage 2 of a two-stage cascade.  "
+            "Training is restricted to spike-positive rows (moderate + severe), raising "
+            "the severe class fraction from ~2.4%% to ~19%% so standard XGBoost handles "
+            "the imbalance without focal loss.  Stage 1 (the 60m severity model) gates "
+            "Stage 2 at inference: only rows where p(any spike) >= 0.15 reach Stage 2.  "
+            "Also reads env var CASCADE_STAGE2_OVR=true (docker-compose override)."
+        ),
+    )
+    p.add_argument(
+        "--train-ovr-only",
+        dest    = "train_ovr_only",
+        action  = "store_true",
+        default = os.environ.get("TRAIN_OVR_ONLY", "false").lower() == "true",
+        help    = (
+            "Skip the 60m and binary horizon (15m/30m/45m) models and train only the "
+            "OVR severe model.  Intended for cascade experiments where full_run parquets "
+            "are reused via --from-step 3 and only Stage 2 needs to be re-trained.  "
+            "Reduces a 20h full run to ~2-4h.  "
+            "Also reads env var TRAIN_OVR_ONLY=true (docker-compose override)."
         ),
     )
     return p.parse_args()
@@ -1963,4 +2073,7 @@ if __name__ == "__main__":
         min_alarm_precision  = args.min_alarm_precision,
         min_future_windows   = args.min_future_windows,
         use_focal_loss       = args.use_focal_loss,
+        use_focal_loss_ovr   = args.use_focal_loss_ovr,
+        cascade_stage2_ovr   = args.cascade_stage2_ovr,
+        train_ovr_only       = args.train_ovr_only,
     )

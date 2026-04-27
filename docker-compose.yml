@@ -6,8 +6,18 @@
 #   API service (requires trained artifacts in data/full_run/):
 #     docker compose up --build
 #
-#   Training run (on VM or local — writes artifacts to data/full_run/):
+#   Training run (local):
 #     docker compose --profile train run --rm --build train
+#
+#   Training run (remote VM via SSH — bind mounts resolve on the remote host,
+#   so run docker compose FROM the VM, not via DOCKER_HOST):
+#     ssh spike-vm "bash -lc 'cd ~/spike && \
+#       CASCADE_STAGE2_OVR=true TRAIN_OVR_ONLY=true FROM_STEP=3 \
+#       ARTIFACTS_DIR=data/experiments/cascade_stage2 \
+#       docker compose --profile train run -d --rm --build train'"
+#
+#   DATA_ROOT overrides the host-side data directory (default: ./AIModel/data).
+#   Not needed locally; set on the VM only if running via DOCKER_HOST (not recommended).
 
 services:
 
@@ -17,7 +27,7 @@ services:
       dockerfile: Dockerfile.test
     container_name: spike-test
     volumes:
-      - ./AIModel/data:/app/data
+      - ${DATA_ROOT:-./AIModel/data}:/app/data
     profiles: [test]
 
   api:
@@ -49,15 +59,20 @@ services:
       # Set DEVICE=cuda to use the GPU; _resolve_device() falls back to CPU if
       # no CUDA GPU is found, so this compose file also works on CPU-only hosts.
       - DEVICE=cuda
-      - DATA_PATH=data/cluster_cpu_data.csv
-      - ARTIFACTS_DIR=data/full_run
-      - OPTUNA_TRIALS=150
-      - MIN_FUTURE_WINDOWS=2
-      - N_ESTIMATORS=4000
+      - DATA_PATH=${DATA_PATH:-data/cluster_cpu_data.csv}
+      - ARTIFACTS_DIR=${ARTIFACTS_DIR:-data/full_run}
+      - OPTUNA_TRIALS=${OPTUNA_TRIALS:-150}
+      - MIN_FUTURE_WINDOWS=${MIN_FUTURE_WINDOWS:-2}
+      - N_ESTIMATORS=${N_ESTIMATORS:-4000}
+      - FOCAL_LOSS_OVR=${FOCAL_LOSS_OVR:-false}
+      - CASCADE_STAGE2_OVR=${CASCADE_STAGE2_OVR:-false}
+      - TRAIN_OVR_ONLY=${TRAIN_OVR_ONLY:-false}
+      - FROM_STEP=${FROM_STEP:-1}
     volumes:
       # Input CSV (read) + artifact output (write) both under the same mount.
       # Trained models are accessible from the host at ./AIModel/data/full_run/.
-      - ./AIModel/data:/app/data
+      # Override DATA_ROOT to point to the VM's absolute path when needed.
+      - ${DATA_ROOT:-./AIModel/data}:/app/data
     deploy:
       resources:
         reservations:

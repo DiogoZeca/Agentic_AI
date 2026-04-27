@@ -38,12 +38,14 @@ from train_spike_classifier import (
     _N_FOLDS,
     _apply_calibrators,
     _compute_calibration_metrics,
+    _compute_feature_importance,
     _fold_metrics,
     _run_optuna_search,
     _run_walk_forward_cv,
     _select_alarm_threshold,
     _threshold_sweep_table,
     _step_needed,
+    _train_binary_horizon,
     run,
 )
 
@@ -724,3 +726,196 @@ class TestComputeCalibrationMetrics:
         for r_a, r_e in zip(rows_auto, rows_explicit):
             assert r_a["threshold"] == r_e["threshold"]
             assert abs(r_a["precision"] - r_e["precision"]) < 1e-6
+
+
+class TestComputeFeatureImportanceFocalPath:
+    """Regression tests for _compute_feature_importance with focal-loss classifiers.
+
+    Before the bug fix, this function always called clf._model.get_booster(), which
+    raises AttributeError for the focal path because clf._model (XGBClassifier) is
+    never fitted — the booster lives in clf._booster.  These tests guard against
+    any future regression of that fix.
+    """
+
+    def _make_X_val(self) -> pd.DataFrame:
+        rng  = np.random.default_rng(99)
+        data = {col: rng.uniform(0.0, 1.0, 60).astype("float32") for col in _X_COLS}
+        return pd.DataFrame(data)
+
+    def test_focal_model_produces_csv(self, tmp_path):
+        """_compute_feature_importance must write feature_importance.csv for a focal model."""
+        from spike_classifier import BinarySpikeClassifier
+        X_val = self._make_X_val()
+        rng   = np.random.default_rng(0)
+        y     = pd.Series(rng.choice([0, 1], size=60, p=[0.8, 0.2]).astype("int8"))
+        clf   = BinarySpikeClassifier(use_focal_loss=True, n_estimators=30)
+        clf.fit(X_val, y)
+        out = tmp_path / "fi.csv"
+        _compute_feature_importance(clf, X_val, out)
+        assert out.exists(), "feature_importance.csv not written for focal model"
+
+    def test_focal_csv_contains_all_features(self, tmp_path):
+        """Every column in _X_COLS must appear in the output (even if gain is 0)."""
+        from spike_classifier import BinarySpikeClassifier
+        X_val = self._make_X_val()
+        rng   = np.random.default_rng(1)
+        y     = pd.Series(rng.choice([0, 1], size=60, p=[0.8, 0.2]).astype("int8"))
+        clf   = BinarySpikeClassifier(use_focal_loss=True, n_estimators=30)
+        clf.fit(X_val, y)
+        out = tmp_path / "fi.csv"
+        _compute_feature_importance(clf, X_val, out)
+        df_fi = pd.read_csv(out)
+        assert set(df_fi["feature"]) == set(_X_COLS)
+
+    def test_standard_model_still_works(self, tmp_path):
+        """Standard (non-focal) BinarySpikeClassifier must still produce valid output."""
+        from spike_classifier import BinarySpikeClassifier
+        X_val = self._make_X_val()
+        rng   = np.random.default_rng(2)
+        y     = pd.Series(rng.choice([0, 1], size=60, p=[0.8, 0.2]).astype("int8"))
+        clf   = BinarySpikeClassifier(n_estimators=30)
+        clf.fit(X_val, y)
+        out = tmp_path / "fi_std.csv"
+        _compute_feature_importance(clf, X_val, out)
+        assert out.exists()
+        df_fi = pd.read_csv(out)
+        assert set(df_fi["feature"]) == set(_X_COLS)
+
+
+class TestFocalWithScalePosWeight:
+    """scale_pos_weight must be passed through to the focal path (_booster_params).
+
+    Option A design: focal_alpha is fixed at 0.5 (neutral) and scale_pos_weight
+    continues to handle class weighting.  These tests guard against any future
+    regression that drops spw back to 1.0 when focal loss is active.
+    """
+
+    def _make_imbalanced_data(self, n: int = 200, pos_rate: float = 0.025):
+        rng   = np.random.default_rng(42)
+        data  = {col: rng.uniform(0.0, 1.0, n).astype("float32") for col in _X_COLS}
+        X     = pd.DataFrame(data)
+        n_pos = max(1, int(n * pos_rate))
+        y_arr = np.zeros(n, dtype="int8")
+        y_arr[:n_pos] = 1
+        rng.shuffle(y_arr)
+        return X, pd.Series(y_arr)
+
+    def test_booster_params_contains_scale_pos_weight(self):
+        """_booster_params must carry scale_pos_weight so xgb.train() uses it."""
+        from spike_classifier import BinarySpikeClassifier
+        spw = 39.0
+        clf = BinarySpikeClassifier(use_focal_loss=True, scale_pos_weight=spw, n_estimators=10)
+        assert "scale_pos_weight" in clf._booster_params
+        assert clf._booster_params["scale_pos_weight"] == spw
+
+    def test_focal_alpha_stored_when_passed(self):
+        """Explicitly passing focal_alpha=0.5 (neutral) must be stored correctly."""
+        from spike_classifier import BinarySpikeClassifier
+        clf = BinarySpikeClassifier(use_focal_loss=True, focal_alpha=0.5, n_estimators=10)
+        assert clf._focal_alpha == 0.5
+
+    def test_focal_with_spw_produces_higher_recall_than_no_spw(self):
+        """With severe class imbalance, spw=40 focal model must recall more positives
+        than spw=1 focal model — verifying the weight is actually applied."""
+        from spike_classifier import BinarySpikeClassifier
+        from sklearn.metrics import recall_score
+        X, y = self._make_imbalanced_data(n=300, pos_rate=0.025)
+        X_arr = X.values.astype("float32")
+        y_arr = y.values
+
+        clf_spw = BinarySpikeClassifier(
+            use_focal_loss=True, scale_pos_weight=40.0,
+            focal_alpha=0.5, focal_gamma=2.0, n_estimators=50,
+        )
+        clf_spw.fit(X, y)
+
+        clf_no_spw = BinarySpikeClassifier(
+            use_focal_loss=True, scale_pos_weight=1.0,
+            focal_alpha=0.5, focal_gamma=2.0, n_estimators=50,
+        )
+        clf_no_spw.fit(X, y)
+
+        thresh = 0.3
+        pred_spw    = (clf_spw.predict_proba(X_arr)[:, 1] >= thresh).astype(int)
+        pred_no_spw = (clf_no_spw.predict_proba(X_arr)[:, 1] >= thresh).astype(int)
+        recall_spw    = recall_score(y_arr, pred_spw,    zero_division=0)
+        recall_no_spw = recall_score(y_arr, pred_no_spw, zero_division=0)
+        assert recall_spw >= recall_no_spw, (
+            f"spw=40 recall {recall_spw:.3f} not >= spw=1 recall {recall_no_spw:.3f}"
+        )
+
+
+# ── Two-stage cascade (Stage 2 OVR severe) ────────────────────────────────────
+
+class TestCascadeStage2:
+    """cascade_stage2_ovr=True must restrict OVR severe training to spike-positive
+    rows only, raising the severe class fraction well above the ~2.4% population rate.
+    """
+
+    @pytest.fixture(scope="class")
+    def cascade_arts(self, features_parquet, tmp_path_factory):
+        import shutil
+        arts_dir = tmp_path_factory.mktemp("arts_cascade")
+        pd.read_parquet(features_parquet).to_parquet(
+            arts_dir / "cluster_features.parquet",
+            engine="pyarrow", compression="zstd", index=False,
+        )
+        shutil.copy(
+            features_parquet.parent / "spike_thresholds.parquet",
+            arts_dir / "spike_thresholds.parquet",
+        )
+        run(
+            data_path             = arts_dir / "nonexistent.csv",
+            artifacts_dir         = arts_dir,
+            train_ratio           = _TRAIN_RATIO,
+            val_ratio             = _VAL_RATIO,
+            from_step             = 3,
+            walk_forward          = False,
+            seed                  = 42,
+            n_estimators          = 50,
+            early_stopping_rounds = 10,
+            cascade_stage2_ovr    = True,
+        )
+        return arts_dir
+
+    def test_ovr_severe_model_is_written(self, cascade_arts):
+        """cascade_stage2_ovr must still produce a trained OVR severe model on disk."""
+        assert (cascade_arts / "models" / "spike_severe_ovr" / "spike_model.json").exists()
+
+    def test_cascade_flag_recorded_in_config(self, cascade_arts):
+        """spike_config.json must record cascade_stage2=True for auditability."""
+        cfg = json.loads(
+            (cascade_arts / "models" / "spike_severe_ovr" / "spike_config.json").read_text()
+        )
+        assert cfg.get("cascade_stage2") is True
+
+    def test_spike_rate_train_reflects_filtered_population(self, cascade_arts):
+        """Filtering to spike-positive rows raises the severe fraction well above
+        the ~2.4% population rate.  Even in synthetic data the cascade rate must
+        exceed 15% — a threshold that is impossible without active filtering."""
+        cfg = json.loads(
+            (cascade_arts / "models" / "spike_severe_ovr" / "spike_config.json").read_text()
+        )
+        assert cfg["spike_rate_train"] >= 0.15, (
+            f"Expected cascade Stage 2 spike_rate_train >= 0.15 (well above the "
+            f"~2.4%% OVR population rate), got {cfg['spike_rate_train']:.3f}. "
+            "The spike-positive row filter may not be active."
+        )
+
+    def test_horizon_metadata_unchanged(self, cascade_arts):
+        """Cascade mode must preserve the OVR severe horizon / label metadata."""
+        cfg = json.loads(
+            (cascade_arts / "models" / "spike_severe_ovr" / "spike_config.json").read_text()
+        )
+        assert cfg["horizon"] == "severe_ovr"
+        assert cfg["label_col"] == "spike_severe_ovr"
+
+    def test_15m_30m_45m_models_unaffected(self, cascade_arts):
+        """cascade_stage2_ovr must not touch the binary horizon models."""
+        for horizon in ("spike_15m", "spike_30m", "spike_45m"):
+            cfg = json.loads(
+                (cascade_arts / "models" / horizon / "spike_config.json").read_text()
+            )
+            assert cfg.get("cascade_stage2") is False, (
+                f"{horizon} must not be in cascade mode"
+            )

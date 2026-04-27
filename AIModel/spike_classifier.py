@@ -84,9 +84,12 @@ _X_COLS: list[str] = [
     "cpu_delta_1", "cpu_delta_2", "cpu_rolling_std_6",
     # machine-relative
     "task_dominance",
-    "cpu_vs_p95",        # total_cpu / machine p95 — > 1.0 means already spiking
-    "cpu_vs_p95_delta",  # rate of change of the normalised signal
-    "peak_cpu_vs_p95",   # peak_cpu / machine p95 — near-miss detection (Phase 2)
+    "cpu_vs_p95",          # total_cpu / machine p95 — > 1.0 means already spiking
+    "cpu_vs_p95_delta",   # rate of change of the normalised signal (1-bucket)
+    "cpu_vs_p95_slope_3", # avg rate-of-change of cpu/p95 over last 3 buckets (15 min)
+    "cpu_vs_p95_slope_6", # avg rate-of-change of cpu/p95 over last 6 buckets (30 min)
+    "time_to_p95_3",      # estimated buckets to threshold at current slope; clipped [-24, 24]
+    "peak_cpu_vs_p95",    # peak_cpu / machine p95 — near-miss detection (Phase 2)
     # p99-level features (Fix 1)
     "spike_severe_now",       # is current window already above p99? (binary)
     "cpu_vs_p99",             # total_cpu / machine p99 threshold
@@ -128,8 +131,11 @@ _NUM_CLASSES:  int   = 3    # 0=no_spike, 1=moderate, 2=severe
 # physically correct for CPU/spike-history features.
 _BINARY_MONOTONE_MAP: dict[str, int] = {
     # higher normalised CPU → more likely to spike
-    "cpu_vs_p95":            +1,
-    "peak_cpu_vs_p95":       +1,
+    "cpu_vs_p95":             +1,
+    "cpu_vs_p95_slope_3":     +1,  # steeper approach to p95 over 15 min → more imminent
+    "cpu_vs_p95_slope_6":     +1,  # steeper approach to p95 over 30 min → more imminent
+    "time_to_p95_3":          -1,  # fewer buckets to threshold → more imminent spike
+    "peak_cpu_vs_p95":        +1,
     # cpu_per_task: higher per-task intensity → more likely spike (Phase 5)
     "cpu_per_task":          +1,
     # p99-level features (Fix 5b)
@@ -624,6 +630,7 @@ class BinarySpikeClassifier:
             "gamma":                 gamma,
             "reg_alpha":             reg_alpha,
             "reg_lambda":            reg_lambda,
+            "scale_pos_weight":      scale_pos_weight,
             "seed":                  random_state,
             "eval_metric":           "aucpr",
             "monotone_constraints":  _BINARY_MONOTONE_STR,
@@ -667,8 +674,8 @@ class BinarySpikeClassifier:
             return self
 
         # Focal loss path — xgb.train() with custom gradient/hessian.
-        # scale_pos_weight is intentionally omitted: focal_alpha handles class
-        # weighting directly inside the gradient so double-counting is avoided.
+        # scale_pos_weight is passed via _booster_params; focal_alpha is fixed
+        # at 0.5 (neutral weighting) so only focal_gamma drives hard-example focusing.
         from functools import partial
         obj_fn = partial(focal_binary_obj, alpha=self._focal_alpha, gamma=self._focal_gamma)
 

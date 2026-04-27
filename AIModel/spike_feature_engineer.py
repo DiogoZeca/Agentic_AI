@@ -136,6 +136,9 @@ _FEATURE_COLS: list[str] = [
     "cpu_delta_1", "cpu_delta_2", "cpu_rolling_std_6",
     # machine-relative
     "task_dominance", "cpu_vs_p95", "cpu_vs_p95_delta",
+    "cpu_vs_p95_slope_3",   # avg rate-of-change of cpu/p95 over last 3 buckets (15 min)
+    "cpu_vs_p95_slope_6",   # avg rate-of-change of cpu/p95 over last 6 buckets (30 min)
+    "time_to_p95_3",        # estimated buckets until cpu/p95 = 1.0 at current slope; clipped [-24, 24]
     "peak_cpu_vs_p95",      # peak_cpu / p95 threshold — near-miss detection (Phase 2)
     # spike history — derived from raw metric only, never from spike_in_60m label
     "spike_now", "spike_in_last_1", "spike_in_last_3", "spike_in_last_6",
@@ -345,6 +348,32 @@ def _engineer_machine(
         g["cpu_vs_p95_delta"] = (delta_1 / threshold).astype("float32")
     else:
         g["cpu_vs_p95_delta"] = 0.0
+
+    # ── Rate-of-approach features ─────────────────────────────────────────────
+    # slope_3/slope_6: avg change in cpu/p95 per bucket over the last 3 and 6 buckets.
+    # time_to_p95_3: estimated buckets until cpu/p95 hits 1.0 at the current slope_3 rate.
+    #   Negative = already above threshold.  24.0 = not approaching (slope ≤ 0.01).
+    if threshold > 0:
+        cpu_norm = cpu / threshold
+        slope_3  = (cpu_norm - cpu_norm.shift(3).fillna(0.0)) / 3
+        slope_6  = (cpu_norm - cpu_norm.shift(6).fillna(0.0)) / 6
+        g["cpu_vs_p95_slope_3"] = slope_3.astype("float32")
+        g["cpu_vs_p95_slope_6"] = slope_6.astype("float32")
+        distance = 1.0 - cpu_norm
+        # Default when slope ≤ 0.01: -24 if already above threshold, +24 if below.
+        default = np.where(distance.values < 0, -24.0, 24.0)
+        # np.divide with out/where avoids the divide-by-zero RuntimeWarning that
+        # np.where triggers even on the un-selected branch (both evaluated eagerly).
+        ttx = np.divide(
+            distance.values, slope_3.values,
+            out   = default.astype(np.float64),
+            where = slope_3.values > 0.01,
+        )
+        g["time_to_p95_3"] = np.clip(ttx, -24.0, 24.0).astype("float32")
+    else:
+        g["cpu_vs_p95_slope_3"] = np.float32(0.0)
+        g["cpu_vs_p95_slope_6"] = np.float32(0.0)
+        g["time_to_p95_3"]      = np.float32(0.0)
 
     # peak_cpu / threshold — near-miss detection.
     # cpu_vs_p95 uses total_cpu (5-min average); this uses peak_cpu (instantaneous max).

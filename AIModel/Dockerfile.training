@@ -57,6 +57,7 @@ ENV ARTIFACTS_DIR=data/full_run
 ENV OPTUNA_TRIALS=150
 ENV MIN_FUTURE_WINDOWS=1
 ENV N_ESTIMATORS=4000
+ENV FROM_STEP=1
 
 CMD python3 -u train_spike_classifier.py \
     --data-path          "$DATA_PATH" \
@@ -65,4 +66,5 @@ CMD python3 -u train_spike_classifier.py \
     --optuna-trials      "$OPTUNA_TRIALS" \
     --n-estimators       "$N_ESTIMATORS" \
     --device             "$DEVICE" \
-    --min-future-windows "$MIN_FUTURE_WINDOWS"
+    --min-future-windows "$MIN_FUTURE_WINDOWS" \
+    --from-step          "$FROM_STEP"

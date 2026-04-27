@@ -263,3 +263,7 @@ See `session_state.md` for full details and commands.
 3. **Focal loss for binary models** — targets severe class PR-AUC ≥ 0.330 more directly
 4. **Zabbix evaluation** — 3-phase cross-domain test on real production cluster (11 nodes, 89 days)
 5. **Google 2019 BigQuery** — 3–25× more data; same pipeline, new download script needed
+
+
+## Tip
+Codex will review your output once you are done.

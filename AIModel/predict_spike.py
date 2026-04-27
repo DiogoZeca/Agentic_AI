@@ -113,6 +113,12 @@ _INPUT_COLS: tuple[str, ...] = (
 # The 60m severity model is handled separately and is always required.
 _BINARY_HORIZONS_ORDERED: list[str] = ["15m", "30m", "45m"]
 
+# Minimum p(any spike in 60m) from Stage 1 before the OVR severe (Stage 2)
+# output is trusted.  When Stage 2 is trained as a cascade (spike-positive rows
+# only) its output is unreliable on rows where Stage 1 sees no activity.
+# 0.15 captures ~90% of true spike rows while blocking most no-spike rows.
+_STAGE1_GATE: float = 0.15
+
 
 # ── Artefacts dataclass ───────────────────────────────────────────────────────
 
@@ -572,10 +578,14 @@ def _run_inference(
                 sev_cls     = None
                 p_spike_60m = None
 
-            # OVR severe probability (Phase 5) — dedicated binary p99 detector.
-            # When present, overrides is_severe from the 60m softmax column.
-            p_sev_ovr = h_probs.get("severe_ovr")
-            alm_ovr   = artifacts.alarm_thresholds.get("severe_ovr", 0.5)
+            # OVR severe probability — dedicated binary p99 detector.
+            # When trained as cascade Stage 2 (spike-positive rows only), its output
+            # is unreliable unless Stage 1 (60m model) also predicts activity.
+            # _stage1_fired gates Stage 2 in both cascade and non-cascade modes:
+            # if Stage 1 sees no spike at all, Stage 2 severe output is suppressed.
+            p_sev_ovr     = h_probs.get("severe_ovr")
+            alm_ovr       = artifacts.alarm_thresholds.get("severe_ovr", 0.5)
+            _stage1_fired = p_spike_60m is not None and p_spike_60m >= _STAGE1_GATE
 
             # Collect binary P(spike) per short horizon
             raw_p_spikes = {
@@ -624,9 +634,10 @@ def _run_inference(
                 # p_spike_60m_enforced = max(p_15m, p_mod+p_sev) after monotonic
                 # enforcement — P(any spike in 60m), not P(severe specifically).
                 p_spike_60m_enforced = p_enforced.get("60m", p_spike_60m)
-                # is_severe: prefer OVR model when available (Phase 5)
+                # is_severe: prefer OVR / cascade Stage 2 model when available.
+                # Stage 2 is only consulted when Stage 1 signals any spike activity.
                 if p_sev_ovr is not None:
-                    is_severe_60m = bool(p_sev_ovr >= alm_ovr)
+                    is_severe_60m = bool(p_sev_ovr >= alm_ovr) if _stage1_fired else False
                 else:
                     is_severe_60m = bool(p_sev >= alm_60m)
                 imminence["60m"] = {
@@ -642,9 +653,9 @@ def _run_inference(
                        if p_sev_ovr is not None else {}),
                 }
 
-            # Top-level is_severe also uses OVR when available
+            # Top-level is_severe also uses OVR / cascade Stage 2 when available.
             if p_sev_ovr is not None:
-                top_is_severe = bool(p_sev_ovr >= alm_ovr)
+                top_is_severe = bool(p_sev_ovr >= alm_ovr) if _stage1_fired else False
             elif p_sev is not None:
                 top_is_severe = bool(p_sev >= artifacts.alarm_thresholds.get("60m", 0.5))
             else:
