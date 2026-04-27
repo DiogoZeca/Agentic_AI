@@ -13,8 +13,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```
 Agentic_AI/
 ├── CLAUDE.md                  ← this file
-├── DEVELOPMENT.md             ← full decision log and phase history
-├── session_state.md           ← anchor file: current work, next steps, VM procedure
 ├── docker-compose.yml         ← API + GPU training services
 ├── scripts/
 │   └── vm-setup.sh            ← one-shot GPU VM provisioning (Docker + NVIDIA Container Toolkit)
@@ -118,20 +116,22 @@ Use `--from-step N` to resume from any step. Use `--force` to clear a step's cac
 
 ## Model Architecture
 
-Three XGBoost models, all trained on the same 37-feature set:
+Four XGBoost models, all trained on the same 40-feature set:
 
 - **60m severity model** (`SpikeClassifier`, `multi:softprob`, 3 classes)
   Predicts: `no_spike` / `moderate` (p95 exceeded) / `severe` (p99 exceeded) in next 60 min.
   Primary metric: macro PR-AUC. Calibrated with isotonic regression on the val set.
 
-- **15m binary model** (`BinarySpikeClassifier`, `binary:logistic`)
-  Predicts: will any spike occur in the next 15 min?
-  Provides imminence signal alongside the 60m severity model.
+- **15m / 30m / 45m binary models** (`BinarySpikeClassifier`, `binary:logistic`)
+  Predicts: will any spike occur within the next N minutes?
+  Provides imminence/timing signal alongside the 60m severity model.
 
-- **OVR severe model** (`BinarySpikeClassifier`, `binary:logistic`)
-  Label: `spike_severe_ovr` — severe (class 2) vs everything else.
-  Dedicated binary classifier for the rare severe class (3.3% of training data).
-  Outputs `p_severe_ovr` in inference. Saved to `models/spike_severe_ovr/`.
+- **OVR severe model** (`BinarySpikeClassifier`, `binary:logistic`) — **cascade Stage 2**
+  Label: `spike_severe_ovr` — severe (class 2) vs moderate (class 1).
+  Trained only on spike-positive rows (moderate + severe), raising the severe fraction from
+  ~2.4% to ~19% so standard scale_pos_weight handles the imbalance without custom losses.
+  At inference, Stage 1 (60m model) gates Stage 2: only rows where `p(any spike) >= 0.15`
+  reach the OVR model. Outputs `p_severe_ovr`. Saved to `models/spike_severe_ovr/`.
 
 ## Data
 
@@ -154,13 +154,13 @@ Three XGBoost models, all trained on the same 37-feature set:
 | `disk_io` | float32 | Max mean disk I/O time |
 | `n_tasks` | int32 | Concurrent tasks in bucket |
 
-## Features (37 total)
+## Features (40 total)
 
 - **Raw:** `total_cpu, peak_cpu, total_mem, peak_mem, disk_io, n_tasks`
 - **Lags:** `cpu_lag_{1,12,24}`
 - **Trend:** `cpu_ewma_{6,24}, cpu_delta_{1,2}, cpu_rolling_std_6`
 - **Load ratio:** `cpu_per_task`
-- **Machine-relative (p95):** `cpu_vs_p95, cpu_vs_p95_delta, peak_cpu_vs_p95, spike_now, spike_in_last_{1,3,6}, time_since_last_spike, cpu_spike_rate_24`
+- **Machine-relative (p95):** `cpu_vs_p95, cpu_vs_p95_delta, cpu_vs_p95_slope_3, cpu_vs_p95_slope_6, time_to_p95_3, peak_cpu_vs_p95, spike_now, spike_in_last_{1,3,6}, time_since_last_spike, cpu_spike_rate_24`
 - **Machine-relative (p99):** `spike_severe_now, cpu_vs_p99, peak_cpu_vs_p99, band_position, band_width, spike_severe_in_last_{1,3,6}`
 - **Cluster:** `cluster_cpu_p90, machine_rank_in_cluster, task_dominance`
 - **Time:** `hour_sin, hour_cos`
@@ -169,12 +169,11 @@ Per-machine p95 and p99 thresholds are computed from training data only (no leak
 Minimum 10% gap between p99 and p95 is enforced to ensure a meaningful moderate band.
 
 **Dropped features (with reason):**
-- `dow_sin`/`dow_cos` (Phase 5): highest SHAP (0.356) but near-zero gain (0.011). Only 7 days
-  of data → 23 samples per label → confirmed temporal confound with the Google 2011 trace week.
-- `current_spike_streak`, `max_spike_streak_24h`, `current_severe_streak` (Phase 6): two
-  separate runs (stale + fresh Optuna) both gave 0.553 cal vs Phase 5 baseline of 0.574 — a
-  confirmed −0.021 regression. The streak features add noise/collinearity on top of the existing
-  `spike_in_last_{1,3,6}` history features. Reverted to 37-feature Phase 5 set.
+- `dow_sin`/`dow_cos`: highest SHAP (0.356) but near-zero gain (0.011). Only 7 days of data
+  → 23 samples per label → confirmed temporal confound with the Google 2011 trace week.
+- `current_spike_streak`, `max_spike_streak_24h`, `current_severe_streak`: two separate runs
+  (stale + fresh Optuna) both gave 0.553 cal vs 0.574 baseline — confirmed −0.021 regression.
+  Add noise/collinearity on top of the existing `spike_in_last_{1,3,6}` history features.
 
 ## Leakage Firewall
 
@@ -217,20 +216,16 @@ Binary labels (`spike_in_15m`, `spike_in_30m`, `spike_in_45m`) always use K=1.
 
 ## Performance History
 
-| Phase | K | Features | 60m CV PR-AUC | 60m Test PR-AUC | Severe (raw) | OVR severe | Notes |
-|-------|---|----------|---------------|-----------------|--------------|------------|-------|
-| Phase 5 | 1 | 37 | 0.559 ± 0.008 | **0.574** (cal) | 0.322 | — | K=1 reference |
-| Phase 6 | 1 | 40 | 0.567 ± 0.009 | 0.554 (cal) | 0.277 | — | Streak features — reverted |
-| K=2 baseline (old) | 2 | 37 | 0.500 ± 0.005 | 0.547 (cal) | 0.259 | 0.259 | Fewer Optuna trials |
-| K=3 baseline | 3 | 37 | 0.483 ± 0.007 | 0.516 (cal) | 0.155 | — | More persistent; drift warning |
-| Phase 8 | 2 | 42 | 0.499 ± 0.005 | 0.548 (cal) | 0.264 | ~0.233 | FFT spectral — flat; reverted |
-| **K=2 production** | **2** | **37** | **0.4995 ± 0.0054** | **0.547 (cal)** | **0.257** | **0.339** | **Current default — fresh 150-trial Optuna** |
+| Model | Test PR-AUC | Test ROC-AUC | Alarm P/R | Notes |
+|-------|-------------|--------------|-----------|-------|
+| 60m severity | **0.547** (cal) | 0.849 | 0.429/0.309 @ 0.25 | K=2, 40 features, 150-trial Optuna |
+| 15m binary | **0.575** | 0.912 | 0.605/0.496 @ 0.80 | |
+| 30m binary | **0.564** | 0.878 | 0.569/0.497 @ 0.70 | |
+| 45m binary | **0.563** | 0.860 | 0.535/0.524 @ 0.65 | |
+| OVR severe (cascade Stage 2) | **0.543** (spike-positive subset) | 0.761 | 0.425/0.718 @ 0.50 | Severe ~19% of training rows |
 
-Per-class targets (60m test): `no_spike` ≈ 0.970 / `moderate` ≈ 0.367 / `severe` ≥ 0.330.
-Alarm threshold 0.25 → Precision 0.446 / Recall 0.306 on test (calibrated probs).
-
-15m binary: CV 0.582 ± 0.008 / Test PR-AUC 0.575 / ROC-AUC 0.911 / alarm @ 0.80 → P 0.60 R 0.52.
-OVR severe: Test PR-AUC **0.339** / ROC-AUC 0.863 / alarm @ 0.85 → P 0.40 R 0.35.
+OVR severe note: 0.543 is measured on spike-positive test rows (base rate ~25%), not the full test
+set. The baseline trained on all rows scored 0.328 PR-AUC at 2.4% positive rate — not comparable.
 
 ## Training Artifacts
 
@@ -239,7 +234,7 @@ All written to `--artifacts-dir` (default `data/full_run/`):
 | File | Description |
 |------|-------------|
 | `cluster_agg.parquet` | Step 1 cache — raw CSV aggregated to 5-min buckets |
-| `cluster_features.parquet` | Step 2 cache — 39 features per machine-bucket |
+| `cluster_features.parquet` | Step 2 cache — 40 features per machine-bucket |
 | `spike_thresholds.parquet` | Per-machine p95 + p99 thresholds (from training data only) |
 | `models/spike/spike_model.json` | 60m XGBoost model weights |
 | `models/spike/spike_model.meta.json` | Feature column list + XGBoost version (needed for correct column order on load) |
@@ -253,17 +248,6 @@ All written to `--artifacts-dir` (default `data/full_run/`):
 | `models/spike_severe_ovr/spike_model.json` | OVR severe binary XGBoost model |
 | `models/spike_severe_ovr/spike_config.json` | Config + CV summary |
 | `run_config.json` | All CLI args + timestamp (reproducibility) |
-
-## Upcoming Work (priority order)
-
-See `session_state.md` for full details and commands.
-
-1. **K-of-N ablation** — compare K=1, K=2, K=3 label definitions on the same 39-feature set
-2. **FFT spectral features** — dominant frequency + energy bands from the 24-bucket CPU window
-3. **Focal loss for binary models** — targets severe class PR-AUC ≥ 0.330 more directly
-4. **Zabbix evaluation** — 3-phase cross-domain test on real production cluster (11 nodes, 89 days)
-5. **Google 2019 BigQuery** — 3–25× more data; same pipeline, new download script needed
-
 
 ## Tip
 Codex will review your output once you are done.

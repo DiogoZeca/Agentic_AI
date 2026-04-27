@@ -207,54 +207,6 @@ def _resolve_device(device: str) -> str:
     return device
 
 
-# ── Focal loss ───────────────────────────────────────────────────────────────
-
-
-def focal_binary_obj(
-    preds:  np.ndarray,
-    dtrain: xgb.DMatrix,
-    *,
-    alpha: float = 0.25,
-    gamma: float = 2.0,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Focal loss objective for XGBoost binary classification (Lin et al. 2017).
-
-    Down-weights well-classified (easy) examples so training focuses on hard
-    examples and the rare positive class.  When gamma=0 and alpha=0.5 this
-    degenerates to standard weighted binary cross-entropy.
-
-    Parameters
-    ----------
-    preds  : raw logit predictions (before sigmoid) from the XGBoost booster.
-    dtrain : DMatrix carrying ground-truth labels (0 or 1).
-    alpha  : balance weight for the positive class (0–1).  0.25 is the paper
-             default — it reduces the loss contribution of easy negatives.
-    gamma  : focusing exponent.  0 = standard BCE; 2 = standard focal loss.
-             Higher values further suppress easy examples.
-
-    Returns
-    -------
-    (grad, hess) — first and second derivatives of focal loss w.r.t. preds.
-    """
-    y   = dtrain.get_label()
-    eps = 1e-7
-    p   = np.clip(1.0 / (1.0 + np.exp(-preds)), eps, 1.0 - eps)  # sigmoid
-
-    at = np.where(y == 1, alpha,       1.0 - alpha)   # per-sample class weight
-    pt = np.where(y == 1, p,           1.0 - p)       # prob of ground-truth class
-
-    # Gradient: dFL/df — degenerates to ±α*(p−y) when gamma=0
-    g1   = alpha * (1.0 - p) ** gamma * (gamma * p * np.log(p) + p - 1.0)
-    g0   = (1.0 - alpha) * p ** gamma * (p - gamma * (1.0 - p) * np.log(1.0 - p))
-    grad = np.where(y == 1, g1, g0)
-
-    # Hessian approximation: focal_weight × BCE hessian.
-    # Always non-negative; recovers standard BCE hessian when gamma=0.
-    hess = np.maximum(at * (1.0 - pt) ** gamma * p * (1.0 - p), eps)
-
-    return grad, hess
-
-
 # ── SpikeClassifier ───────────────────────────────────────────────────────────
 
 
@@ -581,18 +533,9 @@ class BinarySpikeClassifier:
         early_stopping_rounds: int | None = None,
         device:                str        = "cpu",
         random_state:          int        = 42,
-        use_focal_loss:        bool       = False,
-        focal_alpha:           float      = 0.25,
-        focal_gamma:           float      = 2.0,
     ) -> None:
         device = _resolve_device(device)
-        self._feature_cols:         list[str]          = list(_X_COLS)
-        self._use_focal_loss:       bool               = use_focal_loss
-        self._focal_alpha:          float              = focal_alpha
-        self._focal_gamma:          float              = focal_gamma
-        self._n_estimators:         int                = n_estimators
-        self._early_stopping_rounds: int | None        = early_stopping_rounds
-        self._booster:              xgb.Booster | None = None
+        self._feature_cols: list[str] = list(_X_COLS)
 
         self._model = xgb.XGBClassifier(
             objective             = "binary:logistic",
@@ -615,28 +558,6 @@ class BinarySpikeClassifier:
             random_state          = random_state,
             n_jobs                = 1 if device == "cuda" else -1,
         )
-
-        # Params for the xgb.train() focal path — stored at init time so they
-        # are available in fit() without reconstructing from XGBClassifier internals.
-        self._booster_params: dict = {
-            "tree_method":           "hist",
-            "device":                device,
-            "max_depth":             max_depth,
-            "learning_rate":         learning_rate,
-            "subsample":             subsample,
-            "colsample_bytree":      colsample_bytree,
-            "min_child_weight":      min_child_weight,
-            "max_delta_step":        max_delta_step,
-            "gamma":                 gamma,
-            "reg_alpha":             reg_alpha,
-            "reg_lambda":            reg_lambda,
-            "scale_pos_weight":      scale_pos_weight,
-            "seed":                  random_state,
-            "eval_metric":           "aucpr",
-            "monotone_constraints":  _BINARY_MONOTONE_STR,
-            "verbosity":             0,
-            **({"nthread": 1} if device == "cuda" else {}),
-        }
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -668,33 +589,7 @@ class BinarySpikeClassifier:
         """
         arr   = self._to_array(X)
         y_arr = y if isinstance(y, np.ndarray) else y.values
-
-        if not self._use_focal_loss:
-            self._model.fit(arr, y_arr, eval_set=eval_set, verbose=False)
-            return self
-
-        # Focal loss path — xgb.train() with custom gradient/hessian.
-        # scale_pos_weight is passed via _booster_params; focal_alpha is fixed
-        # at 0.5 (neutral weighting) so only focal_gamma drives hard-example focusing.
-        from functools import partial
-        obj_fn = partial(focal_binary_obj, alpha=self._focal_alpha, gamma=self._focal_gamma)
-
-        dtrain = xgb.DMatrix(arr, label=y_arr)
-        evals  = []
-        if eval_set is not None:
-            X_v, y_v = eval_set[0]
-            X_v_arr  = X_v if isinstance(X_v, np.ndarray) else self._to_array(X_v)
-            y_v_arr  = y_v if isinstance(y_v, np.ndarray) else np.asarray(y_v)
-            evals    = [(xgb.DMatrix(X_v_arr, label=y_v_arr), "validation")]
-
-        self._booster = xgb.train(
-            self._booster_params,
-            dtrain,
-            num_boost_round       = self._n_estimators,
-            obj                   = obj_fn,
-            evals                 = evals,
-            early_stopping_rounds = self._early_stopping_rounds if evals else None,
-        )
+        self._model.fit(arr, y_arr, eval_set=eval_set, verbose=False)
         return self
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
@@ -706,13 +601,7 @@ class BinarySpikeClassifier:
         Column order: [P(no_spike), P(spike)].
         Rows sum to 1.0.
         """
-        arr = self._to_array(X)
-        if self._booster is not None:
-            # Focal path: booster outputs raw logits — apply sigmoid manually.
-            raw = self._booster.predict(xgb.DMatrix(arr), output_margin=True)
-            p   = np.clip(1.0 / (1.0 + np.exp(-raw.astype("float64"))), 0.0, 1.0)
-            return np.column_stack([1.0 - p, p])
-        return self._model.predict_proba(arr)  # shape (n, 2)
+        return self._model.predict_proba(self._to_array(X))  # shape (n, 2)
 
     def find_alarm_threshold(
         self,
@@ -808,7 +697,7 @@ class BinarySpikeClassifier:
 
         Two files are written:
           <path>           — XGBoost native JSON model
-          <path>.meta.json — feature column order + XGBoost version + focal flag
+          <path>.meta.json — feature column order + XGBoost version
 
         Parameters
         ----------
@@ -816,16 +705,11 @@ class BinarySpikeClassifier:
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-
-        if self._booster is not None:
-            self._booster.save_model(str(path))
-        else:
-            self._model.save_model(str(path))
+        self._model.save_model(str(path))
 
         meta = {
             "feature_cols":    self._feature_cols,
             "xgboost_version": xgb.__version__,
-            "use_focal_loss":  self._use_focal_loss,
         }
         meta_path = path.with_suffix(".meta.json")
         meta_path.write_text(json.dumps(meta, indent=2))
@@ -857,16 +741,9 @@ class BinarySpikeClassifier:
                 "Re-save the model with BinarySpikeClassifier.save()."
             )
 
-        meta       = json.loads(meta_path.read_text())
-        use_focal  = meta.get("use_focal_loss", False)
-        obj        = cls(use_focal_loss=use_focal)
-
-        if use_focal:
-            obj._booster = xgb.Booster()
-            obj._booster.load_model(str(path))
-        else:
-            obj._model.load_model(str(path))
-
+        meta              = json.loads(meta_path.read_text())
+        obj               = cls()
+        obj._model.load_model(str(path))
         obj._feature_cols = meta["feature_cols"]
         return obj
 

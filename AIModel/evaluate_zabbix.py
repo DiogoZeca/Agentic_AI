@@ -315,7 +315,6 @@ def _load_model(model_dir: Path) -> dict:
         "alarm_threshold" : float(config["alarm_threshold"]),
         "calibrators"     : calibrators,
         "config"          : config,
-        "use_focal"       : bool(meta.get("use_focal_loss", False)),
     }
 
 
@@ -399,10 +398,7 @@ def _eval_binary(
         return {"n_test": len(test_df), "n_pos": n_pos, "pr_auc": float("nan"), "roc_auc": float("nan")}
 
     raw = model_info["booster"].inplace_predict(X, strict_shape=True)  # (n, 1)
-    if model_info.get("use_focal", False):
-        p1 = np.clip(1.0 / (1.0 + np.exp(-raw[:, 0].astype("float64"))), 0.0, 1.0)
-    else:
-        p1 = raw[:, 0].astype("float64")
+    p1 = raw[:, 0].astype("float64")
 
     pr_auc  = float(average_precision_score(y_true, p1))
     roc_auc = float(roc_auc_score(y_true, p1))
@@ -580,8 +576,6 @@ def _recalibrate_binary(
 
     def _predict(X: np.ndarray) -> np.ndarray:
         raw = model_info["booster"].inplace_predict(X, strict_shape=True)
-        if model_info.get("use_focal", False):
-            return np.clip(1.0 / (1.0 + np.exp(-raw[:, 0].astype("float64"))), 0.0, 1.0)
         return raw[:, 0].astype("float64")
 
     p1_val  = _predict(X_val)

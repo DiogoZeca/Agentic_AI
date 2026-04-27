@@ -199,7 +199,6 @@ def _run_walk_forward_cv(
     label_col:      str        = "severity_in_60m",
     cv_gap:         int        = _CV_GAP,
     binary:         bool       = False,
-    use_focal_loss: bool       = False,
 ) -> dict[str, float]:
     """Run walk-forward CV on the training split.
 
@@ -272,7 +271,6 @@ def _run_walk_forward_cv(
                 device           = device,
                 random_state     = seed,
                 scale_pos_weight = spw,
-                use_focal_loss   = use_focal_loss,
                 **(model_kwargs or {}),
             )
             clf.fit(X_tr, y_tr)
@@ -599,11 +597,7 @@ def _compute_feature_importance(
     X_val       : validation feature DataFrame (used for SHAP background sample).
     output_path : destination for feature_importance.csv.
     """
-    # The focal-loss path stores the fitted booster in clf._booster (xgb.Booster);
-    # the standard path stores it inside clf._model (XGBClassifier). Both expose
-    # an identical xgb.Booster API, so the rest of this function is path-agnostic.
-    booster  = (clf._booster if getattr(clf, "_booster", None) is not None
-                else clf._model.get_booster())
+    booster  = clf._model.get_booster()
     gain_raw = booster.get_score(importance_type="gain")
 
     # XGBoost stores features as "f0", "f1", ... when the model is trained on
@@ -756,7 +750,6 @@ def _run_optuna_search(
     binary:                bool       = False,
     n_estimators:          int        = 2000,
     early_stopping_rounds: int        = 150,
-    use_focal_loss:        bool       = False,
 ) -> dict:
     """Bayesian hyperparameter search using Optuna TPE sampler.
 
@@ -962,13 +955,6 @@ def _run_optuna_search(
         if len(np.unique(y_inner_val)) < 2:
             return 0.0
         if binary:
-            focal_kwargs: dict = {}
-            if use_focal_loss:
-                focal_kwargs = {
-                    "use_focal_loss": True,
-                    "focal_alpha":    0.5,  # neutral; scale_pos_weight handles class weighting
-                    "focal_gamma":    trial.suggest_float("focal_gamma", 0.5, 4.0),
-                }
             clf = BinarySpikeClassifier(
                 device                = device,
                 random_state          = seed,
@@ -976,7 +962,6 @@ def _run_optuna_search(
                 n_estimators          = n_estimators,
                 early_stopping_rounds = early_stopping_rounds,
                 **params,
-                **focal_kwargs,
             )
             clf.fit(X_inner_tr_arr, y_inner_tr_arr,
                     eval_set=[(X_inner_val_arr, y_inner_val_arr)])
@@ -1044,7 +1029,6 @@ def _train_binary_horizon(
     n_estimators:          int         = 2000,
     early_stopping_rounds: int         = 150,
     min_alarm_precision:   float       = 0.0,
-    use_focal_loss:        bool        = False,
     cascade_stage2:        bool        = False,
 ) -> dict:
     """Train and evaluate a BinarySpikeClassifier for one short horizon.
@@ -1142,7 +1126,6 @@ def _train_binary_horizon(
             binary                = True,
             n_estimators          = n_estimators,
             early_stopping_rounds = early_stopping_rounds,
-            use_focal_loss        = use_focal_loss,
         )
         best_params_path.write_text(json.dumps(search_result, indent=2))
         model_kwargs: dict = search_result["params"]
@@ -1162,22 +1145,12 @@ def _train_binary_horizon(
             label_col       = label_col,
             cv_gap          = cv_gap,
             binary          = True,
-            use_focal_loss  = use_focal_loss,
         )
 
     # Final model training — strip any cached n_estimators so the explicit
     # parameter value (default 2000, overridable for tests) takes precedence.
     final_model_kwargs = {k: v for k, v in (model_kwargs or {}).items()
                           if k != "n_estimators"}
-    focal_kwargs: dict = {}
-    if use_focal_loss:
-        # Extract focal_gamma from Optuna best_params (focal_alpha is fixed at 0.5).
-        focal_kwargs = {
-            "use_focal_loss": True,
-            "focal_alpha":    0.5,  # neutral; scale_pos_weight handles class weighting
-            "focal_gamma":    float(final_model_kwargs.pop("focal_gamma", 2.0)),
-        }
-        final_model_kwargs.pop("focal_alpha", None)  # purge stale cached value if present
     clf = BinarySpikeClassifier(
         device                = device,
         random_state          = seed,
@@ -1185,7 +1158,6 @@ def _train_binary_horizon(
         n_estimators          = n_estimators,
         early_stopping_rounds = early_stopping_rounds,
         **final_model_kwargs,
-        **focal_kwargs,
     )
     X_val_arr = val_df[_X_COLS].astype("float32").values
     clf.fit(train_df[_X_COLS], train_df[label_col],
@@ -1270,8 +1242,6 @@ def run(
     early_stopping_rounds: int          = 150,
     min_alarm_precision:   float        = 0.0,
     min_future_windows:    int          = 1,
-    use_focal_loss:        bool         = False,
-    use_focal_loss_ovr:    bool         = False,
     cascade_stage2_ovr:    bool         = False,
     train_ovr_only:        bool         = False,
 ) -> dict:
@@ -1295,14 +1265,6 @@ def run(
                          At least this many of the 12 future windows must exceed
                          the threshold for a positive label.  Default=1 (current
                          any-exceedance behaviour).  Use 2 or 3 for ablation runs.
-    use_focal_loss      : when True, trains ALL binary models (15m, 30m, 45m, OVR severe)
-                         with focal loss instead of binary cross-entropy.  focal_gamma
-                         is Optuna-tuned; focal_alpha is fixed at 0.5 so scale_pos_weight
-                         continues to handle class weighting.  Default=False.
-    use_focal_loss_ovr  : when True, applies focal loss ONLY to the OVR severe model,
-                         leaving the 15m/30m/45m models unchanged.  Intended for targeted
-                         experiments on the rare-class (2.4%) model without risking
-                         regressions on the better-balanced horizon models.  Default=False.
     cascade_stage2_ovr  : when True, trains the OVR severe model as Stage 2 of a cascade.
                          Training is restricted to spike-positive rows (moderate + severe)
                          only, raising the severe class fraction from ~2.4% to ~19% and
@@ -1421,7 +1383,6 @@ def run(
             n_estimators          = n_estimators,
             early_stopping_rounds = early_stopping_rounds,
             min_alarm_precision   = min_alarm_precision,
-            use_focal_loss        = use_focal_loss or use_focal_loss_ovr,
             cascade_stage2        = cascade_stage2_ovr,
         )
         elapsed = (time.perf_counter() - t_pipeline) / 60
@@ -1708,7 +1669,7 @@ def run(
     binary_device = "cpu" if device == "cuda" else device
     log.info("  Binary models will use device='%s' (avoids VRAM conflict with 60m GPU residual)", binary_device)
 
-    # ── Binary horizon models (15m only — 30m/45m dropped in Fix 3) ───────────
+    # ── Binary horizon models (15m / 30m / 45m) ──────────────────────────────
     # Log available RAM before starting binary training — helpful for OOM diagnosis.
     try:
         import psutil
@@ -1757,7 +1718,6 @@ def run(
             n_estimators          = n_estimators,
             early_stopping_rounds = early_stopping_rounds,
             min_alarm_precision   = min_alarm_precision,
-            use_focal_loss        = use_focal_loss,
         )
         binary_results[h_name] = h_result
 
@@ -1787,7 +1747,6 @@ def run(
         n_estimators          = n_estimators,
         early_stopping_rounds = early_stopping_rounds,
         min_alarm_precision   = min_alarm_precision,
-        use_focal_loss        = use_focal_loss or use_focal_loss_ovr,
         cascade_stage2        = cascade_stage2_ovr,
     )
     binary_results["severe_ovr"] = ovr_result
@@ -1997,33 +1956,6 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--use-focal-loss",
-        dest    = "use_focal_loss",
-        action  = "store_true",
-        default = False,
-        help    = (
-            "Train ALL binary models (15m, 30m, 45m, OVR severe) with focal loss instead "
-            "of binary cross-entropy.  focal_gamma ∈ [0.5, 4.0] is added to the Optuna "
-            "search space; focal_alpha is fixed at 0.5 (neutral) so scale_pos_weight "
-            "continues to handle class weighting.  "
-            "Use --focal-loss-ovr-only to restrict focal loss to the OVR severe model only."
-        ),
-    )
-    p.add_argument(
-        "--focal-loss-ovr-only",
-        dest    = "use_focal_loss_ovr",
-        action  = "store_true",
-        default = os.environ.get("FOCAL_LOSS_OVR", "false").lower() == "true",
-        help    = (
-            "Apply focal loss ONLY to the OVR severe model, leaving the 15m/30m/45m "
-            "models trained with standard binary cross-entropy + scale_pos_weight.  "
-            "Recommended for targeted experiments: the OVR severe model has 2.4%% "
-            "positive rate while the horizon models have 7.9–14.9%%, where focal loss "
-            "adds complexity without clear benefit.  "
-            "Also reads env var FOCAL_LOSS_OVR=true (docker-compose override)."
-        ),
-    )
-    p.add_argument(
         "--cascade-stage2-ovr",
         dest    = "cascade_stage2_ovr",
         action  = "store_true",
@@ -2072,8 +2004,6 @@ if __name__ == "__main__":
         n_estimators         = args.n_estimators,
         min_alarm_precision  = args.min_alarm_precision,
         min_future_windows   = args.min_future_windows,
-        use_focal_loss       = args.use_focal_loss,
-        use_focal_loss_ovr   = args.use_focal_loss_ovr,
         cascade_stage2_ovr   = args.cascade_stage2_ovr,
         train_ovr_only       = args.train_ovr_only,
     )
