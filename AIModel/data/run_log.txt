@@ -1,677 +1,0 @@
- Image spike-train Building 
-#1 [internal] load local bake definitions
-#1 reading from stdin 503B done
-#1 DONE 0.0s
-
-#2 [internal] load build definition from Dockerfile.training
-#2 transferring dockerfile: 3.15kB done
-#2 DONE 0.1s
-
-#3 [internal] load metadata for docker.io/nvidia/cuda:12.4.1-runtime-ubuntu22.04
-#3 DONE 1.8s
-
-#4 [internal] load .dockerignore
-#4 transferring context: 333B done
-#4 DONE 0.1s
-
-#5 [internal] load build context
-#5 DONE 0.0s
-
-#6 [1/7] FROM docker.io/nvidia/cuda:12.4.1-runtime-ubuntu22.04@sha256:517da2300c184c9999ec203c2665244bdebd3578d12fcc7065e83667932643d9
-#6 resolve docker.io/nvidia/cuda:12.4.1-runtime-ubuntu22.04@sha256:517da2300c184c9999ec203c2665244bdebd3578d12fcc7065e83667932643d9
-#6 resolve docker.io/nvidia/cuda:12.4.1-runtime-ubuntu22.04@sha256:517da2300c184c9999ec203c2665244bdebd3578d12fcc7065e83667932643d9 0.0s done
-#6 ...
-
-#5 [internal] load build context
-#5 transferring context: 178.12kB done
-#5 DONE 0.1s
-
-#6 [1/7] FROM docker.io/nvidia/cuda:12.4.1-runtime-ubuntu22.04@sha256:517da2300c184c9999ec203c2665244bdebd3578d12fcc7065e83667932643d9
-#6 DONE 0.4s
-
-#7 [2/7] RUN apt-get update  && apt-get install -y --no-install-recommends         python3 python3-pip libgomp1  && rm -rf /var/lib/apt/lists/*
-#7 0.621 Get:1 https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64  InRelease [1581 B]
-#7 0.758 Get:2 http://security.ubuntu.com/ubuntu jammy-security InRelease [129 kB]
-#7 0.758 Get:3 http://archive.ubuntu.com/ubuntu jammy InRelease [270 kB]
-#7 1.103 Get:4 http://archive.ubuntu.com/ubuntu jammy-updates InRelease [128 kB]
-#7 1.164 Get:5 http://security.ubuntu.com/ubuntu jammy-security/universe amd64 Packages [1309 kB]
-#7 1.185 Get:6 http://archive.ubuntu.com/ubuntu jammy-backports InRelease [127 kB]
-#7 1.269 Get:7 http://archive.ubuntu.com/ubuntu jammy/multiverse amd64 Packages [266 kB]
-#7 1.327 Get:8 http://archive.ubuntu.com/ubuntu jammy/main amd64 Packages [1792 kB]
-#7 1.457 Get:9 http://security.ubuntu.com/ubuntu jammy-security/main amd64 Packages [3842 kB]
-#7 1.523 Get:10 http://archive.ubuntu.com/ubuntu jammy/universe amd64 Packages [17.5 MB]
-#7 1.687 Get:11 http://security.ubuntu.com/ubuntu jammy-security/multiverse amd64 Packages [62.6 kB]
-#7 1.689 Get:12 http://security.ubuntu.com/ubuntu jammy-security/restricted amd64 Packages [6803 kB]
-#7 1.706 Get:13 https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64  Packages [2475 kB]
-#7 5.036 Get:14 http://archive.ubuntu.com/ubuntu jammy/restricted amd64 Packages [164 kB]
-#7 5.037 Get:15 http://archive.ubuntu.com/ubuntu jammy-updates/restricted amd64 Packages [7125 kB]
-#7 5.946 Get:16 http://archive.ubuntu.com/ubuntu jammy-updates/multiverse amd64 Packages [70.9 kB]
-#7 5.946 Get:17 http://archive.ubuntu.com/ubuntu jammy-updates/universe amd64 Packages [1621 kB]
-#7 5.953 Get:18 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 Packages [4217 kB]
-#7 6.098 Get:19 http://archive.ubuntu.com/ubuntu jammy-backports/universe amd64 Packages [35.6 kB]
-#7 6.099 Get:20 http://archive.ubuntu.com/ubuntu jammy-backports/main amd64 Packages [84.0 kB]
-#7 7.028 Fetched 48.0 MB in 7s (7326 kB/s)
-#7 7.028 Reading package lists...
-#7 7.744 Reading package lists...
-#7 8.416 Building dependency tree...
-#7 8.561 Reading state information...
-#7 8.668 The following additional packages will be installed:
-#7 8.668   gcc-12-base libexpat1 libgcc-s1 libmpdec3 libpython3-stdlib
-#7 8.669   libpython3.10-minimal libpython3.10-stdlib libstdc++6 media-types
-#7 8.669   python3-distutils python3-lib2to3 python3-minimal python3-pkg-resources
-#7 8.669   python3-setuptools python3-wheel python3.10 python3.10-minimal
-#7 8.669 Suggested packages:
-#7 8.669   python3-doc python3-tk python3-venv python-setuptools-doc python3.10-venv
-#7 8.669   python3.10-doc binutils binfmt-support
-#7 8.669 Recommended packages:
-#7 8.669   build-essential python3-dev
-#7 8.739 The following NEW packages will be installed:
-#7 8.739   libexpat1 libgomp1 libmpdec3 libpython3-stdlib libpython3.10-minimal
-#7 8.739   libpython3.10-stdlib media-types python3 python3-distutils python3-lib2to3
-#7 8.739   python3-minimal python3-pip python3-pkg-resources python3-setuptools
-#7 8.739   python3-wheel python3.10 python3.10-minimal
-#7 8.740 The following packages will be upgraded:
-#7 8.740   gcc-12-base libgcc-s1 libstdc++6
-#7 8.885 3 upgraded, 17 newly installed, 0 to remove and 55 not upgraded.
-#7 8.885 Need to get 8830 kB of archives.
-#7 8.885 After this operation, 32.4 MB of additional disk space will be used.
-#7 8.885 Get:1 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 libpython3.10-minimal amd64 3.10.12-1~22.04.15 [816 kB]
-#7 9.356 Get:2 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 libexpat1 amd64 2.4.7-1ubuntu0.7 [92.1 kB]
-#7 9.359 Get:3 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 python3.10-minimal amd64 3.10.12-1~22.04.15 [2275 kB]
-#7 9.497 Get:4 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 python3-minimal amd64 3.10.6-1~22.04.1 [24.3 kB]
-#7 9.498 Get:5 http://archive.ubuntu.com/ubuntu jammy/main amd64 media-types all 7.0.0 [25.5 kB]
-#7 9.498 Get:6 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 gcc-12-base amd64 12.3.0-1ubuntu1~22.04.3 [216 kB]
-#7 9.504 Get:7 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 libgcc-s1 amd64 12.3.0-1ubuntu1~22.04.3 [53.9 kB]
-#7 9.505 Get:8 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 libstdc++6 amd64 12.3.0-1ubuntu1~22.04.3 [699 kB]
-#7 9.525 Get:9 http://archive.ubuntu.com/ubuntu jammy/main amd64 libmpdec3 amd64 2.5.1-2build2 [86.8 kB]
-#7 9.527 Get:10 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 libpython3.10-stdlib amd64 3.10.12-1~22.04.15 [1850 kB]
-#7 9.570 Get:11 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 python3.10 amd64 3.10.12-1~22.04.15 [508 kB]
-#7 9.577 Get:12 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 libpython3-stdlib amd64 3.10.6-1~22.04.1 [6812 B]
-#7 10.17 Get:13 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 python3 amd64 3.10.6-1~22.04.1 [22.8 kB]
-#7 10.17 Get:14 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 python3-pkg-resources all 59.6.0-1.2ubuntu0.22.04.3 [133 kB]
-#7 10.17 Get:15 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 libgomp1 amd64 12.3.0-1ubuntu1~22.04.3 [127 kB]
-#7 10.17 Get:16 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 python3-lib2to3 all 3.10.8-1~22.04 [77.6 kB]
-#7 10.17 Get:17 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 python3-distutils all 3.10.8-1~22.04 [139 kB]
-#7 10.17 Get:18 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 python3-setuptools all 59.6.0-1.2ubuntu0.22.04.3 [340 kB]
-#7 10.17 Get:19 http://archive.ubuntu.com/ubuntu jammy-updates/universe amd64 python3-wheel all 0.37.1-2ubuntu0.22.04.1 [32.0 kB]
-#7 10.18 Get:20 http://archive.ubuntu.com/ubuntu jammy-updates/universe amd64 python3-pip all 22.0.2+dfsg-1ubuntu0.7 [1306 kB]
-#7 10.66 debconf: delaying package configuration, since apt-utils is not installed
-#7 10.70 Fetched 8830 kB in 1s (6119 kB/s)
-#7 10.79 Selecting previously unselected package libpython3.10-minimal:amd64.
-#7 10.79 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 5316 files and directories currently installed.)
-#7 10.83 Preparing to unpack .../libpython3.10-minimal_3.10.12-1~22.04.15_amd64.deb ...
-#7 10.83 Unpacking libpython3.10-minimal:amd64 (3.10.12-1~22.04.15) ...
-#7 10.97 Selecting previously unselected package libexpat1:amd64.
-#7 10.97 Preparing to unpack .../libexpat1_2.4.7-1ubuntu0.7_amd64.deb ...
-#7 10.98 Unpacking libexpat1:amd64 (2.4.7-1ubuntu0.7) ...
-#7 11.10 Selecting previously unselected package python3.10-minimal.
-#7 11.10 Preparing to unpack .../python3.10-minimal_3.10.12-1~22.04.15_amd64.deb ...
-#7 11.14 Unpacking python3.10-minimal (3.10.12-1~22.04.15) ...
-#7 11.29 Setting up libpython3.10-minimal:amd64 (3.10.12-1~22.04.15) ...
-#7 11.33 Setting up libexpat1:amd64 (2.4.7-1ubuntu0.7) ...
-#7 11.37 Setting up python3.10-minimal (3.10.12-1~22.04.15) ...
-#7 11.91 Selecting previously unselected package python3-minimal.
-#7 11.91 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 5620 files and directories currently installed.)
-#7 11.92 Preparing to unpack .../python3-minimal_3.10.6-1~22.04.1_amd64.deb ...
-#7 11.92 Unpacking python3-minimal (3.10.6-1~22.04.1) ...
-#7 12.01 Selecting previously unselected package media-types.
-#7 12.01 Preparing to unpack .../media-types_7.0.0_all.deb ...
-#7 12.05 Unpacking media-types (7.0.0) ...
-#7 12.14 Preparing to unpack .../gcc-12-base_12.3.0-1ubuntu1~22.04.3_amd64.deb ...
-#7 12.18 Unpacking gcc-12-base:amd64 (12.3.0-1ubuntu1~22.04.3) over (12.3.0-1ubuntu1~22.04) ...
-#7 12.33 Setting up gcc-12-base:amd64 (12.3.0-1ubuntu1~22.04.3) ...
-#7 12.46 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 5647 files and directories currently installed.)
-#7 12.47 Preparing to unpack .../libgcc-s1_12.3.0-1ubuntu1~22.04.3_amd64.deb ...
-#7 12.51 Unpacking libgcc-s1:amd64 (12.3.0-1ubuntu1~22.04.3) over (12.3.0-1ubuntu1~22.04) ...
-#7 12.67 Setting up libgcc-s1:amd64 (12.3.0-1ubuntu1~22.04.3) ...
-#7 12.85 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 5647 files and directories currently installed.)
-#7 12.86 Preparing to unpack .../libstdc++6_12.3.0-1ubuntu1~22.04.3_amd64.deb ...
-#7 12.91 Unpacking libstdc++6:amd64 (12.3.0-1ubuntu1~22.04.3) over (12.3.0-1ubuntu1~22.04) ...
-#7 13.63 Setting up libstdc++6:amd64 (12.3.0-1ubuntu1~22.04.3) ...
-#7 13.76 Selecting previously unselected package libmpdec3:amd64.
-#7 13.76 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 5647 files and directories currently installed.)
-#7 13.76 Preparing to unpack .../libmpdec3_2.5.1-2build2_amd64.deb ...
-#7 13.80 Unpacking libmpdec3:amd64 (2.5.1-2build2) ...
-#7 13.88 Selecting previously unselected package libpython3.10-stdlib:amd64.
-#7 13.89 Preparing to unpack .../libpython3.10-stdlib_3.10.12-1~22.04.15_amd64.deb ...
-#7 13.89 Unpacking libpython3.10-stdlib:amd64 (3.10.12-1~22.04.15) ...
-#7 14.09 Selecting previously unselected package python3.10.
-#7 14.09 Preparing to unpack .../python3.10_3.10.12-1~22.04.15_amd64.deb ...
-#7 14.09 Unpacking python3.10 (3.10.12-1~22.04.15) ...
-#7 14.17 Selecting previously unselected package libpython3-stdlib:amd64.
-#7 14.17 Preparing to unpack .../libpython3-stdlib_3.10.6-1~22.04.1_amd64.deb ...
-#7 14.17 Unpacking libpython3-stdlib:amd64 (3.10.6-1~22.04.1) ...
-#7 14.31 Setting up python3-minimal (3.10.6-1~22.04.1) ...
-#7 14.63 Selecting previously unselected package python3.
-#7 14.63 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 6022 files and directories currently installed.)
-#7 14.64 Preparing to unpack .../0-python3_3.10.6-1~22.04.1_amd64.deb ...
-#7 14.65 Unpacking python3 (3.10.6-1~22.04.1) ...
-#7 14.76 Selecting previously unselected package python3-pkg-resources.
-#7 14.77 Preparing to unpack .../1-python3-pkg-resources_59.6.0-1.2ubuntu0.22.04.3_all.deb ...
-#7 14.77 Unpacking python3-pkg-resources (59.6.0-1.2ubuntu0.22.04.3) ...
-#7 14.88 Selecting previously unselected package libgomp1:amd64.
-#7 14.89 Preparing to unpack .../2-libgomp1_12.3.0-1ubuntu1~22.04.3_amd64.deb ...
-#7 14.89 Unpacking libgomp1:amd64 (12.3.0-1ubuntu1~22.04.3) ...
-#7 15.01 Selecting previously unselected package python3-lib2to3.
-#7 15.01 Preparing to unpack .../3-python3-lib2to3_3.10.8-1~22.04_all.deb ...
-#7 15.01 Unpacking python3-lib2to3 (3.10.8-1~22.04) ...
-#7 15.13 Selecting previously unselected package python3-distutils.
-#7 15.13 Preparing to unpack .../4-python3-distutils_3.10.8-1~22.04_all.deb ...
-#7 15.16 Unpacking python3-distutils (3.10.8-1~22.04) ...
-#7 15.26 Selecting previously unselected package python3-setuptools.
-#7 15.26 Preparing to unpack .../5-python3-setuptools_59.6.0-1.2ubuntu0.22.04.3_all.deb ...
-#7 15.29 Unpacking python3-setuptools (59.6.0-1.2ubuntu0.22.04.3) ...
-#7 15.39 Selecting previously unselected package python3-wheel.
-#7 15.40 Preparing to unpack .../6-python3-wheel_0.37.1-2ubuntu0.22.04.1_all.deb ...
-#7 15.43 Unpacking python3-wheel (0.37.1-2ubuntu0.22.04.1) ...
-#7 15.52 Selecting previously unselected package python3-pip.
-#7 15.53 Preparing to unpack .../7-python3-pip_22.0.2+dfsg-1ubuntu0.7_all.deb ...
-#7 15.53 Unpacking python3-pip (22.0.2+dfsg-1ubuntu0.7) ...
-#7 15.78 Setting up media-types (7.0.0) ...
-#7 15.85 Setting up libgomp1:amd64 (12.3.0-1ubuntu1~22.04.3) ...
-#7 15.89 Setting up libmpdec3:amd64 (2.5.1-2build2) ...
-#7 15.92 Setting up libpython3.10-stdlib:amd64 (3.10.12-1~22.04.15) ...
-#7 15.96 Setting up libpython3-stdlib:amd64 (3.10.6-1~22.04.1) ...
-#7 16.00 Setting up python3.10 (3.10.12-1~22.04.15) ...
-#7 16.51 Setting up python3 (3.10.6-1~22.04.1) ...
-#7 16.52 running python rtupdate hooks for python3.10...
-#7 16.52 running python post-rtupdate hooks for python3.10...
-#7 16.63 Setting up python3-lib2to3 (3.10.8-1~22.04) ...
-#7 16.74 Setting up python3-pkg-resources (59.6.0-1.2ubuntu0.22.04.3) ...
-#7 16.94 Setting up python3-distutils (3.10.8-1~22.04) ...
-#7 17.21 Setting up python3-setuptools (59.6.0-1.2ubuntu0.22.04.3) ...
-#7 17.53 Setting up python3-wheel (0.37.1-2ubuntu0.22.04.1) ...
-#7 17.69 Setting up python3-pip (22.0.2+dfsg-1ubuntu0.7) ...
-#7 18.46 Processing triggers for libc-bin (2.35-0ubuntu3.6) ...
-#7 DONE 25.1s
-
-#8 [3/7] WORKDIR /app
-#8 DONE 0.3s
-
-#9 [4/7] COPY requirements-inference.txt requirements-train.txt .
-#9 DONE 0.2s
-
-#10 [5/7] RUN pip3 install --no-cache-dir -r requirements-train.txt
-#10 0.755 Collecting xgboost<4.0.0,>=3.2.0
-#10 0.848   Downloading xgboost-3.2.0-py3-none-manylinux_2_28_x86_64.whl (131.7 MB)
-#10 6.999      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 131.7/131.7 MB 21.7 MB/s eta 0:00:00
-#10 7.328 Collecting pandas>=2.0.0
-#10 7.337   Downloading pandas-2.3.3-cp310-cp310-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (12.8 MB)
-#10 8.038      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 12.8/12.8 MB 16.7 MB/s eta 0:00:00
-#10 8.448 Collecting numpy>=1.24.0
-#10 8.455   Downloading numpy-2.2.6-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (16.8 MB)
-#10 9.571      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 16.8/16.8 MB 21.6 MB/s eta 0:00:00
-#10 9.769 Collecting scikit-learn>=1.3.0
-#10 9.776   Downloading scikit_learn-1.7.2-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (9.7 MB)
-#10 10.09      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 9.7/9.7 MB 30.8 MB/s eta 0:00:00
-#10 10.28 Collecting pyarrow>=12.0.0
-#10 10.30   Downloading pyarrow-23.0.1-cp310-cp310-manylinux_2_28_x86_64.whl (47.6 MB)
-#10 12.27      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 47.6/47.6 MB 37.8 MB/s eta 0:00:00
-#10 12.42 Collecting fastapi>=0.100.0
-#10 12.42   Downloading fastapi-0.135.2-py3-none-any.whl (117 kB)
-#10 12.43      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 117.4/117.4 KB 190.1 MB/s eta 0:00:00
-#10 12.46 Collecting uvicorn[standard]>=0.23.0
-#10 12.47   Downloading uvicorn-0.42.0-py3-none-any.whl (68 kB)
-#10 12.47      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 68.8/68.8 KB 271.4 MB/s eta 0:00:00
-#10 12.51 Collecting optuna>=3.0.0
-#10 12.51   Downloading optuna-4.8.0-py3-none-any.whl (419 kB)
-#10 12.53      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 419.5/419.5 KB 47.4 MB/s eta 0:00:00
-#10 12.69 Collecting shap>=0.43.0
-#10 12.70   Downloading shap-0.49.1-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (1.0 MB)
-#10 12.72      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.0/1.0 MB 44.8 MB/s eta 0:00:00
-#10 12.97 Collecting psutil>=5.9.0
-#10 12.98   Downloading psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl (155 kB)
-#10 12.98      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 155.6/155.6 KB 95.7 MB/s eta 0:00:00
-#10 13.12 Collecting nvidia-nccl-cu12
-#10 13.13   Downloading nvidia_nccl_cu12-2.29.7-py3-none-manylinux_2_18_x86_64.whl (293.6 MB)
-#10 27.98      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 293.6/293.6 MB 15.0 MB/s eta 0:00:00
-#10 28.41 Collecting scipy
-#10 28.42   Downloading scipy-1.15.3-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (37.7 MB)
-#10 30.68      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 37.7/37.7 MB 17.9 MB/s eta 0:00:00
-#10 30.81 Collecting python-dateutil>=2.8.2
-#10 30.82   Downloading python_dateutil-2.9.0.post0-py2.py3-none-any.whl (229 kB)
-#10 30.83      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 229.9/229.9 KB 32.9 MB/s eta 0:00:00
-#10 30.87 Collecting pytz>=2020.1
-#10 30.88   Downloading pytz-2026.1.post1-py2.py3-none-any.whl (510 kB)
-#10 30.90      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 510.5/510.5 KB 26.4 MB/s eta 0:00:00
-#10 30.92 Collecting tzdata>=2022.7
-#10 30.93   Downloading tzdata-2025.3-py2.py3-none-any.whl (348 kB)
-#10 30.94      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 348.5/348.5 KB 29.4 MB/s eta 0:00:00
-#10 31.01 Collecting joblib>=1.2.0
-#10 31.02   Downloading joblib-1.5.3-py3-none-any.whl (309 kB)
-#10 31.03      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 309.1/309.1 KB 24.4 MB/s eta 0:00:00
-#10 31.05 Collecting threadpoolctl>=3.1.0
-#10 31.06   Downloading threadpoolctl-3.6.0-py3-none-any.whl (18 kB)
-#10 31.10 Collecting annotated-doc>=0.0.2
-#10 31.11   Downloading annotated_doc-0.0.4-py3-none-any.whl (5.3 kB)
-#10 31.15 Collecting starlette>=0.46.0
-#10 31.15   Downloading starlette-1.0.0-py3-none-any.whl (72 kB)
-#10 31.16      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 72.7/72.7 KB 43.8 MB/s eta 0:00:00
-#10 31.18 Collecting typing-extensions>=4.8.0
-#10 31.19   Downloading typing_extensions-4.15.0-py3-none-any.whl (44 kB)
-#10 31.19      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 44.6/44.6 KB 77.9 MB/s eta 0:00:00
-#10 31.20 Collecting typing-inspection>=0.4.2
-#10 31.21   Downloading typing_inspection-0.4.2-py3-none-any.whl (14 kB)
-#10 31.41 Collecting pydantic>=2.9.0
-#10 31.42   Downloading pydantic-2.12.5-py3-none-any.whl (463 kB)
-#10 31.43      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 463.6/463.6 KB 28.0 MB/s eta 0:00:00
-#10 31.47 Collecting click>=7.0
-#10 31.48   Downloading click-8.3.1-py3-none-any.whl (108 kB)
-#10 31.48      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 108.3/108.3 KB 77.0 MB/s eta 0:00:00
-#10 31.49 Collecting h11>=0.8
-#10 31.50   Downloading h11-0.16.0-py3-none-any.whl (37 kB)
-#10 31.53 Collecting python-dotenv>=0.13
-#10 31.53   Downloading python_dotenv-1.2.2-py3-none-any.whl (22 kB)
-#10 31.58 Collecting httptools>=0.6.3
-#10 31.59   Downloading httptools-0.7.1-cp310-cp310-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (440 kB)
-#10 31.60      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 440.9/440.9 KB 31.3 MB/s eta 0:00:00
-#10 31.76 Collecting websockets>=10.4
-#10 31.76   Downloading websockets-16.0-cp310-cp310-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (183 kB)
-#10 31.77      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 183.8/183.8 KB 32.1 MB/s eta 0:00:00
-#10 31.89 Collecting watchfiles>=0.20
-#10 31.90   Downloading watchfiles-1.1.1-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (455 kB)
-#10 31.92      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 455.6/455.6 KB 20.9 MB/s eta 0:00:00
-#10 31.99 Collecting pyyaml>=5.1
-#10 31.99   Downloading pyyaml-6.0.3-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (770 kB)
-#10 32.03      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 770.3/770.3 KB 20.3 MB/s eta 0:00:00
-#10 32.13 Collecting uvloop>=0.15.1
-#10 32.13   Downloading uvloop-0.22.1-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (3.7 MB)
-#10 32.30      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.7/3.7 MB 22.4 MB/s eta 0:00:00
-#10 32.40 Collecting packaging>=20.0
-#10 32.40   Downloading packaging-26.0-py3-none-any.whl (74 kB)
-#10 32.41      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 74.4/74.4 KB 111.7 MB/s eta 0:00:00
-#10 32.55 Collecting alembic>=1.5.0
-#10 32.56   Downloading alembic-1.18.4-py3-none-any.whl (263 kB)
-#10 32.57      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 263.9/263.9 KB 30.7 MB/s eta 0:00:00
-#10 32.59 Collecting colorlog
-#10 32.60   Downloading colorlog-6.10.1-py3-none-any.whl (11 kB)
-#10 33.11 Collecting sqlalchemy>=1.4.2
-#10 33.12   Downloading sqlalchemy-2.0.48-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (3.2 MB)
-#10 33.25      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.2/3.2 MB 24.8 MB/s eta 0:00:00
-#10 33.34 Collecting tqdm
-#10 33.35   Downloading tqdm-4.67.3-py3-none-any.whl (78 kB)
-#10 33.35      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 78.4/78.4 KB 93.8 MB/s eta 0:00:00
-#10 33.54 Collecting numba>=0.54
-#10 33.55   Downloading numba-0.65.0-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (3.7 MB)
-#10 33.68      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.7/3.7 MB 27.4 MB/s eta 0:00:00
-#10 33.73 Collecting cloudpickle
-#10 33.74   Downloading cloudpickle-3.1.2-py3-none-any.whl (22 kB)
-#10 33.87 Collecting slicer==0.0.8
-#10 33.88   Downloading slicer-0.0.8-py3-none-any.whl (15 kB)
-#10 34.00 Collecting tomli
-#10 34.00   Downloading tomli-2.4.1-py3-none-any.whl (14 kB)
-#10 34.02 Collecting Mako
-#10 34.03   Downloading mako-1.3.10-py3-none-any.whl (78 kB)
-#10 34.03      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 78.5/78.5 KB 53.8 MB/s eta 0:00:00
-#10 34.19 Collecting llvmlite<0.48,>=0.47.0dev0
-#10 34.20   Downloading llvmlite-0.47.0-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (56.3 MB)
-#10 37.23      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 56.3/56.3 MB 17.3 MB/s eta 0:00:00
-#10 37.33 Collecting annotated-types>=0.6.0
-#10 37.34   Downloading annotated_types-0.7.0-py3-none-any.whl (13 kB)
-#10 38.56 Collecting pydantic-core==2.41.5
-#10 38.56   Downloading pydantic_core-2.41.5-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (2.1 MB)
-#10 38.68      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 19.0 MB/s eta 0:00:00
-#10 38.72 Collecting six>=1.5
-#10 38.73   Downloading six-1.17.0-py2.py3-none-any.whl (11 kB)
-#10 39.06 Collecting greenlet>=1
-#10 39.07   Downloading greenlet-3.3.2-cp310-cp310-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (591 kB)
-#10 39.10      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 591.7/591.7 KB 19.0 MB/s eta 0:00:00
-#10 39.30 Collecting anyio<5,>=3.6.2
-#10 39.30   Downloading anyio-4.13.0-py3-none-any.whl (114 kB)
-#10 39.31      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 114.4/114.4 KB 18.6 MB/s eta 0:00:00
-#10 39.41 Collecting exceptiongroup>=1.0.2
-#10 39.41   Downloading exceptiongroup-1.3.1-py3-none-any.whl (16 kB)
-#10 39.43 Collecting idna>=2.8
-#10 39.44   Downloading idna-3.11-py3-none-any.whl (71 kB)
-#10 39.44      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 71.0/71.0 KB 36.8 MB/s eta 0:00:00
-#10 39.54 Collecting MarkupSafe>=0.9.2
-#10 39.55   Downloading markupsafe-3.0.3-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (20 kB)
-#10 39.82 Installing collected packages: pytz, websockets, uvloop, tzdata, typing-extensions, tqdm, tomli, threadpoolctl, slicer, six, pyyaml, python-dotenv, pyarrow, psutil, packaging, nvidia-nccl-cu12, numpy, MarkupSafe, llvmlite, joblib, idna, httptools, h11, greenlet, colorlog, cloudpickle, click, annotated-types, annotated-doc, uvicorn, typing-inspection, sqlalchemy, scipy, python-dateutil, pydantic-core, numba, Mako, exceptiongroup, xgboost, scikit-learn, pydantic, pandas, anyio, alembic, watchfiles, starlette, shap, optuna, fastapi
-#10 53.98 Successfully installed Mako-1.3.10 MarkupSafe-3.0.3 alembic-1.18.4 annotated-doc-0.0.4 annotated-types-0.7.0 anyio-4.13.0 click-8.3.1 cloudpickle-3.1.2 colorlog-6.10.1 exceptiongroup-1.3.1 fastapi-0.135.2 greenlet-3.3.2 h11-0.16.0 httptools-0.7.1 idna-3.11 joblib-1.5.3 llvmlite-0.47.0 numba-0.65.0 numpy-2.2.6 nvidia-nccl-cu12-2.29.7 optuna-4.8.0 packaging-26.0 pandas-2.3.3 psutil-7.2.2 pyarrow-23.0.1 pydantic-2.12.5 pydantic-core-2.41.5 python-dateutil-2.9.0.post0 python-dotenv-1.2.2 pytz-2026.1.post1 pyyaml-6.0.3 scikit-learn-1.7.2 scipy-1.15.3 shap-0.49.1 six-1.17.0 slicer-0.0.8 sqlalchemy-2.0.48 starlette-1.0.0 threadpoolctl-3.6.0 tomli-2.4.1 tqdm-4.67.3 typing-extensions-4.15.0 typing-inspection-0.4.2 tzdata-2025.3 uvicorn-0.42.0 uvloop-0.22.1 watchfiles-1.1.1 websockets-16.0 xgboost-3.2.0
-#10 53.98 WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv
-#10 DONE 57.6s
-
-#11 [6/7] COPY train_spike_classifier.py spike_classifier.py spike_feature_engineer.py spike_preprocessor.py ./
-#11 DONE 1.1s
-
-#12 [7/7] RUN mkdir -p data/full_run
-#12 DONE 0.5s
-
-#13 exporting to image
-#13 exporting layers
-#13 exporting layers 82.6s done
-#13 exporting manifest sha256:46d80a889631901ab91bdbb65200baff234438bdee16f5f43d992cef4c91184f done
-#13 exporting config sha256:baa20ed521a46a1510770ad5527c8a819b56e1c3cd32ebc22af0162ced4b4ff9 done
-#13 exporting attestation manifest sha256:e1e33845deb42390066c45ada183a3b08f674167676fe0635ab976d19c12dd3d 0.0s done
-#13 exporting manifest list sha256:1eda4e1e62dd62cf2f96b795f69a6aef48430cf2d0872ffa3190e341da160b80 done
-#13 naming to docker.io/library/spike-train:latest done
-#13 unpacking to docker.io/library/spike-train:latest
-#13 unpacking to docker.io/library/spike-train:latest 7.5s done
-#13 DONE 90.2s
-
-#14 resolving provenance for metadata file
-#14 DONE 0.0s
- Image spike-train Built 
- Container spike-train-run-46223791d46d Creating 
- Container spike-train-run-46223791d46d Created 
-
-==========
-== CUDA ==
-==========
-
-CUDA Version 12.4.1
-
-Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-
-This container image and its contents are governed by the NVIDIA Deep Learning Container License.
-By pulling and using the container, you accept the terms and conditions of this license:
-https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
-
-A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
-
-14:12:35  Run config saved: data/full_run/models/spike/run_config.json
-14:12:35    Skipping step 1 — cache exists: data/full_run/cluster_agg.parquet
-14:12:35    Skipping step 2 — cache exists: data/full_run/cluster_features.parquet
-14:12:35  ══════════════════════════════════════════════════════════════
-14:12:35    STEP 3 — Training
-14:12:35    Thresholds copied  : data/full_run/models/spike/spike_thresholds.parquet
-14:12:42    Optuna storage  : data/full_run/models/spike/optuna.db
-14:12:45    Optuna resumed  : 1 trials already complete, running 149 more
-14:12:45    Optuna search   : 149 trials  |  inner split  train=7125938  val=7150584 rows
-14:25:37    Optuna    5/149  |  best PR-AUC 0.5366  |  trial 0.5344
-14:37:14    Optuna   10/149  |  best PR-AUC 0.5374  |  trial 0.5346
-14:55:59    Optuna   15/149  |  best PR-AUC 0.5410  |  trial 0.5410
-15:13:55    Optuna   20/149  |  best PR-AUC 0.5410  |  trial 0.5401
-15:31:34    Optuna   25/149  |  best PR-AUC 0.5410  |  trial 0.5408
-15:48:28    Optuna   30/149  |  best PR-AUC 0.5410  |  trial 0.5401
-16:07:56    Optuna   35/149  |  best PR-AUC 0.5410  |  trial 0.5392
-16:26:11    Optuna   40/149  |  best PR-AUC 0.5410  |  trial 0.5395
-16:44:40    Optuna   45/149  |  best PR-AUC 0.5410  |  trial 0.5370
-17:01:26    Optuna   50/149  |  best PR-AUC 0.5410  |  trial 0.5371
-17:20:23    Optuna   55/149  |  best PR-AUC 0.5410  |  trial 0.5270
-17:37:46    Optuna   60/149  |  best PR-AUC 0.5410  |  trial 0.5403
-17:57:19    Optuna   65/149  |  best PR-AUC 0.5410  |  trial 0.5390
-18:15:47    Optuna   70/149  |  best PR-AUC 0.5410  |  trial 0.5375
-18:34:29    Optuna   75/149  |  best PR-AUC 0.5410  |  trial 0.5404
-18:52:22    Optuna   80/149  |  best PR-AUC 0.5410  |  trial 0.5389
-19:12:59    Optuna   85/149  |  best PR-AUC 0.5410  |  trial 0.5405
-19:30:03    Optuna   90/149  |  best PR-AUC 0.5410  |  trial 0.5406
-19:48:19    Optuna   95/149  |  best PR-AUC 0.5412  |  trial 0.5406
-20:05:45    Optuna  100/149  |  best PR-AUC 0.5412  |  trial 0.5401
-20:22:21    Optuna  105/149  |  best PR-AUC 0.5412  |  trial 0.5404
-20:39:20    Optuna  110/149  |  best PR-AUC 0.5412  |  trial 0.5407
-20:56:38    Optuna  115/149  |  best PR-AUC 0.5412  |  trial 0.5406
-21:14:14    Optuna  120/149  |  best PR-AUC 0.5412  |  trial 0.5402
-21:32:14    Optuna  125/149  |  best PR-AUC 0.5412  |  trial 0.5407
-21:50:20    Optuna  130/149  |  best PR-AUC 0.5412  |  trial 0.5398
-22:08:33    Optuna  135/149  |  best PR-AUC 0.5413  |  trial 0.5411
-22:26:13    Optuna  140/149  |  best PR-AUC 0.5413  |  trial 0.5413
-22:44:37    Optuna  145/149  |  best PR-AUC 0.5413  |  trial 0.5412
-22:59:20    Optuna  149/149  |  best PR-AUC 0.5413  |  trial 0.5413
-22:59:20    Optuna done     : best macro-PR-AUC 0.5413  (trial 142 / 151 completed)
-22:59:20    Best params saved  : data/full_run/models/spike/best_params.json
-22:59:20  ──────────────────────────────────────────────────────────────
-22:59:20    WALK-FORWARD CV  (5 folds, expanding window, gap=12 buckets, label=severity_in_60m)
-22:59:20  ──────────────────────────────────────────────────────────────
-22:59:40    Fold 1/5  |  MacroPR 0.549  MacroF1 0.517  thresh 0.45  spike(tr=20.4%  val=20.1%)
-23:00:11    Fold 2/5  |  MacroPR 0.551  MacroF1 0.511  thresh 0.45  spike(tr=20.2%  val=20.0%)
-23:00:56    Fold 3/5  |  MacroPR 0.566  MacroF1 0.521  thresh 0.45  spike(tr=20.2%  val=20.1%)
-23:01:53    Fold 4/5  |  MacroPR 0.561  MacroF1 0.515  thresh 0.50  spike(tr=20.2%  val=20.1%)
-23:03:03    Fold 5/5  |  MacroPR 0.547  MacroF1 0.522  thresh 0.45  spike(tr=20.2%  val=19.7%)
-23:03:03    CV results saved : data/full_run/models/spike/cv_results.csv
-23:03:03  ──────────────────────────────────────────────────────────────
-23:03:03    CV SUMMARY
-23:03:03    macro_pr_auc      mean 0.555  ±  std 0.007
-23:03:03    macro_roc_auc     mean 0.799  ±  std 0.012
-23:03:03    weighted_f1       mean 0.742  ±  std 0.009
-23:03:03    macro_f1          mean 0.518  ±  std 0.004
-23:03:03  ──────────────────────────────────────────────────────────────
-23:03:03    Drift signal  : Macro-PR is STABLE                              τ=0.00  p=1.000
-23:03:03    Per-fold Macro-PR : 0.549  0.551  0.566  0.561  0.547
-23:03:03  ──────────────────────────────────────────────────────────────
-23:03:04  ══════════════════════════════════════════════════════════════
-23:03:04    FINAL TRAINING  (train=60%  val=20%  test=20%)
-23:03:04  ══════════════════════════════════════════════════════════════
-23:03:04    SPIKE CLASSIFIER — training (3-class severity)
-23:03:04    Input      : data/full_run/cluster_features.parquet
-23:03:04    Model      : data/full_run/models/spike/spike_model.json
-23:03:04    Split      : train 60% / val 20% / test 20%
-23:03:04  ══════════════════════════════════════════════════════════════
-23:03:10    Train rows : 14,276,522  (moderate 15.1%  severe 5.0%)
-23:03:10    Val rows   : 4,774,116  (moderate 11.7%  severe 5.4%)
-23:03:10    Test rows  : 4,770,753  (moderate 8.6%  severe 3.3%)
-23:09:33    Training time : 382.1 s
-23:09:56    ─────────────────────────────────────────────────────
-23:09:56    Macro PR-AUC   : 0.553  ← primary metric
-23:09:56    Macro ROC-AUC  : 0.839
-23:09:56    Per-class PR-AUC : no_spike=0.970  moderate=0.367  severe=0.322
-23:09:56    Alarm threshold  : 0.55  (p_severe)  →  P=0.382  R=0.348
-23:09:56  ══════════════════════════════════════════════════════════════
-23:09:57    Model saved    : data/full_run/models/spike/spike_model.json
-23:09:57    Metadata saved : data/full_run/models/spike/spike_model.meta.json
-23:10:00    Fitting isotonic calibrators on validation set …
-23:10:56    Calibrators saved  : data/full_run/models/spike/calibrators.pkl
-23:11:52    Alarm threshold (calibrated val) : 0.25  (raw was 0.55)
-23:12:01    ALARM THRESHOLD SWEEP  (p_severe calibrated, validation set)
-23:12:01    p_severe  | Precision | Recall | F1    | Alarms/day
-23:12:01    ──────────┼───────────┼────────┼───────┼────────────
-23:12:01      0.10    |   0.2484  |  0.6361 | 0.3573 |    39.6
-23:12:01      0.15    |   0.3129  |  0.5478 | 0.3983 |    27.1
-23:12:01      0.20    |   0.3618  |  0.4851 | 0.4145 |    20.7
-23:12:01      0.25    |   0.4068  |  0.4335 | 0.4197 |    16.5  ←  alarm
-23:12:01      0.30    |   0.4502  |  0.3878 | 0.4167 |    13.3
-23:12:01      0.35    |   0.4904  |  0.3490 | 0.4078 |    11.0
-23:12:01      0.40    |   0.5280  |  0.3143 | 0.3941 |     9.2
-23:12:01      0.45    |   0.5630  |  0.2863 | 0.3796 |     7.9
-23:12:01      0.50    |   0.5934  |  0.2629 | 0.3644 |     6.9
-23:12:01      0.55    |   0.6213  |  0.2420 | 0.3483 |     6.0
-23:12:01      0.60    |   0.6478  |  0.2229 | 0.3317 |     5.3
-23:12:01      0.65    |   0.6716  |  0.2044 | 0.3134 |     4.7
-23:12:01      0.70    |   0.6941  |  0.1870 | 0.2946 |     4.2
-23:12:01      0.75    |   0.7175  |  0.1673 | 0.2713 |     3.6
-23:12:01      0.80    |   0.7460  |  0.1441 | 0.2415 |     3.0
-23:12:01      0.85    |   0.7782  |  0.1138 | 0.1985 |     2.3
-23:12:01      0.90    |   0.8165  |  0.0695 | 0.1281 |     1.3
-23:12:01      0.95    |   0.9383  |  0.0003 | 0.0006 |     0.0
-23:23:53    SHAP values computed (XGBoost native pred_contribs)
-23:23:53    Feature importance saved : data/full_run/models/spike/feature_importance.csv
-23:23:53    Top-10 features by gain:
-23:23:53      spike_now               gain 0.2087  SHAP 0.0168
-23:23:53      spike_in_last_6         gain 0.0917  SHAP 0.0140
-23:23:53      band_position           gain 0.0744  SHAP 0.0358
-23:23:53      cpu_vs_p95              gain 0.0737  SHAP 0.2422
-23:23:53      spike_severe_now        gain 0.0687  SHAP 0.0022
-23:23:53      time_since_last_spike   gain 0.0536  SHAP 0.0520
-23:23:53      spike_in_last_1         gain 0.0479  SHAP 0.0031
-23:23:53      spike_severe_in_last_6  gain 0.0412  SHAP 0.0079
-23:23:53      cpu_spike_rate_24       gain 0.0387  SHAP 0.0965
-23:23:53      cpu_vs_p99              gain 0.0348  SHAP 0.1015
-23:23:53    Spike config saved : data/full_run/models/spike/spike_config.json
-23:23:53    Binary models will use device='cpu' (avoids VRAM conflict with 60m GPU residual)
-23:23:53    Memory before binary training : 43.9% used  (18.8 GB free)
-23:23:55    Starting binary horizon model: 15m (spike_in_15m)
-23:23:55    [GC] Memory freed before 15m binary model training
-23:24:08  ══════════════════════════════════════════════════════════════
-23:24:08    BINARY SPIKE CLASSIFIER — 15m horizon  (spike_in_15m)
-23:24:08    Train rows : 14,351,633  (spike 8.9%)
-23:24:08    Val rows   : 4,786,755
-23:24:08    Test rows  : 4,795,970
-23:24:08    spw        : 10.3  (n_neg/n_pos = 13076841/1274792)
-23:24:08    Binary Optuna capped at 75 trials (binary converges faster than multiclass)
-23:24:08    Optuna storage  : data/full_run/models/spike_15m/optuna.db
-23:24:09    Optuna inner split capped : 7163423 → 2000000 rows (binary OOM prevention)
-23:24:11    Optuna warm-start : enqueueing 1 trial from previous best_params
-23:24:11    Optuna search   : 75 trials  |  inner split  train=2000000  val=2000000 rows
-23:27:44    Optuna    5/75  |  best PR-AUC 0.5974  |  trial 0.5944
-23:30:20    Optuna   10/75  |  best PR-AUC 0.5974  |  trial 0.5918
-23:33:34    Optuna   15/75  |  best PR-AUC 0.5982  |  trial 0.5982
-23:38:28    Optuna   20/75  |  best PR-AUC 0.5986  |  trial 0.5970
-23:45:07    Optuna   25/75  |  best PR-AUC 0.5991  |  trial 0.5990
-23:51:15    Optuna   30/75  |  best PR-AUC 0.5993  |  trial 0.5972
-23:58:17    Optuna   35/75  |  best PR-AUC 0.5993  |  trial 0.5977
-00:04:34    Optuna   40/75  |  best PR-AUC 0.5993  |  trial 0.5988
-00:10:36    Optuna   45/75  |  best PR-AUC 0.5993  |  trial 0.5911
-00:14:37    Optuna   50/75  |  best PR-AUC 0.5994  |  trial 0.5956
-00:20:37    Optuna   55/75  |  best PR-AUC 0.5994  |  trial 0.5982
-00:25:26    Optuna   60/75  |  best PR-AUC 0.5994  |  trial 0.5975
-00:32:10    Optuna   65/75  |  best PR-AUC 0.5994  |  trial 0.5990
-00:40:10    Optuna   70/75  |  best PR-AUC 0.5994  |  trial 0.5988
-00:46:39    Optuna   75/75  |  best PR-AUC 0.5994  |  trial 0.5987
-00:46:39    Optuna done     : best macro-PR-AUC 0.5994  (trial 46 / 75 completed)
-00:46:39  ──────────────────────────────────────────────────────────────
-00:46:39    WALK-FORWARD CV  (5 folds, expanding window, gap=3 buckets, label=spike_in_15m)
-00:46:39  ──────────────────────────────────────────────────────────────
-00:46:59    Fold 1/5  |  MacroPR 0.586  MacroF1 0.550  thresh 0.80  spike(tr=8.9%  val=8.9%)
-00:47:19    Fold 2/5  |  MacroPR 0.570  MacroF1 0.544  thresh 0.80  spike(tr=8.9%  val=8.9%)
-00:47:39    Fold 3/5  |  MacroPR 0.576  MacroF1 0.547  thresh 0.75  spike(tr=8.9%  val=8.9%)
-00:48:00    Fold 4/5  |  MacroPR 0.581  MacroF1 0.549  thresh 0.75  spike(tr=8.9%  val=8.8%)
-00:48:22    Fold 5/5  |  MacroPR 0.594  MacroF1 0.561  thresh 0.75  spike(tr=8.8%  val=8.9%)
-00:48:22    CV results saved : data/full_run/models/spike_15m/cv_results.csv
-00:48:22  ──────────────────────────────────────────────────────────────
-00:48:22    CV SUMMARY
-00:48:22    macro_pr_auc      mean 0.582  ±  std 0.008
-00:48:22    macro_roc_auc     mean 0.888  ±  std 0.005
-00:48:22    weighted_f1       mean 0.550  ±  std 0.006
-00:48:22    macro_f1          mean 0.550  ±  std 0.006
-00:48:22  ──────────────────────────────────────────────────────────────
-00:48:22    Drift signal  : Macro-PR is IMPROVING                           τ=0.40  p=0.483
-00:48:22    Per-fold Macro-PR : 0.586  0.570  0.576  0.581  0.594
-00:48:22  ──────────────────────────────────────────────────────────────
-00:58:56    PR-AUC         : 0.575  ← primary metric
-00:58:56    ROC-AUC        : 0.911
-00:58:56    Alarm threshold: 0.80  →  P=0.608  R=0.494
-00:59:06    p_severe  | Precision | Recall | F1    | Alarms/day
-00:59:06    ──────────┼───────────┼────────┼───────┼────────────
-00:59:06      0.10    |   0.1165  |  0.9781 | 0.2081 |   180.6
-00:59:06      0.15    |   0.1426  |  0.9547 | 0.2482 |   144.0
-00:59:06      0.20    |   0.1687  |  0.9291 | 0.2855 |   118.5
-00:59:06      0.25    |   0.1949  |  0.9028 | 0.3206 |    99.6
-00:59:06      0.30    |   0.2217  |  0.8757 | 0.3538 |    85.0
-00:59:06      0.35    |   0.2492  |  0.8467 | 0.3851 |    73.1
-00:59:06      0.40    |   0.2780  |  0.8174 | 0.4148 |    63.2
-00:59:06      0.45    |   0.3081  |  0.7875 | 0.4430 |    55.0
-00:59:06      0.50    |   0.3397  |  0.7567 | 0.4689 |    47.9
-00:59:06      0.55    |   0.3739  |  0.7244 | 0.4932 |    41.7
-00:59:06      0.60    |   0.4113  |  0.6897 | 0.5153 |    36.1
-00:59:06      0.65    |   0.4521  |  0.6532 | 0.5343 |    31.1
-00:59:06      0.70    |   0.4977  |  0.6135 | 0.5495 |    26.5
-00:59:06      0.75    |   0.5474  |  0.5706 | 0.5588 |    22.4
-00:59:06      0.80    |   0.6001  |  0.5247 | 0.5598 |    18.8  ←  alarm
-00:59:06      0.85    |   0.6509  |  0.4763 | 0.5500 |    15.7
-00:59:06      0.90    |   0.7078  |  0.4167 | 0.5245 |    12.7
-00:59:06      0.95    |   0.8111  |  0.2913 | 0.4286 |     7.7
-01:01:42    SHAP values computed (XGBoost native pred_contribs)
-01:01:42    Feature importance saved : data/full_run/models/spike_15m/feature_importance.csv
-01:01:42    Top-10 features by gain:
-01:01:42      spike_now               gain 0.5828  SHAP 0.0840
-01:01:42      cpu_vs_p95              gain 0.0964  SHAP 1.0655
-01:01:42      time_since_last_spike   gain 0.0840  SHAP 0.2188
-01:01:42      spike_in_last_6         gain 0.0583  SHAP 0.0238
-01:01:42      cpu_vs_p99              gain 0.0513  SHAP 0.2421
-01:01:42      cpu_spike_rate_24       gain 0.0253  SHAP 0.1996
-01:01:42      band_position           gain 0.0213  SHAP 0.0503
-01:01:42      spike_in_last_3         gain 0.0174  SHAP 0.0203
-01:01:42      cpu_vs_p95_delta        gain 0.0069  SHAP 0.1070
-01:01:42      hour_cos                gain 0.0047  SHAP 0.1733
-01:01:42    Model saved    : data/full_run/models/spike_15m/spike_model.json
-01:01:42    Metadata saved : data/full_run/models/spike_15m/spike_model.meta.json
-01:01:42    Config saved : data/full_run/models/spike_15m/spike_config.json
-01:01:42    Memory after 15m loop (df_all freed): 54.5% used  (15.3 GB free)
-01:01:49    Starting OVR severe binary model (severe_ovr)
-01:01:49    [GC] Memory freed before severe_ovr binary model training
-01:02:46  ══════════════════════════════════════════════════════════════
-01:02:46    BINARY SPIKE CLASSIFIER — severe_ovr horizon  (spike_severe_ovr)
-01:02:46    Train rows : 14,276,522  (spike 5.0%)
-01:02:46    Val rows   : 4,774,116
-01:02:46    Test rows  : 4,770,753
-01:02:46    spw        : 19.1  (n_neg/n_pos = 13567998/708524)
-01:02:46    Binary Optuna capped at 75 trials (binary converges faster than multiclass)
-01:02:46    Optuna storage  : data/full_run/models/spike_severe_ovr/optuna.db
-01:02:47    Optuna inner split capped : 7125938 → 2000000 rows (binary OOM prevention)
-01:02:49    Optuna warm-start : enqueueing 1 trial from previous best_params
-01:02:49    Optuna search   : 75 trials  |  inner split  train=2000000  val=2000000 rows
-01:05:16    Optuna    5/75  |  best PR-AUC 0.3127  |  trial 0.3123
-01:07:47    Optuna   10/75  |  best PR-AUC 0.3127  |  trial 0.3063
-01:10:20    Optuna   15/75  |  best PR-AUC 0.3134  |  trial 0.3122
-01:13:22    Optuna   20/75  |  best PR-AUC 0.3137  |  trial 0.3128
-01:16:49    Optuna   25/75  |  best PR-AUC 0.3141  |  trial 0.3135
-01:20:26    Optuna   30/75  |  best PR-AUC 0.3141  |  trial 0.3126
-01:23:56    Optuna   35/75  |  best PR-AUC 0.3143  |  trial 0.3128
-01:27:33    Optuna   40/75  |  best PR-AUC 0.3143  |  trial 0.3137
-01:31:15    Optuna   45/75  |  best PR-AUC 0.3143  |  trial 0.3143
-01:34:18    Optuna   50/75  |  best PR-AUC 0.3143  |  trial 0.3128
-01:37:31    Optuna   55/75  |  best PR-AUC 0.3147  |  trial 0.3136
-01:39:53    Optuna   60/75  |  best PR-AUC 0.3147  |  trial 0.3102
-01:43:28    Optuna   65/75  |  best PR-AUC 0.3147  |  trial 0.3135
-01:46:35    Optuna   70/75  |  best PR-AUC 0.3147  |  trial 0.3118
-01:50:09    Optuna   75/75  |  best PR-AUC 0.3147  |  trial 0.3129
-01:50:09    Optuna done     : best macro-PR-AUC 0.3147  (trial 51 / 75 completed)
-01:50:09  ──────────────────────────────────────────────────────────────
-01:50:09    WALK-FORWARD CV  (5 folds, expanding window, gap=12 buckets, label=spike_severe_ovr)
-01:50:09  ──────────────────────────────────────────────────────────────
-01:50:26    Fold 1/5  |  MacroPR 0.355  MacroF1 0.380  thresh 0.75  spike(tr=5.6%  val=5.5%)
-01:50:43    Fold 2/5  |  MacroPR 0.338  MacroF1 0.366  thresh 0.75  spike(tr=5.6%  val=4.6%)
-01:51:00    Fold 3/5  |  MacroPR 0.328  MacroF1 0.359  thresh 0.75  spike(tr=5.3%  val=4.4%)
-01:51:17    Fold 4/5  |  MacroPR 0.356  MacroF1 0.377  thresh 0.75  spike(tr=5.0%  val=4.8%)
-01:51:34    Fold 5/5  |  MacroPR 0.313  MacroF1 0.352  thresh 0.75  spike(tr=5.0%  val=4.8%)
-01:51:34    CV results saved : data/full_run/models/spike_severe_ovr/cv_results.csv
-01:51:34  ──────────────────────────────────────────────────────────────
-01:51:34    CV SUMMARY
-01:51:34    macro_pr_auc      mean 0.338  ±  std 0.016
-01:51:34    macro_roc_auc     mean 0.836  ±  std 0.027
-01:51:34    weighted_f1       mean 0.367  ±  std 0.011
-01:51:34    macro_f1          mean 0.367  ±  std 0.011
-01:51:34  ──────────────────────────────────────────────────────────────
-01:51:34    Drift signal  : Macro-PR is DECLINING (concept drift likely)    τ=-0.40  p=0.483
-01:51:34    Per-fold Macro-PR : 0.355  0.338  0.328  0.356  0.313
-01:51:34  ──────────────────────────────────────────────────────────────
-01:58:39    PR-AUC         : 0.362  ← primary metric
-01:58:39    ROC-AUC        : 0.858
-01:58:39    Alarm threshold: 0.80  →  P=0.440  R=0.339
-01:58:47    p_severe  | Precision | Recall | F1    | Alarms/day
-01:58:47    ──────────┼───────────┼────────┼───────┼────────────
-01:58:47      0.10    |   0.0684  |  0.9946 | 0.1279 |   225.0
-01:58:47      0.15    |   0.0777  |  0.9830 | 0.1440 |   195.6
-01:58:47      0.20    |   0.0892  |  0.9622 | 0.1632 |   166.8
-01:58:47      0.25    |   0.1026  |  0.9337 | 0.1849 |   140.7
-01:58:47      0.30    |   0.1177  |  0.9010 | 0.2082 |   118.4
-01:58:47      0.35    |   0.1340  |  0.8670 | 0.2321 |   100.0
-01:58:47      0.40    |   0.1518  |  0.8322 | 0.2568 |    84.8
-01:58:47      0.45    |   0.1712  |  0.7950 | 0.2817 |    71.8
-01:58:47      0.50    |   0.1927  |  0.7553 | 0.3071 |    60.6
-01:58:47      0.55    |   0.2170  |  0.7128 | 0.3327 |    50.8
-01:58:47      0.60    |   0.2443  |  0.6675 | 0.3577 |    42.2
-01:58:47      0.65    |   0.2760  |  0.6177 | 0.3815 |    34.6
-01:58:47      0.70    |   0.3124  |  0.5610 | 0.4013 |    27.8
-01:58:47      0.75    |   0.3574  |  0.4979 | 0.4161 |    21.5
-01:58:47      0.80    |   0.4144  |  0.4274 | 0.4208 |    15.9  ←  alarm
-01:58:47      0.85    |   0.4907  |  0.3496 | 0.4083 |    11.0
-01:58:47      0.90    |   0.5941  |  0.2662 | 0.3676 |     6.9
-01:58:47      0.95    |   0.7247  |  0.1710 | 0.2767 |     3.6
-01:59:39    SHAP values computed (XGBoost native pred_contribs)
-01:59:39    Feature importance saved : data/full_run/models/spike_severe_ovr/feature_importance.csv
-01:59:39    Top-10 features by gain:
-01:59:39      spike_now               gain 0.4426  SHAP 0.0198
-01:59:39      spike_in_last_6         gain 0.1507  SHAP 0.0186
-01:59:39      time_since_last_spike   gain 0.0944  SHAP 0.1674
-01:59:39      band_position           gain 0.0771  SHAP 0.1267
-01:59:39      cpu_vs_p95              gain 0.0511  SHAP 0.4444
-01:59:39      spike_in_last_3         gain 0.0411  SHAP 0.0066
-01:59:39      cpu_spike_rate_24       gain 0.0276  SHAP 0.1844
-01:59:39      hour_cos                gain 0.0111  SHAP 0.2797
-01:59:39      spike_severe_in_last_6  gain 0.0109  SHAP 0.0280
-01:59:39      cpu_vs_p99              gain 0.0083  SHAP 0.1623
-01:59:39    Model saved    : data/full_run/models/spike_severe_ovr/spike_model.json
-01:59:39    Metadata saved : data/full_run/models/spike_severe_ovr/spike_model.meta.json
-01:59:39    Config saved : data/full_run/models/spike_severe_ovr/spike_config.json
-01:59:39  ══════════════════════════════════════════════════════════════
-01:59:39    PIPELINE COMPLETE  (total 707.1 min)
-01:59:39    60m Macro PR-AUC (raw)  : 0.553
-01:59:39    60m Macro PR-AUC (cal)  : 0.574
-01:59:39    60m Severe PR-AUC (raw) : 0.322
-01:59:39    60m Alarm thresh (cal)  : 0.25  →  P 0.431  R 0.334
-01:59:39    15m PR-AUC        : 0.575  (alarm 0.80)
-01:59:39    severe_ovr PR-AUC        : 0.362  (alarm 0.80)
-01:59:39    Model     : data/full_run/models/spike/spike_model.json
-01:59:39    Config    : data/full_run/models/spike/spike_config.json
-01:59:39  ══════════════════════════════════════════════════════════════
