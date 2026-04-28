@@ -1,0 +1,276 @@
+{
+  "alarm_threshold": 0.25,
+  "train_ratio": 0.6,
+  "val_ratio": 0.2,
+  "test_ratio": 0.2,
+  "train_bucket_max": 1144,
+  "val_bucket_max": 1526,
+  "class_rates_train": {
+    "no_spike": 0.79915,
+    "moderate": 0.151221,
+    "severe": 0.049629
+  },
+  "class_rates_val": {
+    "no_spike": 0.829254,
+    "moderate": 0.11705,
+    "severe": 0.053695
+  },
+  "class_rates_test": {
+    "no_spike": 0.880969,
+    "moderate": 0.085985,
+    "severe": 0.033046
+  },
+  "final_metrics": {
+    "macro_pr_auc": 0.552764,
+    "macro_roc_auc": 0.840373,
+    "pr_auc_class_0": 0.970511,
+    "pr_auc_class_1": 0.372954,
+    "pr_auc_class_2": 0.314827,
+    "weighted_f1": 0.835835,
+    "macro_f1": 0.524498,
+    "macro_pr_auc_calibrated": 0.572661,
+    "alarm_threshold": 0.25,
+    "alarm_precision": 0.424045,
+    "alarm_recall": 0.331528
+  },
+  "calibration": {
+    "method": "isotonic_ovr",
+    "fit_on": "validation_set",
+    "sklearn_version": "1.7.2",
+    "per_class": {
+      "class_0": {
+        "brier_raw": 0.194891,
+        "brier_cal": 0.098943,
+        "ece_cal": 0.022782
+      },
+      "class_1": {
+        "brier_raw": 0.107751,
+        "brier_cal": 0.086052,
+        "ece_cal": 0.005155
+      },
+      "class_2": {
+        "brier_raw": 0.074878,
+        "brier_cal": 0.040643,
+        "ece_cal": 0.007704
+      }
+    }
+  },
+  "cv_summary": {
+    "cv_macro_pr_auc_mean": 0.5651037999999999,
+    "cv_macro_pr_auc_std": 0.009132749934165503,
+    "cv_macro_roc_auc_mean": 0.8099757999999999,
+    "cv_macro_roc_auc_std": 0.01458779162724778,
+    "cv_weighted_f1_mean": 0.7451167999999999,
+    "cv_weighted_f1_std": 0.005760962468199208,
+    "cv_macro_f1_mean": 0.5220598000000001,
+    "cv_macro_f1_std": 0.0030886606417669027,
+    "cv_drift_tau": 0.0,
+    "cv_drift_p_val": 1.0
+  },
+  "alarm_threshold_sweep": [
+    {
+      "threshold": 0.1,
+      "precision": 0.2495,
+      "recall": 0.6333,
+      "f1": 0.358,
+      "alarms_per_day": 39.2
+    },
+    {
+      "threshold": 0.15,
+      "precision": 0.3109,
+      "recall": 0.5467,
+      "f1": 0.3964,
+      "alarms_per_day": 27.2
+    },
+    {
+      "threshold": 0.2,
+      "precision": 0.3606,
+      "recall": 0.4854,
+      "f1": 0.4138,
+      "alarms_per_day": 20.8
+    },
+    {
+      "threshold": 0.25,
+      "precision": 0.4064,
+      "recall": 0.4329,
+      "f1": 0.4193,
+      "alarms_per_day": 16.5
+    },
+    {
+      "threshold": 0.3,
+      "precision": 0.4498,
+      "recall": 0.3869,
+      "f1": 0.416,
+      "alarms_per_day": 13.3
+    },
+    {
+      "threshold": 0.35,
+      "precision": 0.4884,
+      "recall": 0.3469,
+      "f1": 0.4057,
+      "alarms_per_day": 11.0
+    },
+    {
+      "threshold": 0.4,
+      "precision": 0.5259,
+      "recall": 0.3124,
+      "f1": 0.392,
+      "alarms_per_day": 9.2
+    },
+    {
+      "threshold": 0.45,
+      "precision": 0.5585,
+      "recall": 0.2837,
+      "f1": 0.3763,
+      "alarms_per_day": 7.9
+    },
+    {
+      "threshold": 0.5,
+      "precision": 0.5896,
+      "recall": 0.2595,
+      "f1": 0.3604,
+      "alarms_per_day": 6.8
+    },
+    {
+      "threshold": 0.55,
+      "precision": 0.6176,
+      "recall": 0.2372,
+      "f1": 0.3427,
+      "alarms_per_day": 5.9
+    },
+    {
+      "threshold": 0.6,
+      "precision": 0.6427,
+      "recall": 0.2172,
+      "f1": 0.3247,
+      "alarms_per_day": 5.2
+    },
+    {
+      "threshold": 0.65,
+      "precision": 0.6679,
+      "recall": 0.1979,
+      "f1": 0.3053,
+      "alarms_per_day": 4.6
+    },
+    {
+      "threshold": 0.7,
+      "precision": 0.6927,
+      "recall": 0.1786,
+      "f1": 0.284,
+      "alarms_per_day": 4.0
+    },
+    {
+      "threshold": 0.75,
+      "precision": 0.7165,
+      "recall": 0.1581,
+      "f1": 0.259,
+      "alarms_per_day": 3.4
+    },
+    {
+      "threshold": 0.8,
+      "precision": 0.7452,
+      "recall": 0.1341,
+      "f1": 0.2273,
+      "alarms_per_day": 2.8
+    },
+    {
+      "threshold": 0.85,
+      "precision": 0.777,
+      "recall": 0.1048,
+      "f1": 0.1848,
+      "alarms_per_day": 2.1
+    },
+    {
+      "threshold": 0.9,
+      "precision": 0.8175,
+      "recall": 0.0606,
+      "f1": 0.1129,
+      "alarms_per_day": 1.1
+    },
+    {
+      "threshold": 0.95,
+      "precision": 0.8521,
+      "recall": 0.0005,
+      "f1": 0.0009,
+      "alarms_per_day": 0.0
+    }
+  ],
+  "hyperparameter_search": {
+    "enabled": true,
+    "best_params": {
+      "max_depth": 8,
+      "learning_rate": 0.01755122111286442,
+      "subsample": 0.9993961589078085,
+      "colsample_bytree": 0.40946791237181734,
+      "min_child_weight": 4,
+      "gamma": 4.864832797524832,
+      "reg_alpha": 7.583055878508689,
+      "reg_lambda": 9.638581207194806
+    },
+    "best_macro_pr_auc": 0.5417796605882842,
+    "n_completed": 151,
+    "resumed_from": 79,
+    "from_cache": false
+  },
+  "inference": {
+    "bucket_duration_seconds": 300,
+    "horizon_windows": 12,
+    "horizon_minutes": 60,
+    "lookback_windows": 24,
+    "lookback_minutes": 120,
+    "min_buckets_cold_start": 12,
+    "feature_cols": [
+      "total_cpu",
+      "peak_cpu",
+      "total_mem",
+      "peak_mem",
+      "disk_io",
+      "n_tasks",
+      "cpu_per_task",
+      "cpu_lag_1",
+      "cpu_lag_12",
+      "cpu_lag_24",
+      "cpu_ewma_6",
+      "cpu_ewma_24",
+      "cpu_delta_1",
+      "cpu_delta_2",
+      "cpu_rolling_std_6",
+      "task_dominance",
+      "cpu_vs_p95",
+      "cpu_vs_p95_delta",
+      "peak_cpu_vs_p95",
+      "spike_severe_now",
+      "cpu_vs_p99",
+      "peak_cpu_vs_p99",
+      "band_position",
+      "band_width",
+      "spike_severe_in_last_1",
+      "spike_severe_in_last_3",
+      "spike_severe_in_last_6",
+      "spike_now",
+      "spike_in_last_1",
+      "spike_in_last_3",
+      "spike_in_last_6",
+      "time_since_last_spike",
+      "cpu_spike_rate_24",
+      "cluster_cpu_p90",
+      "machine_rank_in_cluster",
+      "hour_sin",
+      "hour_cos"
+    ],
+    "global_threshold_p95_fallback": 0.330136,
+    "global_threshold_p99_fallback": 0.393368,
+    "thresholds_file": "data/full_run/spike_thresholds.parquet"
+  },
+  "data": {
+    "training_rows": 14276522,
+    "training_machines": 12549
+  },
+  "environment": {
+    "python_version": "3.10.12",
+    "xgboost_version": "3.2.0"
+  },
+  "model_path": "data/full_run/models/spike/spike_model.json",
+  "feature_importance_path": "data/full_run/models/spike/feature_importance.csv",
+  "trained_at": "2026-04-15T13:30:08.841154+00:00"
+}
