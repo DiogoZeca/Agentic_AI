@@ -203,7 +203,11 @@ def _load_single_booster(model_dir: Path) -> tuple[xgb.Booster, list[str], float
     return booster, meta_cols, alarm_threshold
 
 
-def _load_artifacts(model_dir: Path) -> _Artifacts:
+def _load_artifacts(
+    model_dir:  Path,
+    *,
+    domain_dir: Optional[Path] = None,
+) -> _Artifacts:
     """Load all inference artefacts from model_dir.
 
     The 60m model is required (``model_dir/spike_model.json``).  The binary
@@ -212,9 +216,13 @@ def _load_artifacts(model_dir: Path) -> _Artifacts:
 
     Parameters
     ----------
-    model_dir : directory containing the primary (60m) model artefacts.
-                The binary 15m horizon model is expected as a sibling directory
-                named ``spike_15m`` relative to ``model_dir.parent``.
+    model_dir  : directory containing the primary (60m) model artefacts.
+                 The binary 15m horizon model is expected as a sibling directory
+                 named ``spike_15m`` relative to ``model_dir.parent``.
+    domain_dir : optional directory produced by ``bootstrap_thresholds.py``.
+                 When provided, spike_thresholds.parquet is loaded from here
+                 instead of model_dir, applying domain-specific per-machine
+                 CPU thresholds without retraining the model.
 
     Raises
     ------
@@ -225,7 +233,11 @@ def _load_artifacts(model_dir: Path) -> _Artifacts:
     # missing directories (spike_model.json not found).
     booster_60m, meta_cols, alarm_60m = _load_single_booster(model_dir)
 
-    thresholds_path = model_dir / "spike_thresholds.parquet"
+    thresholds_path = (
+        domain_dir / "spike_thresholds.parquet"
+        if domain_dir is not None
+        else model_dir / "spike_thresholds.parquet"
+    )
     if not thresholds_path.exists():
         raise FileNotFoundError(f"Required artefact not found: {thresholds_path}")
 
@@ -282,6 +294,8 @@ def _load_artifacts(model_dir: Path) -> _Artifacts:
         log.info("  Calibrators     : not found — using raw softmax probabilities")
 
     log.info("Artefacts loaded from %s", model_dir)
+    if domain_dir is not None:
+        log.info("  Thresholds      : %s (domain override)", thresholds_path)
     log.info("  Horizons loaded : %s", ", ".join(sorted(boosters.keys())))
     log.info("  Features        : %d columns", len(meta_cols))
     log.info("  Alarm thresholds: %s",

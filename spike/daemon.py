@@ -232,6 +232,7 @@ def run(
     *,
     input_path:  Optional[Path] = None,
     fetch_cmd:   Optional[str]  = None,
+    domain_dir:  Optional[Path] = None,
 ) -> None:
     """Load models and start the prediction loop.
 
@@ -245,12 +246,14 @@ def run(
     log.info("  SPIKE PREDICTOR DAEMON")
     log.info("  Input     : %s", input_label)
     log.info("  Model dir : %s", model_dir.resolve())
+    if domain_dir is not None:
+        log.info("  Domain dir: %s", domain_dir.resolve())
     log.info("  Output    : %s", output_path.resolve())
     log.info("  Interval  : %s", f"{interval}s" if interval > 0 else "one-shot")
     log.info("═" * 62)
 
     try:
-        artifacts = _load_artifacts(model_dir)
+        artifacts = _load_artifacts(model_dir, domain_dir=domain_dir)
     except FileNotFoundError as exc:
         log.error("Model artefacts not found: %s", exc)
         log.error("  --model-dir should point to the directory containing spike_model.json")
@@ -360,6 +363,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help     = "Path for atomic JSON output (overwritten each cycle).",
     )
     p.add_argument(
+        "--domain-dir", "-d",
+        dest    = "domain_dir",
+        type    = Path,
+        metavar = "DIR",
+        default = None,
+        help    = (
+            "Optional directory produced by bootstrap_thresholds.py. "
+            "When provided, spike_thresholds.parquet is loaded from here "
+            "instead of --model-dir, applying domain-specific CPU thresholds "
+            "without retraining."
+        ),
+    )
+    p.add_argument(
         "--interval", "-n",
         default = 300,
         type    = int,
@@ -386,6 +402,7 @@ def main(argv: list[str] | None = None) -> None:
         interval    = args.interval,
         input_path  = args.input,
         fetch_cmd   = args.fetch_cmd,
+        domain_dir  = args.domain_dir,
     )
 
 
