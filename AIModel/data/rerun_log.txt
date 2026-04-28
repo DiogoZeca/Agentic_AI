@@ -1,0 +1,164 @@
+nohup: ignoring input
+18:16:28  Run config saved: data/full_run/models/spike/run_config.json
+18:16:28  ══════════════════════════════════════════════════════════════
+18:16:28    STEP 1 — Preprocessing
+18:16:28  ══════════════════════════════════════════════════════════════
+18:16:28    SPIKE PREPROCESSOR — node-level 5-min aggregation
+18:16:28    Input    : data/cluster_cpu_data.csv
+18:16:28    Output   : data/full_run/cluster_agg.parquet
+18:16:28    Chunk    : 5,000,000 rows
+18:16:28  ══════════════════════════════════════════════════════════════
+18:17:05    chunk  10  |  50,000,000 rows read  |  0.6 min elapsed
+18:17:41    chunk  20  |  100,000,000 rows read  |  1.2 min elapsed
+18:18:19    chunk  30  |  150,000,000 rows read  |  1.8 min elapsed
+18:18:56    chunk  40  |  200,000,000 rows read  |  2.5 min elapsed
+18:19:33    chunk  50  |  250,000,000 rows read  |  3.1 min elapsed
+18:19:54  Merging 56 partial results …
+18:20:09  ══════════════════════════════════════════════════════════════
+18:20:09    Done
+18:20:09    Output rows  : 23,972,021  (12555 machines × 1919 buckets)
+18:20:09    Output size  : 337.5 MB
+18:20:09    Elapsed      : 3.7 min
+18:20:09  ══════════════════════════════════════════════════════════════
+18:20:09    Step 1 done in 3.7 min
+18:20:09  ══════════════════════════════════════════════════════════════
+18:20:09    STEP 2 — Feature engineering
+18:20:09  ══════════════════════════════════════════════════════════════
+18:20:09    SPIKE FEATURE ENGINEER — lag / EWMA / spike history / cluster
+18:20:09    Input      : data/full_run/cluster_agg.parquet
+18:20:09    Output     : data/full_run/cluster_features.parquet
+18:20:09    Thresholds : data/full_run/spike_thresholds.parquet
+18:20:09    Horizon    : 12 windows (60 min)
+18:20:09    Train ratio: 60%  (thresholds computed from this window only)
+18:20:09  ══════════════════════════════════════════════════════════════
+18:20:11    Train max bucket : 1152
+18:20:13    6 machine(s) absent from training data — assigning global thresholds (p95=0.4397, p99=0.5442) as fallback
+18:20:13    Enforced min 10% p99/p95 gap for 3612 machines
+18:20:13    Thresholds saved : 12555 machines
+18:20:13    Engineering features for 12555 machines …
+18:20:24     1000 / 12555 machines  |  0.2 min
+18:20:36     2000 / 12555 machines  |  0.4 min
+18:20:47     3000 / 12555 machines  |  0.6 min
+18:20:59     4000 / 12555 machines  |  0.8 min
+18:21:10     5000 / 12555 machines  |  1.0 min
+18:21:22     6000 / 12555 machines  |  1.2 min
+18:21:33     7000 / 12555 machines  |  1.3 min
+18:21:45     8000 / 12555 machines  |  1.5 min
+18:21:56     9000 / 12555 machines  |  1.7 min
+18:22:08    10000 / 12555 machines  |  1.9 min
+18:22:19    11000 / 12555 machines  |  2.1 min
+18:22:31    12000 / 12555 machines  |  2.3 min
+18:22:41    Adding cluster-level features …
+18:22:52    Adding time-of-day / day-of-week features …
+18:23:15  ══════════════════════════════════════════════════════════════
+18:23:15    Done
+18:23:15    Output rows  : 23,972,021
+18:23:15    Labeled rows : 23,821,391  (last 12 per machine = NaN)
+18:23:15    Severity dist : no_spike=19,570,926  moderate=13.1%  severe=4.7%
+18:23:15    Spike rates   : 15m=7.9%  30m=11.7%  45m=14.9%
+18:23:15    Output size  : 1775.7 MB
+18:23:15    Elapsed      : 3.0 min
+18:23:15  ══════════════════════════════════════════════════════════════
+18:23:15    Step 2 done in 3.1 min
+18:23:15  ══════════════════════════════════════════════════════════════
+18:23:15    STEP 3 — Training
+18:23:28    Optuna storage  : data/full_run/models/spike/optuna.db
+18:23:32    Optuna warm-start : enqueueing 1 trial from previous best_params
+18:23:32    Optuna search   : 50 trials  |  inner split  train=7125938  val=7150584 rows
+18:51:58    Optuna    5/50  |  best PR-AUC 0.5470  |  trial 0.5446
+19:15:17    Optuna   10/50  |  best PR-AUC 0.5470  |  trial 0.5422
+19:33:28    Optuna   15/50  |  best PR-AUC 0.5470  |  trial 0.5384
+20:05:28    Optuna   20/50  |  best PR-AUC 0.5470  |  trial 0.5422
+20:41:20    Optuna   25/50  |  best PR-AUC 0.5470  |  trial 0.5422
+21:11:07    Optuna   30/50  |  best PR-AUC 0.5491  |  trial 0.5450
+21:47:41    Optuna   35/50  |  best PR-AUC 0.5491  |  trial 0.5488
+22:14:07    Optuna   40/50  |  best PR-AUC 0.5491  |  trial 0.5472
+22:47:51    Optuna   45/50  |  best PR-AUC 0.5494  |  trial 0.5440
+23:06:41    Optuna   50/50  |  best PR-AUC 0.5494  |  trial 0.5447
+23:06:41    Optuna done     : best macro-PR-AUC 0.5494  (trial 41 / 50 completed)
+23:06:41    Best params saved  : data/full_run/models/spike/best_params.json
+23:06:41  ──────────────────────────────────────────────────────────────
+23:06:41    WALK-FORWARD CV  (5 folds, expanding window, gap=12 buckets, label=severity_in_60m)
+23:06:41  ──────────────────────────────────────────────────────────────
+23:08:23    Fold 1/5  |  MacroPR 0.557  MacroF1 0.509  thresh 0.55  spike(tr=20.4%  val=20.1%)
+23:11:22    Fold 2/5  |  MacroPR 0.563  MacroF1 0.514  thresh 0.55  spike(tr=20.2%  val=20.0%)
+23:15:26    Fold 3/5  |  MacroPR 0.578  MacroF1 0.521  thresh 0.55  spike(tr=20.2%  val=20.1%)
+23:20:40    Fold 4/5  |  MacroPR 0.575  MacroF1 0.515  thresh 0.55  spike(tr=20.2%  val=20.1%)
+23:26:57    Fold 5/5  |  MacroPR 0.554  MacroF1 0.526  thresh 0.50  spike(tr=20.2%  val=19.7%)
+23:26:57    CV results saved : data/full_run/models/spike/cv_results.csv
+23:26:57  ──────────────────────────────────────────────────────────────
+23:26:57    CV SUMMARY
+23:26:57    macro_pr_auc      mean 0.565  ±  std 0.010
+23:26:57    macro_roc_auc     mean 0.816  ±  std 0.016
+23:26:57    weighted_f1       mean 0.741  ±  std 0.010
+23:26:57    macro_f1          mean 0.517  ±  std 0.006
+23:26:57  ──────────────────────────────────────────────────────────────
+23:26:57    Drift signal  : Macro-PR is STABLE                              τ=0.00  p=1.000
+23:26:57    Per-fold Macro-PR : 0.557  0.563  0.578  0.575  0.554
+23:26:57  ──────────────────────────────────────────────────────────────
+23:26:57  ══════════════════════════════════════════════════════════════
+23:26:57    FINAL TRAINING  (train=60%  val=20%  test=20%)
+23:26:57  ══════════════════════════════════════════════════════════════
+23:26:57    SPIKE CLASSIFIER — training (3-class severity)
+23:26:57    Input      : data/full_run/cluster_features.parquet
+23:26:57    Model      : data/full_run/models/spike/spike_model.json
+23:26:57    Split      : train 60% / val 20% / test 20%
+23:26:57  ══════════════════════════════════════════════════════════════
+23:27:12    Train rows : 14,276,522  (moderate 15.1%  severe 5.0%)
+23:27:12    Val rows   : 4,774,116  (moderate 11.7%  severe 5.4%)
+23:27:12    Test rows  : 4,770,753  (moderate 8.6%  severe 3.3%)
+23:35:54    Training time : 520.9 s
+23:36:18    ─────────────────────────────────────────────────────
+23:36:18    Macro PR-AUC   : 0.522  ← primary metric
+23:36:18    Macro ROC-AUC  : 0.798
+23:36:18    Per-class PR-AUC : no_spike=0.965  moderate=0.278  severe=0.324
+23:36:18    Alarm threshold  : 0.70  (p_severe)  →  P=0.382  R=0.332
+23:36:18  ══════════════════════════════════════════════════════════════
+23:36:18    Model saved    : data/full_run/models/spike/spike_model.json
+23:36:18    Metadata saved : data/full_run/models/spike/spike_model.meta.json
+23:36:32    ALARM THRESHOLD SWEEP  (p_severe on validation set)
+23:36:32    p_severe  | Precision | Recall | F1    | Alarms/day
+23:36:32    ──────────┼───────────┼────────┼───────┼────────────
+23:36:32      0.10    |   0.0564  |  0.9992 | 0.1068 |   273.8
+23:36:32      0.15    |   0.0596  |  0.9969 | 0.1125 |   258.5
+23:36:32      0.20    |   0.0643  |  0.9916 | 0.1209 |   238.3
+23:36:32      0.25    |   0.0709  |  0.9797 | 0.1322 |   213.7
+23:36:32      0.30    |   0.0803  |  0.9549 | 0.1481 |   184.0
+23:36:32      0.35    |   0.0942  |  0.9130 | 0.1707 |   149.9
+23:36:32      0.40    |   0.1139  |  0.8521 | 0.2010 |   115.7
+23:36:32      0.45    |   0.1407  |  0.7781 | 0.2383 |    85.5
+23:36:32      0.50    |   0.1750  |  0.6961 | 0.2797 |    61.5
+23:36:32      0.55    |   0.2190  |  0.6113 | 0.3225 |    43.2
+23:36:32      0.60    |   0.2753  |  0.5238 | 0.3609 |    29.4
+23:36:32      0.65    |   0.3470  |  0.4355 | 0.3863 |    19.4
+23:36:32      0.70    |   0.4367  |  0.3516 | 0.3896 |    12.4  ←  alarm
+23:36:32      0.75    |   0.5369  |  0.2830 | 0.3706 |     8.2
+23:36:32      0.80    |   0.6242  |  0.2337 | 0.3401 |     5.8
+23:36:32      0.85    |   0.6884  |  0.1973 | 0.3067 |     4.4
+23:36:32      0.90    |   0.7519  |  0.1529 | 0.2541 |     3.1
+23:36:32      0.95    |   0.8532  |  0.0635 | 0.1182 |     1.2
+23:44:56    SHAP values computed (shap package available)
+23:44:56    Feature importance saved : data/full_run/models/spike/feature_importance.csv
+23:44:56    Top-10 features by gain:
+23:44:56      spike_severe_now        gain 0.1192  SHAP 0.0027
+23:44:56      spike_in_last_6         gain 0.0965  SHAP 0.0162
+23:44:56      time_since_last_spike   gain 0.0870  SHAP 0.0789
+23:44:56      spike_now               gain 0.0732  SHAP 0.0113
+23:44:56      spike_severe_in_last_3  gain 0.0654  SHAP 0.0020
+23:44:56      band_position           gain 0.0618  SHAP 0.0351
+23:44:56      cpu_vs_p95              gain 0.0583  SHAP 0.2301
+23:44:56      spike_severe_in_last_6  gain 0.0524  SHAP 0.0110
+23:44:56      cpu_vs_p99              gain 0.0520  SHAP 0.0880
+23:44:56      cpu_spike_rate_24       gain 0.0513  SHAP 0.0828
+23:44:57    Spike config saved : data/full_run/models/spike/spike_config.json
+23:44:59    Starting binary horizon model: 15m (spike_in_15m)
+23:44:59    [GC] Memory freed before 15m binary model training
+23:45:16  ══════════════════════════════════════════════════════════════
+23:45:16    BINARY SPIKE CLASSIFIER — 15m horizon  (spike_in_15m)
+23:45:16    Train rows : 14,351,633  (spike 8.9%)
+23:45:16    Val rows   : 4,786,755
+23:45:16    Test rows  : 4,795,970
+23:45:16    spw        : 10.3  (n_neg/n_pos = 13076841/1274792)
+23:45:16    Optuna storage  : data/full_run/models/spike_15m/optuna.db
+23:45:25    Optuna warm-start : enqueueing 1 trial from previous best_params
+23:45:25    Optuna search   : 50 trials  |  inner split  train=7163423  val=7188210 rows
