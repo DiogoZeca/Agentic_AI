@@ -63,15 +63,20 @@ All commands run from the **repo root** (`Agentic_AI/`).
 ## Commands
 
 ```bash
-# Install spike package (required before running tests or scripts)
+# Create and activate the local venv (first time only — run from repo root)
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[test]"   # installs spike + test deps (optuna, shap, pytest, …)
+
+# Install spike package into an existing activated venv
 pip install -e .
 
 # Run the full test suite (~30 seconds)
-AIModel/.venv/bin/python3.12 -m pytest tests/ -v
+.venv/bin/python3.12 -m pytest tests/ -v
 
 # Run a single test file or a specific test class/function
-AIModel/.venv/bin/python3.12 -m pytest tests/test_feature_engineer.py -v
-AIModel/.venv/bin/python3.12 -m pytest tests/test_feature_engineer.py::TestStreakFeatures -v
+.venv/bin/python3.12 -m pytest tests/test_feature_engineer.py -v
+.venv/bin/python3.12 -m pytest tests/test_feature_engineer.py::TestStreakFeatures -v
 
 # Run the full training pipeline from scratch (CPU — slow)
 python training/train.py \

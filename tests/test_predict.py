@@ -30,7 +30,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from spike.predict import (
     _Artifacts,
     _build_features,
+    _check_input_bounds,
+    _coerce_input,
     _load_artifacts,
+    _prepare_input,
     _run_inference,
     _validate_input,
     predict,
@@ -236,6 +239,96 @@ class TestInputValidation:
         df = _make_window_df()
         df["extra_col"] = 0
         _validate_input(df)   # must not raise
+
+
+# ── Category 1b: Type coercion ───────────────────────────────────────────────
+
+
+class TestInputCoercion:
+    """_coerce_input must cast columns to the correct dtypes in-place."""
+
+    def test_string_numerics_are_cast(self):
+        df = _make_window_df().astype(str)
+        _coerce_input(df)
+        assert df["machine_id"].dtype == "int64"
+        assert df["total_cpu"].dtype == "float32"
+
+    def test_int_cols_cast_to_int64(self):
+        df = _make_window_df()
+        df["machine_id"] = df["machine_id"].astype("int32")
+        _coerce_input(df)
+        assert df["machine_id"].dtype == "int64"
+        assert df["bucket"].dtype == "int64"
+        assert df["n_tasks"].dtype == "int64"
+
+    def test_float_cols_cast_to_float32(self):
+        df = _make_window_df()
+        for col in ("total_cpu", "peak_cpu", "total_mem", "peak_mem", "disk_io"):
+            df[col] = df[col].astype("float64")
+        _coerce_input(df)
+        for col in ("total_cpu", "peak_cpu", "total_mem", "peak_mem", "disk_io"):
+            assert df[col].dtype == "float32", f"{col} not cast to float32"
+
+    def test_non_numeric_string_raises(self):
+        df = _make_window_df()
+        df["total_cpu"] = "not_a_number"
+        with pytest.raises(ValueError, match="total_cpu"):
+            _coerce_input(df)
+
+    def test_already_correct_dtypes_unchanged(self):
+        df = _make_window_df()
+        _coerce_input(df)   # must not raise or corrupt values
+        assert df["total_cpu"].dtype == "float32"
+        assert df["machine_id"].dtype == "int64"
+
+
+# ── Category 1c: Bounds warnings ─────────────────────────────────────────────
+
+
+class TestInputBoundsCheck:
+    """_check_input_bounds must warn on implausible values but never raise."""
+
+    def test_cpu_percentage_logs_warning(self, caplog):
+        import logging
+        df = _make_window_df()
+        df["total_cpu"] = 80.0   # percentage, not fraction-of-core
+        with caplog.at_level(logging.WARNING):
+            _check_input_bounds(df)
+        assert any("total_cpu" in r.message for r in caplog.records)
+
+    def test_memory_percentage_logs_warning(self, caplog):
+        import logging
+        df = _make_window_df()
+        df["total_mem"] = 75.0   # percentage, not [0, 1]
+        with caplog.at_level(logging.WARNING):
+            _check_input_bounds(df)
+        assert any("total_mem" in r.message for r in caplog.records)
+
+    def test_negative_n_tasks_logs_warning(self, caplog):
+        import logging
+        df = _make_window_df()
+        df["n_tasks"] = -1
+        with caplog.at_level(logging.WARNING):
+            _check_input_bounds(df)
+        assert any("n_tasks" in r.message for r in caplog.records)
+
+    def test_valid_values_produce_no_warning(self, caplog):
+        import logging
+        df = _make_window_df()
+        with caplog.at_level(logging.WARNING):
+            _check_input_bounds(df)
+        assert not caplog.records
+
+    def test_bounds_check_never_raises(self):
+        df = _make_window_df()
+        df["total_cpu"] = 999.0   # wildly wrong — must warn, not raise
+        _check_input_bounds(df)   # must not raise
+
+    def test_prepare_input_runs_full_pipeline(self):
+        df = _make_window_df().astype({"machine_id": "int32", "total_cpu": "float64"})
+        _prepare_input(df)
+        assert df["machine_id"].dtype == "int64"
+        assert df["total_cpu"].dtype == "float32"
 
 
 # ── Category 2: Feature parity (training-serving consistency) ─────────────────

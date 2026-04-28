@@ -53,10 +53,6 @@ docs/
 .env.*
 !.env.example
 
-# ─── Domain-specific data fetch scripts (may contain credentials) ─────────────
-data/explore_zabbix.py
-data/fetch_zabbix_data.py
-
 # ─── Jupyter ─────────────────────────────────────────────────────────────────
 .ipynb_checkpoints/
 

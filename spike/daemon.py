@@ -58,7 +58,7 @@ from typing import Optional
 
 import pandas as pd
 
-from spike.predict import _Artifacts, _load_artifacts, _validate_input, predict_with_artifacts
+from spike.predict import _Artifacts, _load_artifacts, _prepare_input, predict_with_artifacts
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 # Mirrors predict_spike.py: all log output goes to stderr; stdout is unused.
@@ -145,7 +145,7 @@ def _run_cycle(
         return None
 
     try:
-        _validate_input(df)
+        _prepare_input(df)
     except ValueError as exc:
         log.warning("  Input schema error — skipping: %s", exc)
         return None

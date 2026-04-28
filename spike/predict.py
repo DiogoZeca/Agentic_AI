@@ -102,11 +102,29 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── Required input columns (cluster_agg format) ───────────────────────────────
+# ── Required input columns and expected dtypes (cluster_agg format) ──────────
 
 _INPUT_COLS: tuple[str, ...] = (
     "machine_id", "bucket", "time_us",
     "total_cpu", "peak_cpu", "total_mem", "peak_mem", "disk_io", "n_tasks",
+)
+
+_INT_COLS:   tuple[str, ...] = ("machine_id", "bucket", "time_us", "n_tasks")
+_FLOAT_COLS: tuple[str, ...] = ("total_cpu", "peak_cpu", "total_mem", "peak_mem", "disk_io")
+
+# (column, upper_bound, lower_bound, diagnostic_hint)
+# upper/lower are None when no check in that direction.
+_BOUNDS: tuple[tuple[str, float | None, float | None, str], ...] = (
+    # CPU is fraction-of-core: 0–N_cores.  Values > 10 almost certainly indicate
+    # percentage units (operator forgot to divide by 100).
+    ("total_cpu",  10.0, None, "expected fraction-of-core; values > 10 suggest percentage units (divide by 100)"),
+    ("peak_cpu",   10.0, None, "expected fraction-of-core; values > 10 suggest percentage units (divide by 100)"),
+    # Memory and disk are fractions in [0, 1].
+    ("total_mem",   1.0, None, "expected fraction of capacity [0, 1]; values > 1 suggest percentage units"),
+    ("peak_mem",    1.0, None, "expected fraction of capacity [0, 1]; values > 1 suggest percentage units"),
+    ("disk_io",     1.0, None, "expected device utilisation [0, 1]; values > 1 suggest percentage units"),
+    # n_tasks is a count — negative values indicate a unit or sign error.
+    ("n_tasks",    None,  0.0, "n_tasks must be >= 0; negative values indicate a data-collection error"),
 )
 
 # Short-horizon binary models used for imminence scoring, in ascending order.
@@ -288,15 +306,14 @@ def _load_artifacts(model_dir: Path) -> _Artifacts:
     )
 
 
-# ── Input validation ──────────────────────────────────────────────────────────
+# ── Input preparation (validate → coerce → bounds check) ─────────────────────
 
 
 def _validate_input(df: pd.DataFrame) -> None:
-    """Raise ValueError with a descriptive message on any schema violation.
+    """Raise ValueError on hard schema violations (missing columns, empty data).
 
-    Parameters
-    ----------
-    df : raw DataFrame loaded from the input CSV.
+    Pure check — no mutations.  Called first by _prepare_input() so required
+    columns are guaranteed to exist before coercion runs.
 
     Raises
     ------
@@ -311,6 +328,72 @@ def _validate_input(df: pd.DataFrame) -> None:
             f"Input is missing required column(s): {missing}.\n"
             f"Expected: {list(_INPUT_COLS)}"
         )
+
+
+def _coerce_input(df: pd.DataFrame) -> None:
+    """Cast input columns to the dtypes expected by the feature engineer.
+
+    Operates in-place.  Raises ValueError if a column contains values that
+    cannot be cast (e.g. a non-numeric string such as "N/A").
+
+    Called after _validate_input() so all required columns are guaranteed present.
+    """
+    for col in _INT_COLS:
+        try:
+            df[col] = df[col].astype("int64")
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Column '{col}' cannot be cast to int64: {exc}") from exc
+
+    for col in _FLOAT_COLS:
+        try:
+            df[col] = df[col].astype("float32")
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Column '{col}' cannot be cast to float32: {exc}") from exc
+
+
+def _check_input_bounds(df: pd.DataFrame) -> None:
+    """Log warnings for values that are implausible for the cluster_agg schema.
+
+    Never raises — predictions still run with whatever data is present.
+    Warnings appear on stderr so the operator can diagnose their data-collection
+    script.  Called after _coerce_input() so columns have consistent dtypes.
+    """
+    for col, upper, lower, hint in _BOUNDS:
+        series = df[col]
+        if upper is not None and (series > upper).any():
+            pct = float((series > upper).mean() * 100)
+            log.warning(
+                "  Input bounds warning [%s]: %.1f%% of values exceed %.1f — %s",
+                col, pct, upper, hint,
+            )
+        if lower is not None and (series < lower).any():
+            pct = float((series < lower).mean() * 100)
+            log.warning(
+                "  Input bounds warning [%s]: %.1f%% of values are below %.1f — %s",
+                col, pct, lower, hint,
+            )
+
+    if df["machine_id"].isna().any():
+        n = int(df["machine_id"].isna().sum())
+        log.warning(
+            "  Input bounds warning [machine_id]: %d null value(s) — affected rows will be skipped",
+            n,
+        )
+
+
+def _prepare_input(df: pd.DataFrame) -> None:
+    """Single entry point for all input preparation.
+
+    Runs in order:
+      1. _validate_input  — raises ValueError on hard schema errors
+      2. _coerce_input    — in-place dtype coercion
+      3. _check_input_bounds — warns on implausible values (never raises)
+
+    Call this before _build_features() at every entry point.
+    """
+    _validate_input(df)
+    _coerce_input(df)
+    _check_input_bounds(df)
 
 
 # ── Feature engineering ───────────────────────────────────────────────────────
@@ -762,7 +845,7 @@ def predict(input_df: pd.DataFrame, model_dir: str | Path) -> dict:
     FileNotFoundError on missing artefact files.
     RuntimeError     on feature column mismatch.
     """
-    _validate_input(input_df)
+    _prepare_input(input_df)
     artifacts   = _load_artifacts(Path(model_dir))
     feature_df, status_map = _build_features(input_df, artifacts)
     predictions = _run_inference(feature_df, input_df, status_map, artifacts)
@@ -802,7 +885,7 @@ def predict_with_artifacts(input_df: pd.DataFrame, artifacts: _Artifacts) -> dic
     ------
     ValueError  on schema violations.
     """
-    _validate_input(input_df)
+    _prepare_input(input_df)
     feature_df, status_map = _build_features(input_df, artifacts)
     predictions = _run_inference(feature_df, input_df, status_map, artifacts)
 
@@ -877,7 +960,7 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     try:
         input_df = pd.read_csv(args.input)
-        _validate_input(input_df)
+        _prepare_input(input_df)
     except ValueError as exc:
         log.error("Input validation failed: %s", exc)
         sys.exit(1)
