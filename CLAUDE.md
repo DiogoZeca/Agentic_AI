@@ -12,68 +12,87 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```
 Agentic_AI/
-├── CLAUDE.md                  ← this file
-├── docker-compose.yml         ← API + GPU training services
+├── CLAUDE.md                       ← this file
+├── pyproject.toml                  ← makes spike/ a pip-installable package
+├── docker-compose.yml              ← API + GPU training services
 ├── scripts/
-│   └── vm-setup.sh            ← one-shot GPU VM provisioning (Docker + NVIDIA Container Toolkit)
-└── AIModel/               ← all application code
-    ├── Dockerfile              ← inference API image (CPU-only)
-    ├── Dockerfile.test         ← test runner image
-    ├── Dockerfile.training     ← GPU training image (nvidia/cuda:12.4.1-runtime-ubuntu22.04)
-    ├── requirements-inference.txt
-    ├── requirements-train.txt
-    ├── spike_preprocessor.py
-    ├── spike_feature_engineer.py
-    ├── spike_classifier.py
-    ├── train_spike_classifier.py
-    ├── predict_spike.py
-    ├── spike_api.py
-    ├── demo.py                 ← Streamlit dashboard (4 tabs: Overview, Threshold, Calibration, SHAP)
-    ├── data/
-    │   ├── cluster_cpu_data.csv   ← Google Cluster Traces 2011 (278M rows, ~8GB)
-    │   ├── download_cluster_data.py  ← script used to pull the dataset
-    │   ├── full_run/              ← production artifacts — K=2 baseline (default)
-    │   └── experiments/           ← ablation runs (k1/, k3/, phase8_fft/, …)
-    └── tests/
-        ├── conftest.py
-        ├── test_spike_preprocessor.py
-        ├── test_spike_feature_engineer.py
-        ├── test_spike_classifier.py
-        ├── test_train_spike_classifier.py
-        └── test_predict_spike.py
+│   └── vm-setup.sh                 ← one-shot GPU VM provisioning (Docker + NVIDIA Container Toolkit)
+├── spike/                          ← inference package (pip install -e .)
+│   ├── __init__.py
+│   ├── feature_engineer.py
+│   ├── classifier.py
+│   ├── predict.py                  ← CLI inference script
+│   ├── api.py                      ← FastAPI service
+│   ├── daemon.py
+│   ├── Dockerfile                  ← inference API image (CPU-only)
+│   └── requirements-inference.txt
+├── training/
+│   ├── train.py                    ← CLI orchestrator (3-step pipeline)
+│   ├── Dockerfile.training         ← GPU training image (nvidia/cuda:12.4.1-runtime-ubuntu22.04)
+│   ├── requirements-train.txt
+│   └── adapters/
+│       ├── README.md               ← cluster_agg interface contract
+│       ├── google_cluster.py       ← Google Cluster Traces 2011 CSV → cluster_agg
+│       └── zabbix.py               ← Zabbix 7.x API → cluster_agg
+├── evaluation/
+│   ├── evaluate_cross_domain.py    ← 3-phase cross-domain evaluation (PSI + PR-AUC)
+│   └── baselines/
+│       ├── evaluate_baselines.py   ← Persistence / EWMA / ARIMA baselines
+│       └── *.md / *.json           ← Baseline results
+├── tests/
+│   ├── conftest.py
+│   ├── test_preprocessor.py
+│   ├── test_feature_engineer.py
+│   ├── test_classifier.py
+│   ├── test_train.py
+│   ├── test_predict.py
+│   ├── Dockerfile.test
+│   └── requirements-test.txt
+├── demo/
+│   ├── demo.py                     ← Streamlit dashboard (4 tabs: Overview, Threshold, Calibration, SHAP)
+│   └── requirements-demo.txt
+└── data/
+    ├── cluster_cpu_data.csv        ← Google Cluster Traces 2011 (278M rows, ~8GB)
+    ├── download_cluster_data.py
+    ├── full_run/                   ← production artifacts — K=2 baseline (default)
+    └── experiments/                ← ablation runs (k1/, k3/, phase8_fft/, …)
 ```
 
-All commands run from `AIModel/`.
+All commands run from the **repo root** (`Agentic_AI/`).
 
 ## Commands
 
 ```bash
-cd AIModel/
+# Install spike package (required before running tests or scripts)
+pip install -e .
 
 # Run the full test suite (~30 seconds)
-.venv/bin/python3 -m pytest tests/ -v
+AIModel/.venv/bin/python3.12 -m pytest tests/ -v
 
 # Run a single test file or a specific test class/function
-.venv/bin/python3 -m pytest tests/test_spike_feature_engineer.py -v
-.venv/bin/python3 -m pytest tests/test_spike_feature_engineer.py::TestStreakFeatures -v
+AIModel/.venv/bin/python3.12 -m pytest tests/test_feature_engineer.py -v
+AIModel/.venv/bin/python3.12 -m pytest tests/test_feature_engineer.py::TestStreakFeatures -v
 
 # Run the full training pipeline from scratch (CPU — slow)
-.venv/bin/python3 train_spike_classifier.py \
+python training/train.py \
   --data-path data/cluster_cpu_data.csv \
   --artifacts-dir data/full_run \
   --tune-hyperparams --optuna-trials 30 \
   --n-estimators 4000
 
 # Resume from Step N (skips earlier steps if cache exists)
-.venv/bin/python3 train_spike_classifier.py \
+python training/train.py \
   --data-path data/cluster_cpu_data.csv \
   --artifacts-dir data/full_run \
   --from-step 3 \
   --tune-hyperparams --optuna-trials 30 \
   --n-estimators 4000
 
-# Monitor training
-tail -f data/run_log.txt
+# Cross-domain evaluation on a new dataset
+python evaluation/evaluate_cross_domain.py \
+  --agg data/your_domain/cluster_agg.parquet \
+  --artifacts-dir data/full_run \
+  --output data/your_domain_eval
 
 # GPU training via Docker Compose (run from ~/spike on the VM)
 docker compose --profile train run --rm --build train
@@ -95,12 +114,12 @@ Three training steps, each caching its output:
 
 ```
 cluster_cpu_data.csv
-  → [Step 1] spike_preprocessor.py      → data/full_run/cluster_agg.parquet
-  → [Step 2] spike_feature_engineer.py  → data/full_run/cluster_features.parquet
-                                           data/full_run/spike_thresholds.parquet
-  → [Step 3] train_spike_classifier.py  → data/full_run/models/spike/            (60m severity)
-                                           data/full_run/models/spike_15m/        (15m binary)
-                                           data/full_run/models/spike_severe_ovr/ (OVR severe)
+  → [Step 1] training/adapters/google_cluster.py  → data/full_run/cluster_agg.parquet
+  → [Step 2] spike/feature_engineer.py            → data/full_run/cluster_features.parquet
+                                                     data/full_run/spike_thresholds.parquet
+  → [Step 3] spike/classifier.py                  → data/full_run/models/spike/            (60m severity)
+                                                     data/full_run/models/spike_15m/        (15m binary)
+                                                     data/full_run/models/spike_severe_ovr/ (OVR severe)
 ```
 
 **Directory convention:**
@@ -142,10 +161,12 @@ Four XGBoost models, all trained on the same 40-feature set:
 
 **Input schema (cluster_agg format):**
 
+Any domain adapter that produces this schema can feed the full pipeline unchanged.
+
 | Column | Type | Description |
 |--------|------|-------------|
 | `machine_id` | int64 | Unique machine identifier |
-| `bucket` | int64 | 5-min bucket index |
+| `bucket` | int64 | 5-min bucket index (`unix_ts // 300`) |
 | `time_us` | int64 | `bucket × 300_000_000` (microseconds) |
 | `total_cpu` | float32 | Duration-weighted CPU load (fraction of 1 core) |
 | `peak_cpu` | float32 | Peak CPU rate in the 5-min window |
@@ -153,6 +174,8 @@ Four XGBoost models, all trained on the same 40-feature set:
 | `peak_mem` | float32 | Peak memory usage |
 | `disk_io` | float32 | Max mean disk I/O time |
 | `n_tasks` | int32 | Concurrent tasks in bucket |
+
+See `training/adapters/README.md` for adapter writing instructions.
 
 ## Features (40 total)
 
@@ -187,7 +210,7 @@ and cannot leak.
 
 ## K-of-N Label Ablation
 
-`train_spike_classifier.py` accepts `--min-future-windows K` (**default K=2**):
+`training/train.py` accepts `--min-future-windows K` (**default K=2**):
 
 - **K=1:** `severity_in_60m = moderate` if *any* of the next 12 windows exceeds p95.
 - **K=2 (default):** requires at least 2 of the next 12 windows to exceed p95. Production baseline.
@@ -195,7 +218,7 @@ and cannot leak.
 
 Binary labels (`spike_in_15m`, `spike_in_30m`, `spike_in_45m`) always use K=1.
 
-`Dockerfile.training` has `ENV MIN_FUTURE_WINDOWS=2` (K=2 is the production default).
+`training/Dockerfile.training` has `ENV MIN_FUTURE_WINDOWS=2` (K=2 is the production default).
 
 ## Key Design Constraints
 

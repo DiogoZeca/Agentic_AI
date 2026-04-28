@@ -16,24 +16,23 @@
 #       ARTIFACTS_DIR=data/experiments/cascade_stage2 \
 #       docker compose --profile train run -d --rm --build train'"
 #
-#   DATA_ROOT overrides the host-side data directory (default: ./AIModel/data).
-#   Not needed locally; set on the VM only if running via DOCKER_HOST (not recommended).
+#   DATA_ROOT overrides the host-side data directory (default: ./data).
 
 services:
 
   test:
     build:
-      context: ./AIModel
-      dockerfile: Dockerfile.test
+      context: .
+      dockerfile: tests/Dockerfile.test
     container_name: spike-test
     volumes:
-      - ${DATA_ROOT:-./AIModel/data}:/app/data
+      - ${DATA_ROOT:-./data}:/app/data
     profiles: [test]
 
   api:
     build:
-      context: ./AIModel
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: spike/Dockerfile
     container_name: spike-api
     ports:
       - "8000:8000"
@@ -41,7 +40,7 @@ services:
       - MODEL_DIR=/app/data/full_run/models/spike
     volumes:
       # Model artifacts mounted read-only — update model without rebuilding image
-      - ./AIModel/data/full_run:/app/data/full_run:ro
+      - ./data/full_run:/app/data/full_run:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -52,8 +51,8 @@ services:
 
   train:
     build:
-      context: ./AIModel
-      dockerfile: Dockerfile.training
+      context: .
+      dockerfile: training/Dockerfile.training
     container_name: spike-train
     environment:
       # Set DEVICE=cuda to use the GPU; _resolve_device() falls back to CPU if
@@ -69,9 +68,8 @@ services:
       - FROM_STEP=${FROM_STEP:-1}
     volumes:
       # Input CSV (read) + artifact output (write) both under the same mount.
-      # Trained models are accessible from the host at ./AIModel/data/full_run/.
-      # Override DATA_ROOT to point to the VM's absolute path when needed.
-      - ${DATA_ROOT:-./AIModel/data}:/app/data
+      # Trained models are accessible from the host at ./data/full_run/.
+      - ${DATA_ROOT:-./data}:/app/data
     deploy:
       resources:
         reservations:

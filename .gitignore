@@ -21,15 +21,15 @@ build/
 # ─── Pytest ──────────────────────────────────────────────────────────────────
 .pytest_cache/
 
-# ─── Input data (re-download with: python AIModel/data/download_cluster_data.py)
-AIModel/data/*.csv
+# ─── Input data (re-download with: python data/download_cluster_data.py)
+data/*.csv
 
-# ─── Training artifacts (re-create with: python AIModel/train_spike_classifier.py)
-AIModel/data/full_run/
-AIModel/data/*.txt
+# ─── Training artifacts (re-create with: python training/train.py)
+data/full_run/
+data/*.txt
 
 # ─── Experiment ablation artifacts (large model weights, regeneratable) ──────
-AIModel/data/experiments/
+data/experiments/
 
 # ─── Binary data and model artifact files ────────────────────────────────────
 *.parquet
@@ -53,9 +53,9 @@ docs/
 .env.*
 !.env.example
 
-# ─── Zabbix data scripts (contain hardcoded credentials) ─────────────────────
-AIModel/data/explore_zabbix.py
-AIModel/data/fetch_zabbix_data.py
+# ─── Domain-specific data fetch scripts (may contain credentials) ─────────────
+data/explore_zabbix.py
+data/fetch_zabbix_data.py
 
 # ─── Jupyter ─────────────────────────────────────────────────────────────────
 .ipynb_checkpoints/
