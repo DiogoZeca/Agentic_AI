@@ -1,11 +1,17 @@
 """Continuous spike-prediction daemon.
 
 Wraps predict_spike.py in a fixed-rate polling loop: every --interval seconds,
-reads --input CSV, runs all loaded models, and atomically writes --output JSON.
+reads cluster_agg data, runs all loaded models, and atomically writes --output JSON.
 
-The input CSV (cluster_agg format, last 120 min / 24 buckets per machine) is
-the caller's responsibility — any monitoring system can produce it.  The daemon
-is fully source-agnostic.
+Data can be supplied in two ways (mutually exclusive):
+
+  --input CSV        Read a pre-written cluster_agg CSV file each cycle.
+                     Any monitoring system can write this file; the daemon is
+                     fully source-agnostic.
+
+  --fetch-cmd CMD    Run CMD as a shell command each cycle and parse its stdout
+                     as a cluster_agg CSV.  Use this to drive any data-collection
+                     script directly from the daemon without an intermediate file.
 
 Input schema (cluster_agg format)
 ----------------------------------
@@ -21,14 +27,22 @@ Input schema (cluster_agg format)
 
 Usage
 -----
-    python predict_daemon.py \\
+    # File mode (operator writes cpu_window.csv every 5 min via their own script)
+    python spike/daemon.py \\
         --input      cpu_window.csv \\
-        --model-dir  models/spike/ \\
+        --model-dir  /path/to/models/spike \\
+        --output     predictions.json \\
+        --interval   300
+
+    # Fetch-command mode (operator provides a data-collection script)
+    python spike/daemon.py \\
+        --fetch-cmd  "python my_data_script.py" \\
+        --model-dir  /path/to/models/spike \\
         --output     predictions.json \\
         --interval   300
 
     # One-shot (run once and exit — useful for cron / testing)
-    python predict_daemon.py --input cpu_window.csv --model-dir models/spike/ \\
+    python spike/daemon.py --input cpu_window.csv --model-dir /path/to/models/spike \\
         --output predictions.json --interval 0
 
 Timing
@@ -40,15 +54,17 @@ If inference takes longer than --interval, the next cycle starts immediately
 Exit codes
 ----------
     0  clean shutdown (SIGTERM / SIGINT or --interval 0)
-    1  fatal startup error (missing artefacts, bad model directory)
+    1  fatal startup error (missing artefacts, bad model directory, bad flags)
 """
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -119,30 +135,81 @@ def _log_cycle(result: dict, elapsed: float) -> None:
     )
 
 
-def _run_cycle(
-    input_path:  Path,
-    output_path: Path,
-    artifacts:   _Artifacts,
-) -> Optional[dict]:
-    """Execute one inference cycle.
+def _fetch_from_command(cmd: str) -> Optional[pd.DataFrame]:
+    """Run *cmd* as a shell command and parse its stdout as a cluster_agg CSV.
 
-    Returns the result dict on success, or None if the cycle was skipped due to
-    a recoverable input error (file missing, unreadable, schema violation).
+    Returns a DataFrame on success, or None on any recoverable error (timeout,
+    non-zero exit code, empty output, unparseable CSV).  The caller skips the
+    cycle on None and retries at the next interval.
 
-    Raises on unexpected internal errors so the daemon loop can log them with a
-    full traceback without silently continuing.
+    shell=True is intentional: operators pass full shell commands including
+    pipes, environment substitutions, and argument lists.
     """
-    if not input_path.exists():
-        log.warning("  Input not found: %s  (operator pipeline not ready?) — skipping", input_path)
+    try:
+        proc = subprocess.run(
+            cmd,
+            shell          = True,
+            capture_output = True,
+            text           = True,
+            timeout        = 60,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning("  --fetch-cmd timed out after 60s — skipping cycle")
+        return None
+
+    if proc.returncode != 0:
+        log.warning(
+            "  --fetch-cmd exited %d — skipping cycle. stderr: %s",
+            proc.returncode,
+            (proc.stderr[:300].strip() or "(none)"),
+        )
+        return None
+
+    if not proc.stdout.strip():
+        log.warning("  --fetch-cmd produced no output — skipping cycle")
         return None
 
     try:
-        df = pd.read_csv(input_path)
+        return pd.read_csv(io.StringIO(proc.stdout))
     except Exception as exc:
-        # File exists but can't be parsed — likely being written concurrently.
-        # Safe to skip: the next cycle will retry with the completed file.
-        log.warning("  Could not read input (%s): %s — skipping", input_path.name, exc)
+        log.warning("  --fetch-cmd output could not be parsed as CSV: %s — skipping", exc)
         return None
+
+
+def _run_cycle(
+    output_path: Path,
+    artifacts:   _Artifacts,
+    *,
+    input_path:  Optional[Path] = None,
+    fetch_cmd:   Optional[str]  = None,
+) -> Optional[dict]:
+    """Execute one inference cycle.
+
+    Exactly one of *input_path* or *fetch_cmd* must be provided (enforced by
+    the CLI).  Returns the result dict on success, or None when the cycle is
+    skipped due to a recoverable error (missing file, command failure, schema
+    violation).  Raises on unexpected internal errors so the daemon loop can
+    log a full traceback without silently continuing.
+    """
+    if fetch_cmd is not None:
+        df = _fetch_from_command(fetch_cmd)
+        if df is None:
+            return None
+    else:
+        assert input_path is not None
+        if not input_path.exists():
+            log.warning(
+                "  Input not found: %s  (operator pipeline not ready?) — skipping",
+                input_path,
+            )
+            return None
+        try:
+            df = pd.read_csv(input_path)
+        except Exception as exc:
+            # File exists but can't be parsed — likely being written concurrently.
+            # Safe to skip: the next cycle will retry with the completed file.
+            log.warning("  Could not read input (%s): %s — skipping", input_path.name, exc)
+            return None
 
     try:
         _prepare_input(df)
@@ -159,19 +226,24 @@ def _run_cycle(
 
 
 def run(
-    input_path:  Path,
     model_dir:   Path,
     output_path: Path,
     interval:    int,
+    *,
+    input_path:  Optional[Path] = None,
+    fetch_cmd:   Optional[str]  = None,
 ) -> None:
     """Load models and start the prediction loop.
 
+    Exactly one of *input_path* or *fetch_cmd* must be provided.
     Blocks until SIGTERM/SIGINT, or returns immediately if interval=0 (one-shot).
     Exits with code 1 on fatal startup error.
     """
+    input_label = str(input_path.resolve()) if input_path else f"cmd: {fetch_cmd}"
+
     log.info("═" * 62)
     log.info("  SPIKE PREDICTOR DAEMON")
-    log.info("  Input     : %s", input_path.resolve())
+    log.info("  Input     : %s", input_label)
     log.info("  Model dir : %s", model_dir.resolve())
     log.info("  Output    : %s", output_path.resolve())
     log.info("  Interval  : %s", f"{interval}s" if interval > 0 else "one-shot")
@@ -181,16 +253,23 @@ def run(
         artifacts = _load_artifacts(model_dir)
     except FileNotFoundError as exc:
         log.error("Model artefacts not found: %s", exc)
-        log.error("  --model-dir should point to the 60m model directory, e.g. models/spike/")
+        log.error("  --model-dir should point to the directory containing spike_model.json")
         sys.exit(1)
     except RuntimeError as exc:
         log.error("Artefact integrity error: %s", exc)
         sys.exit(1)
 
+    cycle_kwargs: dict = dict(
+        output_path = output_path,
+        artifacts   = artifacts,
+        input_path  = input_path,
+        fetch_cmd   = fetch_cmd,
+    )
+
     # One-shot mode: run once and exit.
     if interval == 0:
         t0     = time.monotonic()
-        result = _run_cycle(input_path, output_path, artifacts)
+        result = _run_cycle(**cycle_kwargs)
         if result:
             _log_cycle(result, time.monotonic() - t0)
         return
@@ -211,14 +290,14 @@ def run(
         t0 = time.monotonic()
 
         try:
-            result = _run_cycle(input_path, output_path, artifacts)
+            result = _run_cycle(**cycle_kwargs)
         except Exception as exc:
             # Unexpected internal error — log full traceback but keep running.
             # Crashing the daemon over a single bad cycle would be worse.
             log.error("  Unexpected cycle error: %s", exc, exc_info=True)
             result = None
 
-        elapsed   = time.monotonic() - t0
+        elapsed = time.monotonic() - t0
         if result is not None:
             _log_cycle(result, elapsed)
 
@@ -236,22 +315,35 @@ def run(
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog        = "predict_daemon.py",
+        prog        = "daemon.py",
         description = (
             "Continuous spike-prediction daemon.\n"
-            "Reads --input CSV every --interval seconds, runs all models,\n"
-            "and writes --output JSON atomically. Source-agnostic — any\n"
-            "monitoring system can produce the input CSV."
+            "Every --interval seconds, reads cluster_agg data, runs all models,\n"
+            "and writes --output JSON atomically.\n\n"
+            "Data source (exactly one required):\n"
+            "  --input CSV       read a pre-written cluster_agg CSV file\n"
+            "  --fetch-cmd CMD   run CMD and parse its stdout as cluster_agg CSV"
         ),
         formatter_class = argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument(
+
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument(
         "--input", "-i",
-        required = True,
-        type     = Path,
-        metavar  = "CSV",
-        help     = "Per-machine aggregated data CSV (cluster_agg format, last 120 min).",
+        type    = Path,
+        metavar = "CSV",
+        help    = "Per-machine aggregated data CSV (cluster_agg format, last 120 min).",
     )
+    source.add_argument(
+        "--fetch-cmd", "-f",
+        dest    = "fetch_cmd",
+        metavar = "CMD",
+        help    = (
+            "Shell command to run each cycle. Its stdout must be a cluster_agg CSV. "
+            "Use this to drive any data-collection script directly."
+        ),
+    )
+
     p.add_argument(
         "--model-dir", "-m",
         required = True,
@@ -289,10 +381,11 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(1)
 
     run(
-        input_path  = args.input,
         model_dir   = args.model_dir,
         output_path = args.output,
         interval    = args.interval,
+        input_path  = args.input,
+        fetch_cmd   = args.fetch_cmd,
     )
 
 
