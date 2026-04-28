@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from spike_api import _apply_alarm_debounce, _apply_ewma_smoothing
+from spike.api import _apply_alarm_debounce, _apply_ewma_smoothing
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

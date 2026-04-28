@@ -1,0 +1,4 @@
+-r ../spike/requirements-inference.txt
+optuna>=3.0.0
+shap>=0.43.0
+psutil>=5.9.0

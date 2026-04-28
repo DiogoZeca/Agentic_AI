@@ -33,7 +33,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from spike_feature_engineer import (
+from spike.feature_engineer import (
     _BUCKETS_PER_DAY,
     _FEATURE_COLS,
     _HORIZON,
@@ -46,7 +46,7 @@ from spike_feature_engineer import (
     _engineer_machine,
     engineer,
 )
-from spike_classifier import _X_COLS
+from spike.classifier import _X_COLS
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
 

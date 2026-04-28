@@ -46,7 +46,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from spike_preprocessor import (
+from training.adapters.google_cluster import (
     _BUCKET_US,
     _OUTPUT_COLS,
     _PARTIAL_COLS,

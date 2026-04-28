@@ -27,7 +27,7 @@ import xgboost as xgb
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from predict_spike import (
+from spike.predict import (
     _Artifacts,
     _build_features,
     _load_artifacts,
@@ -35,8 +35,8 @@ from predict_spike import (
     _validate_input,
     predict,
 )
-from spike_classifier import _X_COLS
-from spike_feature_engineer import engineer, _FEATURE_COLS
+from spike.classifier import _X_COLS
+from spike.feature_engineer import engineer, _FEATURE_COLS
 
 # ── Path to real artefacts (present after a full training run) ─────────────────
 
@@ -250,7 +250,7 @@ class TestFeatureParity:
         """_X_COLS in spike_classifier.py must be consistent with predict_spike.py's
         import of the same symbol.  If someone adds a feature to _X_COLS without
         updating the training pipeline, this test will catch the mismatch."""
-        from predict_spike import _X_COLS as predict_X_COLS
+        from spike.predict import _X_COLS as predict_X_COLS
         assert list(predict_X_COLS) == list(_X_COLS)
 
     def test_build_features_produces_x_cols(self, tmp_path):
@@ -609,7 +609,7 @@ class TestOperational:
 
     def test_cli_exits_1_on_missing_input_file(self, tmp_path):
         """main() must exit with code 1 (not crash) when --input is missing."""
-        from predict_spike import main
+        from spike.predict import main
         model_dir, _ = _make_fake_artifacts(tmp_path)
 
         with pytest.raises(SystemExit) as exc_info:
@@ -621,7 +621,7 @@ class TestOperational:
 
     def test_cli_exits_1_on_missing_model_dir(self, tmp_path):
         """main() must exit with code 1 when --model-dir does not exist."""
-        from predict_spike import main
+        from spike.predict import main
         df = _make_window_df()
         csv_path = tmp_path / "window.csv"
         df.to_csv(csv_path, index=False)
@@ -635,7 +635,7 @@ class TestOperational:
 
     def test_output_file_written_atomically(self, tmp_path):
         """--output must produce valid JSON that matches stdout output."""
-        from predict_spike import main
+        from spike.predict import main
         import io
         from contextlib import redirect_stdout
 

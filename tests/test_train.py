@@ -32,9 +32,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from spike_feature_engineer import engineer, _FEATURE_COLS
-from spike_classifier import _X_COLS, _TRAIN_RATIO, _VAL_RATIO
-from train_spike_classifier import (
+from spike.feature_engineer import engineer, _FEATURE_COLS
+from spike.classifier import _X_COLS, _TRAIN_RATIO, _VAL_RATIO
+from training.train import (
     _N_FOLDS,
     _apply_calibrators,
     _compute_calibration_metrics,
@@ -178,7 +178,7 @@ class TestStepNeeded:
 class TestFoldMetrics:
     @pytest.fixture(scope="class")
     def fitted_clf(self):
-        from spike_classifier import SpikeClassifier
+        from spike.classifier import SpikeClassifier
         rng = np.random.default_rng(0)
         X   = pd.DataFrame(
             {col: rng.uniform(0.0, 1.0, 100).astype("float32") for col in _X_COLS}
@@ -188,7 +188,7 @@ class TestFoldMetrics:
 
     @pytest.fixture(scope="class")
     def fitted_binary_clf(self):
-        from spike_classifier import BinarySpikeClassifier
+        from spike.classifier import BinarySpikeClassifier
         rng = np.random.default_rng(0)
         X   = pd.DataFrame(
             {col: rng.uniform(0.0, 1.0, 100).astype("float32") for col in _X_COLS}
@@ -282,7 +282,7 @@ class TestWalkForwardCV:
 class TestThresholdSweepTable:
     @pytest.fixture(scope="class")
     def sweep(self, features_parquet):
-        from spike_classifier import SpikeClassifier
+        from spike.classifier import SpikeClassifier
         from sklearn.utils.class_weight import compute_sample_weight
         df       = pd.read_parquet(features_parquet)
         df       = df[df["severity_in_60m"].notna()].copy()
@@ -702,7 +702,7 @@ class TestComputeCalibrationMetrics:
     def test_threshold_sweep_accepts_precomputed_probas(self, features_parquet):
         """_threshold_sweep_table with probas= must produce the same structure
         as without (internally calls predict_proba if probas=None)."""
-        from spike_classifier import SpikeClassifier
+        from spike.classifier import SpikeClassifier
         from sklearn.utils.class_weight import compute_sample_weight
         df       = pd.read_parquet(features_parquet)
         df       = df[df["severity_in_60m"].notna()].copy()

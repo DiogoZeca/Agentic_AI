@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import xgboost as xgb
 
-from spike_classifier import (
+from spike.classifier import (
     _MIN_POSITIVE,
     _TRAIN_RATIO,
     _VAL_RATIO,

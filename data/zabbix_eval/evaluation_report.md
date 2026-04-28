@@ -1,5 +1,5 @@
 # Zabbix Evaluation Report
-Generated: 2026-04-18T18:18:53.574099+00:00
+Generated: 2026-04-27T20:12:11.754585+00:00
 Source model (Google Cluster 2011 K=2 baseline): 60m PR-AUC = 0.547
 
 ---
@@ -28,7 +28,7 @@ Source model (Google Cluster 2011 K=2 baseline): 60m PR-AUC = 0.547
 
 ## Phase 1 — Domain Shift (PSI)
 
-Feature shift summary: 23 MAJOR / 8 moderate / 6 minor
+Feature shift summary: 25 MAJOR / 9 moderate / 6 minor
 
 ### MAJOR shift features (PSI > 0.25) — model degraded on these:
 
@@ -53,15 +53,18 @@ Feature shift summary: 23 MAJOR / 8 moderate / 6 minor
 | cpu_per_task | 0.8503 |
 | cpu_vs_p99 | 0.765 |
 | cpu_vs_p95 | 0.6503 |
+| cpu_vs_p95_slope_6 | 0.5478 |
 | peak_cpu_vs_p95 | 0.4978 |
 | cpu_delta_2 | 0.4883 |
 | cpu_delta_1 | 0.4598 |
 | cpu_vs_p95_delta | 0.3072 |
+| cpu_vs_p95_slope_3 | 0.3053 |
 
 ### Moderate shift features (0.10 < PSI ≤ 0.25):
 
 | Feature | PSI |
 | --- | --- |
+| time_to_p95_3 | 0.1568 |
 | spike_severe_in_last_1 | 0.1385 |
 | spike_severe_now | 0.1376 |
 | time_since_last_spike | 0.1334 |
@@ -79,25 +82,25 @@ Test split: last 20% of Zabbix data (~18 days). Labels computed with K=1 (any ex
 
 | Model | Test PR-AUC | Source PR-AUC | Retention | Test ROC-AUC | N test |
 | --- | --- | --- | --- | --- | --- |
-| 60m severity  | 0.826 | 0.547     | 151%  | 0.909 | 56262 |
-| 15m binary    | 0.957 | 0.575 | 166%  | 0.966 | 56361 |
+| 60m severity  | 0.708 | 0.547     | 129%  | 0.871 | 56262 |
+| 15m binary    | 0.956 | 0.575 | 166%  | 0.966 | 56361 |
 | 30m binary    | 0.957 | 0.563            | 170%  | 0.960 | 56328 |
-| 45m binary    | 0.957 | 0.562            | 170%  | 0.955 | 56295 |
-| OVR severe    | 0.926 | 0.339 | 273% | 0.955 | 56394 |
+| 45m binary    | 0.956 | 0.562            | 170%  | 0.954 | 56295 |
+| OVR severe    | 0.891 | 0.339 | 263% | 0.928 | 56394 |
 
 ### 60m per-class PR-AUC
 
 | Class | Label | Test PR-AUC | Class rate |
 | --- | --- | --- | --- |
-| 0 | no_spike | 0.940 | 0.508 |
-| 1 | moderate | 0.705 | 0.267 |
-| 2 | severe | 0.834 | 0.225 |
+| 0 | no_spike | 0.937 | 0.508 |
+| 1 | moderate | 0.453 | 0.267 |
+| 2 | severe | 0.734 | 0.225 |
 
 ---
 
 ## Decision
 
-60m macro PR-AUC retention vs source: **151%**
+60m macro PR-AUC retention vs source: **129%**
 
 → **Recalibrate on Zabbix val split and deploy.** Model transfers well.
 
@@ -109,26 +112,26 @@ Test split: last 20% of Zabbix data (~18 days). Labels computed with K=1 (any ex
 
 | Metric | Value |
 | --- | --- |
-| Macro PR-AUC | 0.848 |
-| Macro ROC-AUC | 0.922 |
-| Alarm threshold | 0.4 |
-| Alarm P / R / F1 | 0.799 / 0.640 / 0.711 |
+| Macro PR-AUC | 0.800 |
+| Macro ROC-AUC | 0.900 |
+| Alarm threshold | 0.45 |
+| Alarm P / R / F1 | 0.703 / 0.631 / 0.665 |
 
 | Class | Label | PR-AUC | 95% CI | ROC-AUC |
 | --- | --- | --- | --- | --- |
-| 0 | no_spike | 0.932 | [0.929, 0.935] | 0.945 |
-| 1 | moderate | 0.768 | [0.761, 0.775] | 0.892 |
-| 2 | severe | 0.844 | [0.836, 0.852] | 0.928 |
+| 0 | no_spike | 0.926 | [0.923, 0.929] | 0.938 |
+| 1 | moderate | 0.724 | [0.717, 0.730] | 0.852 |
+| 2 | severe | 0.751 | [0.742, 0.759] | 0.911 |
 
 ### 15m Binary (Zabbix threshold)
 
 | Metric | Value |
 | --- | --- |
-| PR-AUC | 0.957 |
-| PR-AUC 95% CI | [0.955, 0.959] |
+| PR-AUC | 0.956 |
+| PR-AUC 95% CI | [0.954, 0.958] |
 | ROC-AUC | 0.966 |
-| Alarm threshold | 0.7 |
-| Alarm P / R / F1 | 0.814 / 0.851 / 0.832 |
+| Alarm threshold | 0.65 |
+| Alarm P / R / F1 | 0.800 / 0.868 / 0.833 |
 
 ### 30m Binary (Zabbix threshold)
 
@@ -137,25 +140,25 @@ Test split: last 20% of Zabbix data (~18 days). Labels computed with K=1 (any ex
 | PR-AUC | 0.957 |
 | PR-AUC 95% CI | [0.955, 0.958] |
 | ROC-AUC | 0.960 |
-| Alarm threshold | 0.5 |
-| Alarm P / R / F1 | 0.827 / 0.896 / 0.861 |
+| Alarm threshold | 0.45 |
+| Alarm P / R / F1 | 0.814 / 0.912 / 0.860 |
 
 ### 45m Binary (Zabbix threshold)
 
 | Metric | Value |
 | --- | --- |
-| PR-AUC | 0.957 |
-| PR-AUC 95% CI | [0.955, 0.959] |
-| ROC-AUC | 0.955 |
+| PR-AUC | 0.956 |
+| PR-AUC 95% CI | [0.954, 0.957] |
+| ROC-AUC | 0.954 |
 | Alarm threshold | 0.35 |
-| Alarm P / R / F1 | 0.837 / 0.926 / 0.879 |
+| Alarm P / R / F1 | 0.837 / 0.921 / 0.877 |
 
 ### OVR Severe (Zabbix threshold)
 
 | Metric | Value |
 | --- | --- |
-| PR-AUC | 0.926 |
-| PR-AUC 95% CI | [0.921, 0.931] |
-| ROC-AUC | 0.955 |
-| Alarm threshold | 0.65 |
-| Alarm P / R / F1 | 0.813 / 0.733 / 0.771 |
+| PR-AUC | 0.891 |
+| PR-AUC 95% CI | [0.886, 0.896] |
+| ROC-AUC | 0.928 |
+| Alarm threshold | 0.55 |
+| Alarm P / R / F1 | 0.825 / 0.596 / 0.692 |
