@@ -921,6 +921,7 @@ def predict(
     model_dir:       str | Path,
     *,
     alarm_threshold: Optional[float] = None,
+    domain_dir:      Optional[Path]  = None,
 ) -> dict:
     """Run spike prediction on a pre-aggregated rolling window DataFrame.
 
@@ -937,6 +938,10 @@ def predict(
                       spike_config.json are used.  Lower values raise sensitivity
                       (more alarms, fewer missed spikes); higher values cut false
                       positives.  See --alarm-threshold in the CLI for usage guidance.
+    domain_dir      : optional directory produced by bootstrap_thresholds.py.
+                      When supplied, spike_thresholds.parquet is loaded from here
+                      instead of model_dir, giving per-machine p95/p99 thresholds
+                      tuned to the operator's domain rather than Google 2011 defaults.
 
     Returns
     -------
@@ -949,7 +954,7 @@ def predict(
     RuntimeError     on feature column mismatch.
     """
     _prepare_input(input_df)
-    artifacts = _load_artifacts(Path(model_dir))
+    artifacts = _load_artifacts(Path(model_dir), domain_dir=Path(domain_dir) if domain_dir else None)
 
     # Apply operator-supplied alarm threshold override across all horizons.
     # The trained per-horizon thresholds in spike_config.json are the default;
@@ -1064,6 +1069,16 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar = "JSON",
         help    = "Also write predictions to this file (atomic write — safe on failure)",
     )
+    p.add_argument(
+        "--domain-dir", "-d",
+        default = None,
+        metavar = "DIR",
+        dest    = "domain_dir",
+        help    = "Directory produced by bootstrap_thresholds.py. When supplied, "
+                  "spike_thresholds.parquet is loaded from here instead of --model-dir, "
+                  "giving per-machine p95/p99 thresholds tuned to your domain. "
+                  "Run bootstrap_thresholds.py on your data first to generate this directory.",
+    )
     # --alarm-threshold: runtime operating-point override.
     # The training pipeline selects one threshold per horizon that maximises F1
     # on the validation set and stores it in spike_config.json.  This flag lets
@@ -1092,6 +1107,7 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     input_path = Path(args.input)
     model_dir  = Path(args.model_dir)
+    domain_dir = Path(args.domain_dir) if args.domain_dir else None
 
     if not input_path.exists():
         log.error("Input file not found: %s", input_path)
@@ -1099,14 +1115,19 @@ def main(argv: Optional[list[str]] = None) -> None:
     if not model_dir.is_dir():
         log.error("Model directory not found: %s", model_dir)
         sys.exit(1)
+    if domain_dir is not None and not domain_dir.is_dir():
+        log.error("Domain directory not found: %s", domain_dir)
+        sys.exit(1)
     if args.alarm_threshold is not None and not (0.0 <= args.alarm_threshold <= 1.0):
         log.error("--alarm-threshold must be in [0.0, 1.0] (got %.4g).", args.alarm_threshold)
         sys.exit(1)
 
     log.info("═" * 62)
     log.info("  SPIKE PREDICTOR")
-    log.info("  Input     : %s", input_path)
-    log.info("  Model dir : %s", model_dir)
+    log.info("  Input      : %s", input_path)
+    log.info("  Model dir  : %s", model_dir)
+    if domain_dir:
+        log.info("  Domain dir : %s", domain_dir)
     log.info("═" * 62)
 
     try:
@@ -1121,7 +1142,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         sys.exit(2)
 
     try:
-        result = predict(input_df, model_dir, alarm_threshold=args.alarm_threshold)
+        result = predict(
+            input_df,
+            model_dir,
+            alarm_threshold = args.alarm_threshold,
+            domain_dir      = domain_dir,
+        )
     except (FileNotFoundError, RuntimeError) as exc:
         log.error("%s", exc)
         sys.exit(1)
