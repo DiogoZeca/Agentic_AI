@@ -59,6 +59,7 @@ Exit codes
 from __future__ import annotations
 
 import argparse
+import collections
 import io
 import json
 import logging
@@ -69,9 +70,11 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from spike.predict import _Artifacts, _load_artifacts, _prepare_input, predict_with_artifacts
@@ -112,14 +115,47 @@ def _write_atomic(result: dict, output_path: Path) -> None:
         raise
 
 
-def _log_cycle(result: dict, elapsed: float) -> None:
-    """Emit a one-line cycle summary: machine count, alarm list, latency."""
-    preds  = result.get("predictions", [])
-    alarms = [
+def _extract_cycle_stats(result: dict) -> dict:
+    """Extract machine and alarm counts from a successful prediction result.
+
+    Factored out so _log_cycle and _record_slo share identical alarm-counting
+    logic.  An alarm is any machine whose recommended_action is not one of the
+    passive states (None, "normal", "monitor").
+
+    Returns a dict with keys: machines_total, machines_predicted,
+    machines_cold_start, alarm_count, alarm_rate, cold_start_rate, alarm_list.
+    """
+    preds              = result.get("predictions", [])
+    machines_total     = result.get("machines_total", 0)
+    machines_predicted = result.get("machines_predicted", 0)
+    machines_cold_start = result.get("machines_cold_start", 0)
+
+    alarm_list = [
         p["machine_id"]
         for p in preds
         if p.get("recommended_action") not in (None, "normal", "monitor")
     ]
+
+    # Guard against zero-denominator when all machines are cold-start.
+    alarm_rate      = len(alarm_list) / machines_predicted if machines_predicted > 0 else None
+    cold_start_rate = machines_cold_start / machines_total  if machines_total > 0     else None
+
+    return {
+        "machines_total":      machines_total,
+        "machines_predicted":  machines_predicted,
+        "machines_cold_start": machines_cold_start,
+        "alarm_count":         len(alarm_list),
+        "alarm_rate":          alarm_rate,
+        "cold_start_rate":     cold_start_rate,
+        "alarm_list":          alarm_list,
+    }
+
+
+def _log_cycle(result: dict, elapsed: float) -> None:
+    """Emit a one-line cycle summary: machine count, alarm list, latency."""
+    stats  = _extract_cycle_stats(result)
+    alarms = stats["alarm_list"]
+
     alarm_str = ""
     if alarms:
         shown     = alarms[:5]
@@ -128,10 +164,88 @@ def _log_cycle(result: dict, elapsed: float) -> None:
 
     log.info(
         "  cycle done │ %d machines │ %d alarm(s)%s │ %.1fs",
-        result.get("machines_predicted", 0),
-        len(alarms),
+        stats["machines_predicted"],
+        stats["alarm_count"],
         alarm_str,
         elapsed,
+    )
+
+
+def _record_slo(
+    slo_deque:   collections.deque,
+    cycle_index: int,
+    elapsed:     float,
+    result:      Optional[dict],
+) -> None:
+    """Append one cycle's metrics to the rolling SLO deque.
+
+    Called after every cycle — including skipped/failed ones (result=None).
+    The deque caps automatically at maxlen=300 (~25h at 5-min intervals),
+    evicting the oldest entry when full.
+    """
+    if result is not None:
+        stats = _extract_cycle_stats(result)
+        # Round rates to 4 d.p. to keep the JSON file human-readable.
+        alarm_rate      = round(stats["alarm_rate"],      4) if stats["alarm_rate"]      is not None else None
+        cold_start_rate = round(stats["cold_start_rate"], 4) if stats["cold_start_rate"] is not None else None
+    else:
+        # Skipped cycle — no prediction stats available.
+        stats           = {}
+        alarm_rate      = None
+        cold_start_rate = None
+
+    slo_deque.append({
+        "cycle_index":         cycle_index,
+        "timestamp":           datetime.now(timezone.utc).isoformat(),
+        "latency_s":           round(elapsed, 3),
+        "success":             result is not None,
+        "machines_total":      stats.get("machines_total"),
+        "machines_predicted":  stats.get("machines_predicted"),
+        "machines_cold_start": stats.get("machines_cold_start"),
+        "alarm_count":         stats.get("alarm_count"),
+        "alarm_rate":          alarm_rate,
+        "cold_start_rate":     cold_start_rate,
+    })
+
+
+def _write_slo(
+    slo_path:      Path,
+    slo_deque:     collections.deque,
+    *,
+    model_version: Optional[dict],
+) -> None:
+    """Atomically write rolling SLO metrics to slo_path.
+
+    Reuses _write_atomic (temp+rename) so readers never see a partial file.
+    slo_path is typically output_path.parent / "slo_metrics.json".
+
+    The summary block is recomputed from the full deque on every write.
+    Latency percentiles cover ALL cycles (success + skip); alarm_rate and
+    cold_start_rate statistics cover successful cycles only.
+    """
+    cycles    = list(slo_deque)
+    successful = [c for c in cycles if c["success"]]
+
+    latencies   = [c["latency_s"] for c in cycles]
+    alarm_rates = [c["alarm_rate"] for c in successful if c.get("alarm_rate") is not None]
+    cold_rates  = [c["cold_start_rate"] for c in successful if c.get("cold_start_rate") is not None]
+
+    summary = {
+        "window_cycles":        len(cycles),
+        "window_start":         cycles[0]["timestamp"]  if cycles else None,
+        "window_end":           cycles[-1]["timestamp"] if cycles else None,
+        "success_rate":         round(len(successful) / len(cycles), 4) if cycles else None,
+        "latency_p50_s":        round(float(np.percentile(latencies, 50)), 3) if latencies else None,
+        "latency_p95_s":        round(float(np.percentile(latencies, 95)), 3) if latencies else None,
+        "alarm_rate_mean":      round(float(np.mean(alarm_rates)),   4) if alarm_rates else None,
+        # std requires >= 2 points; a single-cycle window makes std meaningless.
+        "alarm_rate_std":       round(float(np.std(alarm_rates)),    4) if len(alarm_rates) >= 2 else None,
+        "cold_start_rate_mean": round(float(np.mean(cold_rates)),    4) if cold_rates else None,
+    }
+
+    _write_atomic(
+        {"model_version": model_version, "summary": summary, "cycles": cycles},
+        slo_path,
     )
 
 
@@ -226,19 +340,35 @@ def _run_cycle(
 
 
 def run(
-    model_dir:   Path,
-    output_path: Path,
-    interval:    int,
+    model_dir:       Path,
+    output_path:     Path,
+    interval:        int,
     *,
-    input_path:  Optional[Path] = None,
-    fetch_cmd:   Optional[str]  = None,
-    domain_dir:  Optional[Path] = None,
+    input_path:      Optional[Path]  = None,
+    fetch_cmd:       Optional[str]   = None,
+    domain_dir:      Optional[Path]  = None,
+    alarm_threshold: Optional[float] = None,
 ) -> None:
     """Load models and start the prediction loop.
 
     Exactly one of *input_path* or *fetch_cmd* must be provided.
     Blocks until SIGTERM/SIGINT, or returns immediately if interval=0 (one-shot).
     Exits with code 1 on fatal startup error.
+
+    Parameters
+    ----------
+    model_dir       : directory containing the 60m model artefacts.
+    output_path     : path for atomic JSON output (overwritten each cycle).
+    interval        : seconds between inference cycles; 0 for one-shot mode.
+    input_path      : pre-written cluster_agg CSV (file mode).
+    fetch_cmd       : shell command whose stdout is parsed as cluster_agg CSV.
+    domain_dir      : optional directory from bootstrap_thresholds.py with
+                      domain-specific spike_thresholds.parquet.
+    alarm_threshold : optional float in [0, 1] that overrides the trained alarm
+                      threshold for every loaded horizon (60m, 15m, 30m, 45m,
+                      severe_ovr).  Applied once after artefact loading; persists
+                      for the full daemon lifetime.  When None the per-horizon
+                      values from spike_config.json are used.
     """
     input_label = str(input_path.resolve()) if input_path else f"cmd: {fetch_cmd}"
 
@@ -250,6 +380,8 @@ def run(
         log.info("  Domain dir: %s", domain_dir.resolve())
     log.info("  Output    : %s", output_path.resolve())
     log.info("  Interval  : %s", f"{interval}s" if interval > 0 else "one-shot")
+    if alarm_threshold is not None:
+        log.info("  Alarm thr : %.4f (operator override — all horizons)", alarm_threshold)
     log.info("═" * 62)
 
     try:
@@ -262,6 +394,18 @@ def run(
         log.error("Artefact integrity error: %s", exc)
         sys.exit(1)
 
+    # Apply operator-supplied alarm threshold override once at startup.
+    # predict_with_artifacts() reads thresholds from the artifacts object each cycle,
+    # so mutating the dict here is sufficient — no per-cycle overhead.
+    if alarm_threshold is not None:
+        for h in artifacts.alarm_thresholds:
+            artifacts.alarm_thresholds[h] = alarm_threshold
+        log.info(
+            "  Alarm threshold override applied: %.4f → horizon(s): %s",
+            alarm_threshold,
+            ", ".join(sorted(artifacts.alarm_thresholds)),
+        )
+
     cycle_kwargs: dict = dict(
         output_path = output_path,
         artifacts   = artifacts,
@@ -269,12 +413,25 @@ def run(
         fetch_cmd   = fetch_cmd,
     )
 
+    # Rolling SLO tracker: a deque of per-cycle metric dicts capped at 300
+    # entries (~25 h at the default 5-min interval).  The oldest entry is
+    # evicted automatically when the window is full.
+    # slo_metrics.json is written alongside predictions.json after every cycle.
+    slo_deque: collections.deque = collections.deque(maxlen=300)
+    slo_path  = output_path.parent / "slo_metrics.json"
+    # version_info is set once at startup; None for legacy artefacts that
+    # pre-date the versioning step.
+    model_version = artifacts.version_info
+
     # One-shot mode: run once and exit.
     if interval == 0:
-        t0     = time.monotonic()
-        result = _run_cycle(**cycle_kwargs)
+        t0      = time.monotonic()
+        result  = _run_cycle(**cycle_kwargs)
+        elapsed = time.monotonic() - t0
         if result:
-            _log_cycle(result, time.monotonic() - t0)
+            _log_cycle(result, elapsed)
+        _record_slo(slo_deque, cycle_index=0, elapsed=elapsed, result=result)
+        _write_slo(slo_path, slo_deque, model_version=model_version)
         return
 
     # Daemon mode: fixed-rate loop until shutdown signal.
@@ -289,6 +446,7 @@ def run(
 
     log.info("  Models loaded. Entering prediction loop (Ctrl-C or SIGTERM to stop).")
 
+    cycle_index = 0
     while not shutdown.is_set():
         t0 = time.monotonic()
 
@@ -303,6 +461,12 @@ def run(
         elapsed = time.monotonic() - t0
         if result is not None:
             _log_cycle(result, elapsed)
+
+        # Record this cycle and flush SLO metrics — even on skipped cycles so
+        # the skip rate is visible in the rolling summary.
+        _record_slo(slo_deque, cycle_index=cycle_index, elapsed=elapsed, result=result)
+        _write_slo(slo_path, slo_deque, model_version=model_version)
+        cycle_index += 1
 
         # Sleep for the remainder of the interval.
         # threading.Event.wait() returns immediately when shutdown is set,
@@ -375,6 +539,27 @@ def _build_parser() -> argparse.ArgumentParser:
             "without retraining."
         ),
     )
+    # --alarm-threshold: runtime operating-point override applied once at startup.
+    # For long-running daemons this is the right granularity — operators set it
+    # via their init script / systemd unit and it persists for the daemon lifetime.
+    # To change it mid-run, restart the daemon with the new value.
+    # See predict.py --alarm-threshold and _Artifacts docstring for the full
+    # breakdown of which outputs are affected (binary is_spike, 60m is_severe)
+    # vs. which are not (60m is_spike, which is always argmax-based).
+    p.add_argument(
+        "--alarm-threshold", "-t",
+        type    = float,
+        default = None,
+        dest    = "alarm_threshold",
+        metavar = "FLOAT",
+        help    = (
+            "Override the alarm threshold for all prediction horizons (0.0–1.0). "
+            "Applied once at startup and held for the daemon lifetime. "
+            "Lower values raise sensitivity (more alarms, fewer missed spikes); "
+            "higher values reduce false positives. "
+            "Default: per-horizon values stored in spike_config.json at training time."
+        ),
+    )
     p.add_argument(
         "--interval", "-n",
         default = 300,
@@ -396,13 +581,18 @@ def main(argv: list[str] | None = None) -> None:
         log.error("Model directory not found: %s", args.model_dir)
         sys.exit(1)
 
+    if args.alarm_threshold is not None and not (0.0 <= args.alarm_threshold <= 1.0):
+        log.error("--alarm-threshold must be in [0.0, 1.0] (got %.4g).", args.alarm_threshold)
+        sys.exit(1)
+
     run(
-        model_dir   = args.model_dir,
-        output_path = args.output,
-        interval    = args.interval,
-        input_path  = args.input,
-        fetch_cmd   = args.fetch_cmd,
-        domain_dir  = args.domain_dir,
+        model_dir       = args.model_dir,
+        output_path     = args.output,
+        interval        = args.interval,
+        input_path      = args.input,
+        fetch_cmd       = args.fetch_cmd,
+        domain_dir      = args.domain_dir,
+        alarm_threshold = args.alarm_threshold,
     )
 
 

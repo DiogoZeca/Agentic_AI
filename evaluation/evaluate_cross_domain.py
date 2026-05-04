@@ -34,6 +34,7 @@ import logging
 import os
 import pickle
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,7 @@ import xgboost as xgb
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
 
+from spike import psi as _psi
 from spike.classifier import _VAL_RATIO, _X_COLS
 from spike.feature_engineer import _TRAIN_RATIO, engineer
 
@@ -65,11 +67,7 @@ _WARN_IDLE_FRACTION    = 0.40   # > 40% idle → p95 features behave differently
 _WARN_BUSINESS_RATIO   = 3.0    # > 3× daytime vs off-hours → hour features dominate
 _WARN_NODE_CORRELATION = 0.60   # > 0.6 pairwise → cluster_cpu_p90 less informative
 
-# PSI thresholds (standard industry values).
-_PSI_MINOR    = 0.10
-_PSI_MODERATE = 0.25
-_N_PSI_BINS   = 10
-
+# PSI thresholds — numeric values live in spike.psi; label strings are local.
 _PSI_LABEL_MAJOR    = "MAJOR"
 _PSI_LABEL_MODERATE = "moderate"
 _PSI_LABEL_MINOR    = "minor"
@@ -80,6 +78,32 @@ _SOURCE_PR_AUC_45M  = 0.562
 _SOURCE_PR_AUC_OVR  = 0.339
 
 _CLASS_LABELS = {0: "no_spike", 1: "moderate", 2: "severe"}
+
+
+def _normalise_input(agg_path: Path) -> tuple[Path, tempfile.TemporaryDirectory | None]:
+    """Return (parquet_path, tmpdir_or_None) so callers always get a Parquet path.
+
+    engineer() calls pd.read_parquet() internally — it does not accept CSV.
+    When the caller provides a CSV, we write it to a TemporaryDirectory and
+    return the resulting Parquet path.  The caller is responsible for calling
+    tmpdir.cleanup() (or using it as a context manager) after engineer() has
+    finished so the temp file is deleted even on error.
+
+    Integer columns lose their dtype in CSV; we coerce machine_id/bucket/time_us
+    back to int64 here so that downstream groupby and merge operations are
+    type-stable.
+    """
+    if agg_path.suffix.lower() != ".csv":
+        return agg_path, None
+
+    tmpdir = tempfile.TemporaryDirectory()
+    parquet_path = Path(tmpdir.name) / "domain_agg.parquet"
+    df = pd.read_csv(agg_path)
+    for col in ("machine_id", "bucket", "time_us"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("int64")
+    df.to_parquet(parquet_path, index=False)
+    return parquet_path, tmpdir
 
 
 def _acf(x: np.ndarray, lag: int) -> float:
@@ -99,7 +123,7 @@ def _compute_node_eda(df: pd.DataFrame) -> pd.DataFrame:
 
     Parameters
     ----------
-    df : cluster_agg schema DataFrame from zabbix_agg.parquet.
+    df : cluster_agg schema DataFrame for the target domain.
     """
     records = []
     for mid, grp in df.groupby("machine_id"):
@@ -200,53 +224,15 @@ def _eda_warnings(eda_df: pd.DataFrame) -> list[str]:
 
 # ── Phase 1 — PSI ────────────────────────────────────────────────────────────
 
-def _compute_psi_single(
-    expected: np.ndarray,
-    actual:   np.ndarray,
-    n_bins:   int = _N_PSI_BINS,
-) -> float:
-    """Compute Population Stability Index for one feature.
-
-    Bin edges derived from `expected` (Google training) quantiles so that
-    every expected bin is non-empty by construction.  A small epsilon (1e-4)
-    guards against log(0).
-
-    Returns nan if the feature has zero variance in either distribution.
-    """
-    expected = expected[np.isfinite(expected)]
-    actual   = actual[np.isfinite(actual)]
-    if len(expected) == 0 or len(actual) == 0:
-        return float("nan")
-
-    # Binary features (only 0 and 1 values) → 2 exact bins
-    unique_vals = np.unique(expected)
-    if len(unique_vals) <= 2 and set(unique_vals).issubset({0.0, 1.0}):
-        edges = np.array([-0.5, 0.5, 1.5])
-    else:
-        quantiles = np.linspace(0, 100, n_bins + 1)
-        edges     = np.unique(np.percentile(expected, quantiles))
-        if len(edges) < 2:
-            return float("nan")
-
-    eps = 1e-4
-    exp_counts, _ = np.histogram(expected, bins=edges)
-    act_counts, _ = np.histogram(actual,   bins=edges)
-
-    exp_pct = (exp_counts / len(expected)).clip(eps)
-    act_pct = (act_counts / len(actual)).clip(eps)
-
-    psi = float(np.sum((act_pct - exp_pct) * np.log(act_pct / exp_pct)))
-    return psi
-
-
 def _compute_psi(
     google_features_path: Path,
-    zabbix_features_df:   pd.DataFrame,
+    domain_features_df:   pd.DataFrame,
 ) -> pd.DataFrame:
-    """Compute PSI for all model features (Google train vs Zabbix full dataset).
+    """Compute PSI for all model features (Google train vs target domain).
 
     Loads only the needed columns from the Google features parquet and
     downsamples to 10% of the training split to keep memory bounded.
+    The target domain DataFrame is used in full (typically small vs. Google).
     """
     log.info("Loading Google training features for PSI (10%% sample)…")
     google_df    = pd.read_parquet(google_features_path, columns=["bucket"] + list(_X_COLS))
@@ -257,24 +243,23 @@ def _compute_psi(
     log.info("  Google sample: %d rows (10%% of %d training rows)",
              len(google_sample), len(google_train))
 
-    # Zabbix: use ALL available rows (282K total — small enough for full use)
-    zab_df = zabbix_features_df[[c for c in _X_COLS if c in zabbix_features_df.columns]]
+    domain_df = domain_features_df[[c for c in _X_COLS if c in domain_features_df.columns]]
 
     rows = []
     for col in _X_COLS:
-        if col not in google_sample.columns or col not in zab_df.columns:
+        if col not in google_sample.columns or col not in domain_df.columns:
             rows.append({"feature": col, "psi": float("nan"), "interpretation": "missing"})
             continue
 
         g_vals = google_sample[col].values.astype("float64")
-        z_vals = zab_df[col].values.astype("float64")
-        psi    = _compute_psi_single(g_vals, z_vals)
+        z_vals = domain_df[col].values.astype("float64")
+        psi    = _psi.compute_psi_single(g_vals, z_vals)
 
         if np.isnan(psi):
             interp = "no variance"
-        elif psi < _PSI_MINOR:
+        elif psi < _psi.PSI_STABLE:
             interp = _PSI_LABEL_MINOR
-        elif psi < _PSI_MODERATE:
+        elif psi < _psi.PSI_WARNING:
             interp = _PSI_LABEL_MODERATE
         else:
             interp = _PSI_LABEL_MAJOR
@@ -462,7 +447,7 @@ def _recalibrate_60m(
     model_info:  dict,
     output_dir:  Path,
 ) -> dict:
-    """Fit Zabbix-local OvR isotonic calibrators on val; re-evaluate on test. Saves artifacts."""
+    """Fit domain-local OvR isotonic calibrators on val; re-evaluate on test. Saves artifacts."""
     label_col = "severity_in_60m"
     val_df    = features_df[val_mask].dropna(subset=[label_col])
     test_df   = features_df[test_mask].dropna(subset=[label_col])
@@ -479,7 +464,7 @@ def _recalibrate_60m(
     raw_val  = model_info["booster"].inplace_predict(X_val).reshape(-1, 3)
     raw_test = model_info["booster"].inplace_predict(X_test).reshape(-1, 3)
 
-    # OvR isotonic calibrators trained on Zabbix val raw XGBoost probs (replaces Google calibrators)
+    # OvR isotonic calibrators trained on domain val raw XGBoost probs (replaces Google calibrators)
     zab_calibrators = [
         IsotonicRegression(out_of_bounds="clip").fit(
             raw_val[:, k].astype("float64"), (y_val == k).astype(int)
@@ -525,7 +510,7 @@ def _recalibrate_60m(
     macro_roc_auc = round(float(np.mean(roc_aucs)), 4) if roc_aucs else float("nan")
 
     # Save artifacts
-    cal_path = output_dir / "zabbix_calibrators.pkl"
+    cal_path = output_dir / "domain_calibrators.pkl"
     with open(cal_path, "wb") as f:
         pickle.dump(zab_calibrators, f, protocol=4)
 
@@ -541,7 +526,7 @@ def _recalibrate_60m(
         "n_test":           len(test_df),
         "calibrators_path": str(cal_path),
     }
-    config_path = output_dir / "zabbix_spike_config.json"
+    config_path = output_dir / "domain_spike_config.json"
     config_path.write_text(json.dumps(config_out, indent=2))
 
     log.info("  Phase 3 60m: macro PR-AUC %.3f  |  alarm @ %.2f  (P=%.3f R=%.3f F1=%.3f)",
@@ -558,7 +543,7 @@ def _recalibrate_binary(
     model_info:  dict,
     label_col:   str,
 ) -> dict:
-    """Threshold sweep on Zabbix val; re-evaluate on test with bootstrap CI."""
+    """Threshold sweep on domain val split; re-evaluate on test with bootstrap CI."""
     if label_col not in features_df.columns:
         return {"error": f"label column '{label_col}' not found"}
 
@@ -612,11 +597,11 @@ def _decision(pr_auc: float, source: float = _SOURCE_PR_AUC) -> tuple[str, str]:
         return "N/A", "Cannot determine — source PR-AUC not available."
     retention = pr_auc / source
     if retention >= 0.70:
-        action = "**Recalibrate on Zabbix val split and deploy.** Model transfers well."
+        action = "**Recalibrate on domain val split and deploy.** Model transfers well."
     elif retention >= 0.40:
-        action = "**Adapt.** Fine-tune with ~300 warm-start boosting rounds on Zabbix train split."
+        action = "**Adapt.** Fine-tune with ~300 warm-start boosting rounds on domain train split."
     else:
-        action = "**Retrain from scratch** on Zabbix data (use Google best_params.json as Optuna seed)."
+        action = "**Retrain from scratch** on domain data (use Google best_params.json as Optuna seed)."
     return f"{retention:.0%}", action
 
 
@@ -651,7 +636,7 @@ def _generate_report(
     ret_pct, action = _decision(pr_60m)
 
     lines = [
-        "# Zabbix Evaluation Report",
+        "# Cross-Domain Evaluation Report",
         f"Generated: {run_at}",
         f"Source model (Google Cluster 2011 K=2 baseline): 60m PR-AUC = {_SOURCE_PR_AUC}",
         "",
@@ -708,7 +693,7 @@ def _generate_report(
 
     # Model evaluation
     lines += ["---", "", "## Phase 2 — Model Evaluation", ""]
-    lines.append(f"Test split: last 20% of Zabbix data (~18 days). Labels computed with K=1 (any exceedance).")
+    lines.append("Test split: last 20% of target domain data. Labels computed with K=1 (any exceedance).")
     lines.append("")
     lines.append("| Model | Test PR-AUC | Source PR-AUC | Retention | Test ROC-AUC | N test |")
     lines.append("| --- | --- | --- | --- | --- | --- |")
@@ -756,12 +741,12 @@ def _generate_report(
     lines.append("")
 
     # Phase 3 — Recalibration
-    lines += ["---", "", "## Phase 3 — Zabbix Recalibration", ""]
+    lines += ["---", "", "## Phase 3 — Domain Recalibration", ""]
     if not recal_60m or "error" in recal_60m:
         lines.append(f"*60m recalibration skipped — {(recal_60m or {}).get('error', 'not run')}*")
         lines.append("")
     else:
-        lines.append("### 60m Severity (Zabbix-recalibrated)")
+        lines.append("### 60m Severity (domain-recalibrated)")
         lines.append("")
         lines.append("| Metric | Value |")
         lines.append("| --- | --- |")
@@ -800,7 +785,7 @@ def _generate_report(
             lines.append(f"*{name} recalibration skipped — {(recal or {}).get('error', 'not run')}*")
             lines.append("")
         else:
-            lines.append(f"### {name} (Zabbix threshold)")
+            lines.append(f"### {name} (domain threshold)")
             lines.append("")
             lines.append("| Metric | Value |")
             lines.append("| --- | --- |")
@@ -830,6 +815,31 @@ def evaluate(
     output_dir.mkdir(parents=True, exist_ok=True)
     run_at = datetime.now(tz=timezone.utc).isoformat()
 
+    # Normalise input to Parquet — engineer() calls pd.read_parquet() internally
+    # so CSV inputs must be converted first.  _tmpdir is cleaned up in the
+    # finally block below regardless of success or error.
+    agg_parquet, _tmpdir = _normalise_input(agg_path)
+    try:
+        _evaluate_inner(
+            agg_path      = agg_path,
+            agg_parquet   = agg_parquet,
+            output_dir    = output_dir,
+            artifacts_dir = artifacts_dir,
+            run_at        = run_at,
+        )
+    finally:
+        if _tmpdir is not None:
+            _tmpdir.cleanup()
+
+
+def _evaluate_inner(
+    agg_path:      Path,
+    agg_parquet:   Path,
+    output_dir:    Path,
+    artifacts_dir: Path,
+    run_at:        str,
+) -> None:
+    """Inner evaluate pipeline — called by evaluate() after CSV normalisation."""
     # Load node map for human-readable names in the report
     node_map_path = agg_path.parent / "node_map.json"
     node_map: dict = {}
@@ -837,9 +847,9 @@ def evaluate(
         node_map = json.loads(node_map_path.read_text())
 
     log.info("═" * 62)
-    log.info("  Loading Zabbix aggregated data")
+    log.info("  Loading target domain data")
     log.info("═" * 62)
-    df_agg = pd.read_parquet(agg_path)
+    df_agg = pd.read_parquet(agg_parquet)
     log.info("  Rows: %d  |  Machines: %d  |  Buckets: %d",
              len(df_agg), df_agg["machine_id"].nunique(), df_agg["bucket"].nunique())
 
@@ -863,11 +873,11 @@ def evaluate(
     google_features_path = artifacts_dir / "cluster_features.parquet"
     if google_features_path.exists():
         try:
-            log.info("  Running feature engineering on Zabbix data for PSI…")
+            log.info("  Running feature engineering on domain data for PSI…")
             zab_features = engineer(
-                input_path         = agg_path,
-                output_path        = output_dir / "zabbix_features.parquet",
-                thresholds_path    = output_dir / "zabbix_thresholds.parquet",
+                input_path         = agg_parquet,
+                output_path        = output_dir / "domain_features.parquet",
+                thresholds_path    = output_dir / "domain_thresholds.parquet",
                 min_future_windows = 1,
             )
             psi_df = _compute_psi(google_features_path, zab_features)
@@ -891,11 +901,11 @@ def evaluate(
     log.info("═" * 62)
 
     if zab_features is None:
-        log.info("  Running feature engineering on Zabbix data…")
+        log.info("  Running feature engineering on domain data…")
         zab_features = engineer(
-            input_path         = agg_path,
-            output_path        = output_dir / "zabbix_features.parquet",
-            thresholds_path    = output_dir / "zabbix_thresholds.parquet",
+            input_path         = agg_parquet,
+            output_path        = output_dir / "domain_features.parquet",
+            thresholds_path    = output_dir / "domain_thresholds.parquet",
             min_future_windows = 1,
         )
 
@@ -922,12 +932,14 @@ def evaluate(
         )
 
     # Load models
+    # Model dirs sit directly under artifacts_dir (e.g. data/full_run/spike/),
+    # not under a models/ subdirectory — the repo layout has no models/ level.
     model_dirs = {
-        "60m"       : artifacts_dir / "models" / "spike",
-        "15m"       : artifacts_dir / "models" / "spike_15m",
-        "30m"       : artifacts_dir / "models" / "spike_30m",
-        "45m"       : artifacts_dir / "models" / "spike_45m",
-        "severe_ovr": artifacts_dir / "models" / "spike_severe_ovr",
+        "60m"       : artifacts_dir / "spike",
+        "15m"       : artifacts_dir / "spike_15m",
+        "30m"       : artifacts_dir / "spike_30m",
+        "45m"       : artifacts_dir / "spike_45m",
+        "severe_ovr": artifacts_dir / "spike_severe_ovr",
     }
     models: dict[str, dict] = {}
     for name, mdir in model_dirs.items():
@@ -969,7 +981,7 @@ def evaluate(
 
     # ── Phase 3: Recalibration ────────────────────────────────────────────────
     log.info("═" * 62)
-    log.info("  Phase 3 — Zabbix recalibration")
+    log.info("  Phase 3 — Domain recalibration")
     log.info("═" * 62)
 
     recal_60m: dict = {}

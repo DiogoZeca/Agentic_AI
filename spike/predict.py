@@ -82,6 +82,8 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 
+from spike.version import get_model_version
+
 # Import the exact same feature-engineering functions used during training.
 # This is the structural guarantee against training-serving skew: one module,
 # one implementation, shared by both train_spike_classifier.py and this script.
@@ -151,10 +153,29 @@ class _Artifacts:
 
     Horizon "15m" is binary (P(spike) from binary:logistic).
     Horizon "60m" is 3-class (P(no_spike), P(moderate), P(severe)).
+
+    Alarm threshold behaviour
+    -------------------------
+    alarm_thresholds is intentionally a plain mutable dict inside this otherwise
+    frozen dataclass.  This allows the --alarm-threshold CLI flag to override all
+    horizon thresholds after loading without rebuilding the entire _Artifacts object.
+    The override is applied once (at startup for the daemon, once per call for
+    predict()) and then read by _run_inference() each cycle.
+
+    How each horizon uses its alarm threshold:
+      - Binary horizons (15m / 30m / 45m): threshold gates is_spike directly.
+        is_spike = bool(p_spike >= alarm_thresholds[h]).
+        Lowering the threshold → more is_spike=True → earlier recommended_action.
+      - 60m severity model: threshold gates is_severe (p_severe >= threshold) and
+        the is_severe fallback when no OVR model is present.
+        is_spike for the 60m horizon is argmax-based (sev_cls >= 1), NOT threshold-gated,
+        because argmax is the natural classification decision for a 3-class softmax.
+        See _run_inference() for the exact decision logic.
+      - severe_ovr (cascade Stage 2): threshold gates is_severe via p_severe_ovr.
     """
     boosters:          dict[str, xgb.Booster]   # horizon_name → XGBoost Booster
     feature_cols:      list[str]                 # ordered — must match _X_COLS exactly
-    alarm_thresholds:  dict[str, float]          # horizon_name → alarm threshold
+    alarm_thresholds:  dict[str, float]          # horizon_name → alarm threshold (mutable by design — see docstring)
     min_buckets:       int                       # < this → cold_start (no prediction)
     global_thresh:     float                     # p95 fallback for unknown machines
     global_thresh_p99: float                     # p99 fallback for unknown machines
@@ -164,6 +185,7 @@ class _Artifacts:
     model_dir:         Path                      # source directory (for response metadata)
     trained_at:        str | None = None         # ISO-8601 timestamp from spike_config.json
     calibrators_60m:   list | None = None        # per-class IsotonicRegression fitted on val set
+    version_info:      dict | None = None        # populated by _load_artifacts via get_model_version()
 
 
 # ── Load artefacts ────────────────────────────────────────────────────────────
@@ -302,6 +324,13 @@ def _load_artifacts(
              "  ".join(f"{h}={t:.3f}" for h, t in sorted(alarm_thresholds.items())))
     log.info("  Known machines  : %d", len(thresholds))
 
+    # Build a deterministic version string from the artefact files.
+    # Stored once on the _Artifacts object so every prediction cycle embeds it
+    # without re-reading files.  domain_dir is forwarded so bootstrap version
+    # info is included when domain-specific thresholds are active.
+    version_info = get_model_version(model_dir, domain_dir=domain_dir)
+    log.info("  Model version   : %s", version_info["model_version"])
+
     return _Artifacts(
         boosters          = boosters,
         feature_cols      = meta_cols,
@@ -317,6 +346,7 @@ def _load_artifacts(
         model_dir         = model_dir.resolve(),
         trained_at        = trained_at,
         calibrators_60m   = calibrators_60m,
+        version_info      = version_info,
     )
 
 
@@ -443,6 +473,37 @@ def _build_features(
     status_map  : {machine_id: "success" | "cold_start_degraded" | "cold_start"}
     """
     lookback_windows = 24   # 120 min / 5 min per bucket
+
+    # Warn when incoming machine IDs are absent from spike_thresholds.parquet.
+    # Absent machines fall back to the global-median p95/p99 (computed across all
+    # Google 2011 training machines), which is wrong for machines with a different
+    # load profile.  The 12 threshold-relative features (cpu_vs_p95, band_position,
+    # time_to_p95_3, cpu_vs_p95_delta, cpu_vs_p95_slope_3/6, peak_cpu_vs_p95,
+    # cpu_vs_p99, peak_cpu_vs_p99, band_width, spike_severe_now, spike_now) are
+    # all affected.  Fix: run spike/bootstrap_thresholds.py on domain data first,
+    # then pass --domain-dir to predict.py / daemon.py.
+    incoming_ids = set(input_df["machine_id"].astype(int).unique())
+    known_ids    = set(artifacts.thresholds.index)
+    unknown_ids  = incoming_ids - known_ids
+    if unknown_ids:
+        n_unknown = len(unknown_ids)
+        n_total   = len(incoming_ids)
+        if n_unknown == n_total:
+            log.warning(
+                "ALL %d machines are unknown to spike_thresholds.parquet — "
+                "12 threshold-relative features will use global-median fallback (p95=%.3f). "
+                "Run spike/bootstrap_thresholds.py on domain data and pass "
+                "--domain-dir to fix this.",
+                n_total, artifacts.global_thresh,
+            )
+        else:
+            log.warning(
+                "%d/%d machines are unknown to spike_thresholds.parquet — "
+                "12 threshold-relative features will use global-median fallback (p95=%.3f) "
+                "for these machines. Run spike/bootstrap_thresholds.py on domain data and "
+                "pass --domain-dir to fix this.",
+                n_unknown, n_total, artifacts.global_thresh,
+            )
 
     parts:      list[pd.DataFrame] = []
     status_map: dict[int, str]     = {}
@@ -720,6 +781,9 @@ def _run_inference(
                 if h in artifacts.boosters:
                     p_s = p_enforced.get(h)
                     alm = artifacts.alarm_thresholds.get(h, 0.5)
+                    # Binary horizons (15m / 30m / 45m): is_spike is threshold-gated.
+                    # alm comes from alarm_thresholds, which --alarm-threshold overrides.
+                    # Lowering alm raises sensitivity; raising it cuts false positives.
                     imminence[h] = {
                         "p_spike":         round(p_s, 6) if p_s is not None else None,
                         "is_spike":        bool(p_s >= alm) if p_s is not None else None,
@@ -743,7 +807,14 @@ def _run_inference(
                     "p_moderate":      round(p_mod, 6),
                     "p_severe":        round(p_sev, 6),
                     "p_spike":         round(p_spike_60m_enforced, 6),
+                    # is_spike for the 60m model is argmax-based (sev_cls >= 1), not
+                    # threshold-gated.  This is intentional: for a 3-class softmax the
+                    # natural classification decision is "which class has the highest
+                    # probability?", independent of any alarm threshold.
+                    # --alarm-threshold affects is_severe (below) and the binary horizons,
+                    # but NOT this field.  See _Artifacts docstring for the full breakdown.
                     "is_spike":        bool(sev_cls >= 1),
+                    # is_severe IS threshold-gated via alm_60m → affected by --alarm-threshold.
                     "is_severe":       is_severe_60m,
                     "alarm_threshold": round(alm_60m, 4),
                     **({"p_severe_ovr": round(p_sev_ovr, 6), "alarm_threshold_ovr": round(alm_ovr, 4)}
@@ -838,7 +909,12 @@ def _run_inference(
 # ── Public entry point ────────────────────────────────────────────────────────
 
 
-def predict(input_df: pd.DataFrame, model_dir: str | Path) -> dict:
+def predict(
+    input_df:        pd.DataFrame,
+    model_dir:       str | Path,
+    *,
+    alarm_threshold: Optional[float] = None,
+) -> dict:
     """Run spike prediction on a pre-aggregated rolling window DataFrame.
 
     This is the importable entry point for callers that construct the input
@@ -846,8 +922,14 @@ def predict(input_df: pd.DataFrame, model_dir: str | Path) -> dict:
 
     Parameters
     ----------
-    input_df  : per-machine aggregated data (cluster_agg format, last 120 min).
-    model_dir : directory with spike_model.json, spike_config.json, etc.
+    input_df        : per-machine aggregated data (cluster_agg format, last 120 min).
+    model_dir       : directory with spike_model.json, spike_config.json, etc.
+    alarm_threshold : optional float in [0, 1] that overrides the trained alarm
+                      threshold for every loaded horizon (60m, 15m, 30m, 45m,
+                      severe_ovr).  When None the per-horizon values stored in
+                      spike_config.json are used.  Lower values raise sensitivity
+                      (more alarms, fewer missed spikes); higher values cut false
+                      positives.  See --alarm-threshold in the CLI for usage guidance.
 
     Returns
     -------
@@ -860,7 +942,22 @@ def predict(input_df: pd.DataFrame, model_dir: str | Path) -> dict:
     RuntimeError     on feature column mismatch.
     """
     _prepare_input(input_df)
-    artifacts   = _load_artifacts(Path(model_dir))
+    artifacts = _load_artifacts(Path(model_dir))
+
+    # Apply operator-supplied alarm threshold override across all horizons.
+    # The trained per-horizon thresholds in spike_config.json are the default;
+    # this override lets operators shift their operating point (FP vs FN trade-off)
+    # without retraining.  alarm_thresholds is a plain dict so in-place update
+    # is safe even though _Artifacts is a frozen dataclass.
+    if alarm_threshold is not None:
+        for h in artifacts.alarm_thresholds:
+            artifacts.alarm_thresholds[h] = alarm_threshold
+        log.info(
+            "  Alarm threshold override: %.4f applied to horizon(s): %s",
+            alarm_threshold,
+            ", ".join(sorted(artifacts.alarm_thresholds)),
+        )
+
     feature_df, status_map = _build_features(input_df, artifacts)
     predictions = _run_inference(feature_df, input_df, status_map, artifacts)
 
@@ -870,6 +967,9 @@ def predict(input_df: pd.DataFrame, model_dir: str | Path) -> dict:
     return {
         "batch_id":            str(uuid.uuid4()),
         "predicted_at":        datetime.now(timezone.utc).isoformat(),
+        # model_version is the string form from version_info; full metadata is
+        # in version_info for tooling that needs trained_at, feature_hash, etc.
+        "model_version":       artifacts.version_info.get("model_version") if artifacts.version_info else None,
         "model_dir":           str(Path(model_dir).resolve()),
         "horizon_minutes":     artifacts.horizon_minutes,
         "machines_total":      int(input_df["machine_id"].nunique()),
@@ -883,13 +983,20 @@ def predict_with_artifacts(input_df: pd.DataFrame, artifacts: _Artifacts) -> dic
     """Run spike prediction using pre-loaded artefacts.
 
     Identical to predict() but skips the artefact loading step.  Use this in
-    long-running services (e.g. the FastAPI server) where artefacts are loaded
-    once at startup and reused across requests.
+    long-running services (e.g. the daemon or FastAPI server) where artefacts
+    are loaded once at startup and reused across requests.
+
+    Alarm threshold overrides are applied at startup by the caller (e.g. daemon.run())
+    by mutating artifacts.alarm_thresholds before the first cycle.  This function
+    always reads thresholds from the artifacts object as-is, so the override
+    persists across all cycles without being re-applied each time.
 
     Parameters
     ----------
     input_df  : per-machine aggregated data (cluster_agg format, last 120 min).
     artifacts : artefacts returned by _load_artifacts(), loaded at startup.
+                If an alarm threshold override is active, it must already be
+                applied to artifacts.alarm_thresholds before calling this.
 
     Returns
     -------
@@ -909,6 +1016,7 @@ def predict_with_artifacts(input_df: pd.DataFrame, artifacts: _Artifacts) -> dic
     return {
         "batch_id":            str(uuid.uuid4()),
         "predicted_at":        datetime.now(timezone.utc).isoformat(),
+        "model_version":       artifacts.version_info.get("model_version") if artifacts.version_info else None,
         "model_dir":           str(artifacts.model_dir),
         "horizon_minutes":     artifacts.horizon_minutes,
         "machines_total":      int(input_df["machine_id"].nunique()),
@@ -949,6 +1057,25 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar = "JSON",
         help    = "Also write predictions to this file (atomic write — safe on failure)",
     )
+    # --alarm-threshold: runtime operating-point override.
+    # The training pipeline selects one threshold per horizon that maximises F1
+    # on the validation set and stores it in spike_config.json.  This flag lets
+    # operators shift the operating point for their specific FP/FN cost ratio
+    # without retraining.  Affects binary-horizon is_spike decisions and 60m
+    # is_severe; does NOT change the 60m is_spike argmax decision.
+    p.add_argument(
+        "--alarm-threshold", "-t",
+        type    = float,
+        default = None,
+        dest    = "alarm_threshold",
+        metavar = "FLOAT",
+        help    = (
+            "Override the alarm threshold for all prediction horizons (0.0–1.0). "
+            "Lower values raise sensitivity (more alarms, fewer missed spikes); "
+            "higher values reduce false positives. "
+            "Default: per-horizon values stored in spike_config.json at training time."
+        ),
+    )
     return p
 
 
@@ -964,6 +1091,9 @@ def main(argv: Optional[list[str]] = None) -> None:
         sys.exit(1)
     if not model_dir.is_dir():
         log.error("Model directory not found: %s", model_dir)
+        sys.exit(1)
+    if args.alarm_threshold is not None and not (0.0 <= args.alarm_threshold <= 1.0):
+        log.error("--alarm-threshold must be in [0.0, 1.0] (got %.4g).", args.alarm_threshold)
         sys.exit(1)
 
     log.info("═" * 62)
@@ -984,7 +1114,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         sys.exit(2)
 
     try:
-        result = predict(input_df, model_dir)
+        result = predict(input_df, model_dir, alarm_threshold=args.alarm_threshold)
     except (FileNotFoundError, RuntimeError) as exc:
         log.error("%s", exc)
         sys.exit(1)

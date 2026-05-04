@@ -1,0 +1,94 @@
+{
+  "run_at": "2026-05-04T09:27:45.926929+00:00",
+  "input_path": "data/sample/cluster_agg_sample.csv",
+  "model_dir": "data/full_run/spike",
+  "n_machines": 20,
+  "coverage_days": 1.04,
+  "val_rows": 1200,
+  "test_rows": 1200,
+  "warnings": [],
+  "models": {
+    "60m": {
+      "n_val": 1200,
+      "n_test": 960,
+      "class_rates": {
+        "class_0": 0.7167,
+        "class_1": 0.1729,
+        "class_2": 0.1104
+      },
+      "macro_pr_auc": 0.3934,
+      "macro_roc_auc": 0.5899,
+      "per_class": {
+        "class_0": {
+          "pr_auc": 0.748,
+          "roc_auc": 0.6081
+        },
+        "class_1": {
+          "pr_auc": 0.2206,
+          "roc_auc": 0.542
+        },
+        "class_2": {
+          "pr_auc": 0.2117,
+          "roc_auc": 0.6197
+        }
+      },
+      "alarm_threshold": 0.05,
+      "alarm_precision": 0.5464,
+      "alarm_recall": 0.6075,
+      "alarm_f1": 0.5753,
+      "alarm_rate": 0.3125
+    },
+    "15m": {
+      "n_val": 1200,
+      "n_test": 1140,
+      "n_pos": 127,
+      "pos_rate": 0.1114,
+      "pr_auc": 0.3861,
+      "roc_auc": 0.7356,
+      "alarm_threshold": 0.6,
+      "alarm_precision": 0.5964,
+      "alarm_recall": 0.5051,
+      "alarm_f1": 0.547,
+      "alarm_rate": 0.1026
+    },
+    "30m": {
+      "n_val": 1200,
+      "n_test": 1080,
+      "n_pos": 191,
+      "pos_rate": 0.1769,
+      "pr_auc": 0.4049,
+      "roc_auc": 0.681,
+      "alarm_threshold": 0.3,
+      "alarm_precision": 0.5016,
+      "alarm_recall": 0.5083,
+      "alarm_f1": 0.505,
+      "alarm_rate": 0.2148
+    },
+    "45m": {
+      "n_val": 1200,
+      "n_test": 1020,
+      "n_pos": 241,
+      "pos_rate": 0.2363,
+      "pr_auc": 0.4415,
+      "roc_auc": 0.6499,
+      "alarm_threshold": 0.05,
+      "alarm_precision": 0.4003,
+      "alarm_recall": 0.7911,
+      "alarm_f1": 0.5316,
+      "alarm_rate": 0.5853
+    },
+    "severe_ovr": {
+      "n_val": 1200,
+      "n_test": 1200,
+      "n_pos": 106,
+      "pos_rate": 0.0883,
+      "pr_auc": 0.1372,
+      "roc_auc": 0.5711,
+      "alarm_threshold": 0.4,
+      "alarm_precision": 0.1126,
+      "alarm_recall": 0.2394,
+      "alarm_f1": 0.1532,
+      "alarm_rate": 0.1508
+    }
+  }
+}

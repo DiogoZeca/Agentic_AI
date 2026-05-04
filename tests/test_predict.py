@@ -41,6 +41,14 @@ from spike.predict import (
 from spike.classifier import _X_COLS
 from spike.feature_engineer import engineer, _FEATURE_COLS
 
+# Shared test scaffolding lives in helpers.py so test_daemon_slo.py can import it too.
+from helpers import make_agg_row, make_window_df, make_fake_artifacts
+
+# Private aliases keep existing test code unchanged without mass-renaming.
+_make_agg_row       = make_agg_row
+_make_window_df     = make_window_df
+_make_fake_artifacts = make_fake_artifacts
+
 # ── Path to real artefacts (present after a full training run) ─────────────────
 
 _REAL_MODEL_DIR = Path(__file__).parents[1] / "data" / "full_run" / "models" / "spike"
@@ -50,163 +58,6 @@ _HAS_REAL_MODEL = (
     and (_REAL_MODEL_DIR / "spike_model.meta.json").exists()
     and (_REAL_MODEL_DIR / "spike_thresholds.parquet").exists()
 )
-
-# ── Shared helpers ────────────────────────────────────────────────────────────
-
-
-def _make_agg_row(
-    machine_id: int,
-    bucket: int,
-    total_cpu: float = 0.15,
-    peak_cpu: float = 0.20,
-    total_mem: float = 0.10,
-    peak_mem: float = 0.20,
-    disk_io: float = 0.01,
-    n_tasks: int = 5,
-) -> dict:
-    return {
-        "machine_id": machine_id,
-        "bucket":     bucket,
-        "time_us":    bucket * 300_000_000,
-        "total_cpu":  total_cpu,
-        "peak_cpu":   peak_cpu,
-        "total_mem":  total_mem,
-        "peak_mem":   peak_mem,
-        "disk_io":    disk_io,
-        "n_tasks":    n_tasks,
-    }
-
-
-def _make_window_df(
-    machine_ids: list[int] = (1, 2),
-    n_buckets: int = 24,
-    start_bucket: int = 100,
-) -> pd.DataFrame:
-    """Create a minimal valid input DataFrame with n_buckets per machine."""
-    rows = [
-        _make_agg_row(mid, start_bucket + i)
-        for mid in machine_ids
-        for i in range(n_buckets)
-    ]
-    df = pd.DataFrame(rows)
-    df["machine_id"] = df["machine_id"].astype("int64")
-    df["bucket"]     = df["bucket"].astype("int64")
-    df["time_us"]    = df["time_us"].astype("int64")
-    df["n_tasks"]    = df["n_tasks"].astype("int32")
-    for col in ("total_cpu", "peak_cpu", "total_mem", "peak_mem", "disk_io"):
-        df[col] = df[col].astype("float32")
-    return df
-
-
-def _train_tiny_booster(feature_cols: list[str], binary: bool = False) -> xgb.Booster:
-    """Train a minimal 5-tree XGBoost booster on synthetic data."""
-    rng = np.random.default_rng(0)
-    X   = rng.standard_normal((30, len(feature_cols))).astype("float32")
-    if binary:
-        y      = rng.integers(0, 2, size=30)
-        params = {"objective": "binary:logistic", "eval_metric": "aucpr", "verbosity": 0}
-    else:
-        y      = rng.integers(0, 3, size=30)
-        params = {"objective": "multi:softprob", "num_class": 3, "eval_metric": "mlogloss", "verbosity": 0}
-    return xgb.train(params, xgb.DMatrix(X, label=y, feature_names=feature_cols), num_boost_round=5)
-
-
-def _write_horizon_dir(
-    parent_dir:      Path,
-    dir_name:        str,
-    feature_cols:    list[str],
-    alarm_threshold: float,
-    binary:          bool = False,
-) -> None:
-    """Write a single horizon model directory (model + meta + config)."""
-    h_dir = parent_dir / dir_name
-    h_dir.mkdir(parents=True, exist_ok=True)
-
-    booster    = _train_tiny_booster(feature_cols, binary=binary)
-    model_path = h_dir / "spike_model.json"
-    booster.save_model(str(model_path))
-
-    meta = {"feature_cols": feature_cols, "xgboost_version": xgb.__version__}
-    (h_dir / "spike_model.meta.json").write_text(json.dumps(meta))
-
-    config = {
-        "alarm_threshold": alarm_threshold,
-        "inference": {"feature_cols": feature_cols},
-    }
-    (h_dir / "spike_config.json").write_text(json.dumps(config))
-
-
-def _make_fake_artifacts(
-    tmp_path: Path,
-    feature_cols: list[str] | None = None,
-    alarm_threshold: float = 0.25,
-    global_threshold: float = 0.35,
-    global_threshold_p99: float = 0.40,
-    thresholds: dict[int, float] | None = None,
-    thresholds_p99: dict[int, float] | None = None,
-    include_binary_horizons: bool = True,
-    include_severe_ovr: bool = False,
-) -> tuple[Path, _Artifacts]:
-    """Build a minimal fake model directory and return (model_dir, artifacts).
-
-    Trains a 5-tree XGBoost 3-class model for 60m and optionally binary models
-    for 15m and/or severe_ovr (Phase 5).
-    """
-    feature_cols   = feature_cols   or list(_X_COLS)
-    thresholds     = thresholds     or {1: 0.30, 2: 0.32}
-    thresholds_p99 = thresholds_p99 or {k: v * 1.15 for k, v in thresholds.items()}
-
-    models_dir = tmp_path / "models"
-    models_dir.mkdir(parents=True, exist_ok=True)
-
-    # 60m 3-class model
-    _write_horizon_dir(models_dir, "spike", feature_cols, alarm_threshold, binary=False)
-    model_dir = models_dir / "spike"
-
-    # Binary horizon model (optional — only 15m remains after Fix 3)
-    if include_binary_horizons:
-        _write_horizon_dir(models_dir, "spike_15m", feature_cols,
-                           alarm_threshold * 0.8, binary=True)
-
-    # OVR severe binary model (Phase 5)
-    if include_severe_ovr:
-        _write_horizon_dir(models_dir, "spike_severe_ovr", feature_cols,
-                           alarm_threshold * 0.9, binary=True)
-
-    thresh_df = pd.DataFrame([
-        {
-            "machine_id":    mid,
-            "threshold_p95": thr,
-            "threshold_p99": thresholds_p99.get(mid, thr * 1.15),
-        }
-        for mid, thr in thresholds.items()
-    ])
-    thresh_df["machine_id"]    = thresh_df["machine_id"].astype("int64")
-    thresh_df["threshold_p95"] = thresh_df["threshold_p95"].astype("float32")
-    thresh_df["threshold_p99"] = thresh_df["threshold_p99"].astype("float32")
-    thresh_df.to_parquet(model_dir / "spike_thresholds.parquet", index=False)
-
-    # Rewrite 60m config with full inference fields
-    config = {
-        "alarm_threshold": alarm_threshold,
-        "trained_at":      "2026-01-01T00:00:00+00:00",
-        "inference": {
-            "bucket_duration_seconds":          300,
-            "horizon_windows":                  12,
-            "horizon_minutes":                  60,
-            "lookback_windows":                 24,
-            "lookback_minutes":                 120,
-            "min_buckets_cold_start":           12,
-            "feature_cols":                     feature_cols,
-            "global_threshold_p95_fallback":    global_threshold,
-            "global_threshold_p99_fallback":    global_threshold_p99,
-            "thresholds_file":                  str(model_dir / "spike_thresholds.parquet"),
-        },
-    }
-    (model_dir / "spike_config.json").write_text(json.dumps(config))
-
-    arts = _load_artifacts(model_dir)
-    return model_dir, arts
 
 
 # ── Category 1: Input schema validation ──────────────────────────────────────
@@ -764,6 +615,155 @@ def test_severe_ovr_model_loaded_when_present(tmp_path):
         "severe_ovr booster should be loaded when spike_severe_ovr/ dir exists"
     )
     assert "severe_ovr" in arts.alarm_thresholds
+
+
+# ── Alarm threshold override (--alarm-threshold flag) ─────────────────────────
+
+
+class TestAlarmThresholdOverride:
+    """The --alarm-threshold flag overrides the trained per-horizon alarm threshold
+    for every loaded horizon without retraining.  These tests verify that:
+      - the override is applied to all horizon entries in alarm_thresholds
+      - the override propagates into per-machine prediction dicts
+      - boundary values (0.0 and 1.0) produce the expected all-alarm / no-alarm behaviour
+      - the CLI validates the range and rejects out-of-range values
+    """
+
+    def test_override_applied_to_all_horizons(self, tmp_path):
+        """When alarm_threshold is set, every horizon entry must be overwritten."""
+        model_dir, arts = _make_fake_artifacts(
+            tmp_path, thresholds={1: 0.30}, include_binary_horizons=True
+        )
+        original_horizons = set(arts.alarm_thresholds.keys())
+        assert len(original_horizons) > 1, "fixture must include at least 2 horizons"
+
+        override = 0.42
+        for h in arts.alarm_thresholds:
+            arts.alarm_thresholds[h] = override
+
+        for h, v in arts.alarm_thresholds.items():
+            assert v == override, f"horizon '{h}' was not overridden"
+
+    def test_low_threshold_maximises_alarms(self, tmp_path):
+        """With threshold=0.0, binary-horizon is_spike must be True (any probability >= 0.0
+        is always true) and the 60m is_severe must be True (any p_severe >= 0.0).
+
+        Note: the 60m is_spike field is argmax-based (not threshold-gated) so it is
+        excluded from this check — it reflects the model's class prediction, not the
+        operator alarm decision.
+        """
+        model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30})
+        df = _make_window_df(machine_ids=[1], n_buckets=24)
+
+        result = predict(df, model_dir, alarm_threshold=0.0)
+
+        for pred in result["predictions"]:
+            if pred["status"] == "cold_start":
+                continue
+            imminence = pred.get("imminence") or {}
+            # Binary horizons: is_spike is threshold-based → must be True at 0.0.
+            for h in ("15m", "30m", "45m"):
+                if h in imminence and imminence[h].get("is_spike") is not None:
+                    assert imminence[h]["is_spike"] is True, (
+                        f"binary horizon {h}: expected is_spike=True at threshold=0.0"
+                    )
+            # 60m severity: is_severe is threshold-based → must be True at 0.0.
+            if "60m" in imminence and imminence["60m"].get("is_severe") is not None:
+                assert imminence["60m"]["is_severe"] is True, (
+                    "60m is_severe must be True at threshold=0.0"
+                )
+
+    def test_high_threshold_suppresses_alarms(self, tmp_path):
+        """With threshold=1.0, binary-horizon is_spike must be False (softmax/sigmoid
+        outputs are strictly < 1.0) and 60m is_severe must be False.
+
+        Note: the 60m is_spike field is argmax-based (not threshold-gated) and is
+        excluded from this check for the same reason as test_low_threshold_maximises_alarms.
+        """
+        model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30})
+        df = _make_window_df(machine_ids=[1], n_buckets=24)
+
+        result = predict(df, model_dir, alarm_threshold=1.0)
+
+        for pred in result["predictions"]:
+            if pred["status"] == "cold_start":
+                continue
+            imminence = pred.get("imminence") or {}
+            # Binary horizons: is_spike is threshold-based → must be False at 1.0.
+            for h in ("15m", "30m", "45m"):
+                if h in imminence and imminence[h].get("is_spike") is not None:
+                    assert imminence[h]["is_spike"] is False, (
+                        f"binary horizon {h}: expected is_spike=False at threshold=1.0, "
+                        f"got p_spike={imminence[h].get('p_spike')}"
+                    )
+            # 60m severity: is_severe is threshold-based → must be False at 1.0.
+            if "60m" in imminence and imminence["60m"].get("is_severe") is not None:
+                assert imminence["60m"]["is_severe"] is False, (
+                    "60m is_severe must be False at threshold=1.0"
+                )
+
+    def test_override_reflected_in_alarm_threshold_field(self, tmp_path):
+        """The alarm_threshold field in each prediction dict must match the override."""
+        model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30})
+        df = _make_window_df(machine_ids=[1], n_buckets=24)
+        override = 0.37
+
+        result = predict(df, model_dir, alarm_threshold=override)
+
+        for pred in result["predictions"]:
+            if pred["status"] == "cold_start":
+                continue
+            # Top-level alarm_threshold (60m) must reflect the override.
+            assert abs(pred["alarm_threshold"] - override) < 1e-6, (
+                f"Expected alarm_threshold={override}, got {pred['alarm_threshold']}"
+            )
+
+    def test_no_override_uses_trained_threshold(self, tmp_path):
+        """Without alarm_threshold, the value from spike_config.json must be used."""
+        trained_thr = 0.25
+        model_dir, _ = _make_fake_artifacts(
+            tmp_path, thresholds={1: 0.30}, alarm_threshold=trained_thr
+        )
+        df = _make_window_df(machine_ids=[1], n_buckets=24)
+
+        result = predict(df, model_dir)  # no override
+
+        for pred in result["predictions"]:
+            if pred["status"] == "cold_start":
+                continue
+            assert abs(pred["alarm_threshold"] - trained_thr) < 1e-6
+
+    def test_cli_rejects_threshold_above_1(self, tmp_path):
+        """--alarm-threshold > 1.0 must exit with code 1."""
+        from spike.predict import main as predict_main
+        model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30})
+        df = _make_window_df(machine_ids=[1], n_buckets=24)
+        csv_path = tmp_path / "window.csv"
+        df.to_csv(csv_path, index=False)
+
+        with pytest.raises(SystemExit) as exc_info:
+            predict_main([
+                "--input",           str(csv_path),
+                "--model-dir",       str(model_dir),
+                "--alarm-threshold", "1.5",
+            ])
+        assert exc_info.value.code == 1
+
+    def test_cli_rejects_threshold_below_0(self, tmp_path):
+        """--alarm-threshold < 0.0 must exit with code 1."""
+        from spike.predict import main as predict_main
+        model_dir, _ = _make_fake_artifacts(tmp_path, thresholds={1: 0.30})
+        df = _make_window_df(machine_ids=[1], n_buckets=24)
+        csv_path = tmp_path / "window.csv"
+        df.to_csv(csv_path, index=False)
+
+        with pytest.raises(SystemExit) as exc_info:
+            predict_main([
+                "--input",           str(csv_path),
+                "--model-dir",       str(model_dir),
+                "--alarm-threshold", "-0.1",
+            ])
+        assert exc_info.value.code == 1
 
 
 def test_severe_ovr_model_absent_does_not_raise(tmp_path):

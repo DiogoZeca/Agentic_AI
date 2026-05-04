@@ -1,0 +1,220 @@
+{
+  "horizon": "15m",
+  "label_col": "spike_in_15m",
+  "alarm_threshold": 0.8,
+  "train_ratio": 0.6,
+  "val_ratio": 0.2,
+  "test_ratio": 0.2,
+  "train_bucket_max": 1150,
+  "val_bucket_max": 1533,
+  "spike_rate_train": 0.088826,
+  "spike_rate_val": 0.074674,
+  "spike_rate_test": 0.051487,
+  "final_metrics": {
+    "pr_auc": 0.575281,
+    "roc_auc": 0.911536,
+    "f1": 0.545005,
+    "precision": 0.605083,
+    "recall": 0.49578,
+    "alarm_threshold": 0.8
+  },
+  "cv_summary": {
+    "cv_macro_pr_auc_mean": 0.5906442000000001,
+    "cv_macro_pr_auc_std": 0.007453684307776917,
+    "cv_macro_roc_auc_mean": 0.8944112000000001,
+    "cv_macro_roc_auc_std": 0.004074642138887787,
+    "cv_weighted_f1_mean": 0.5548991999999999,
+    "cv_weighted_f1_std": 0.004786493388692822,
+    "cv_macro_f1_mean": 0.5548991999999999,
+    "cv_macro_f1_std": 0.004786493388692822,
+    "cv_drift_tau": 0.4,
+    "cv_drift_p_val": 0.4833
+  },
+  "alarm_threshold_sweep": [
+    {
+      "threshold": 0.1,
+      "precision": 0.1165,
+      "recall": 0.9784,
+      "f1": 0.2083,
+      "alarms_per_day": 180.6
+    },
+    {
+      "threshold": 0.15,
+      "precision": 0.143,
+      "recall": 0.9548,
+      "f1": 0.2488,
+      "alarms_per_day": 143.5
+    },
+    {
+      "threshold": 0.2,
+      "precision": 0.1694,
+      "recall": 0.929,
+      "f1": 0.2866,
+      "alarms_per_day": 117.9
+    },
+    {
+      "threshold": 0.25,
+      "precision": 0.1958,
+      "recall": 0.9021,
+      "f1": 0.3218,
+      "alarms_per_day": 99.1
+    },
+    {
+      "threshold": 0.3,
+      "precision": 0.2228,
+      "recall": 0.8749,
+      "f1": 0.3551,
+      "alarms_per_day": 84.5
+    },
+    {
+      "threshold": 0.35,
+      "precision": 0.2503,
+      "recall": 0.8461,
+      "f1": 0.3863,
+      "alarms_per_day": 72.7
+    },
+    {
+      "threshold": 0.4,
+      "precision": 0.2784,
+      "recall": 0.8167,
+      "f1": 0.4152,
+      "alarms_per_day": 63.1
+    },
+    {
+      "threshold": 0.45,
+      "precision": 0.3081,
+      "recall": 0.7874,
+      "f1": 0.4429,
+      "alarms_per_day": 55.0
+    },
+    {
+      "threshold": 0.5,
+      "precision": 0.3393,
+      "recall": 0.7571,
+      "f1": 0.4686,
+      "alarms_per_day": 48.0
+    },
+    {
+      "threshold": 0.55,
+      "precision": 0.3727,
+      "recall": 0.7256,
+      "f1": 0.4924,
+      "alarms_per_day": 41.9
+    },
+    {
+      "threshold": 0.6,
+      "precision": 0.4091,
+      "recall": 0.692,
+      "f1": 0.5142,
+      "alarms_per_day": 36.4
+    },
+    {
+      "threshold": 0.65,
+      "precision": 0.4489,
+      "recall": 0.6559,
+      "f1": 0.533,
+      "alarms_per_day": 31.4
+    },
+    {
+      "threshold": 0.7,
+      "precision": 0.4937,
+      "recall": 0.6167,
+      "f1": 0.5484,
+      "alarms_per_day": 26.9
+    },
+    {
+      "threshold": 0.75,
+      "precision": 0.5432,
+      "recall": 0.5741,
+      "f1": 0.5582,
+      "alarms_per_day": 22.7
+    },
+    {
+      "threshold": 0.8,
+      "precision": 0.5962,
+      "recall": 0.5279,
+      "f1": 0.56,
+      "alarms_per_day": 19.0
+    },
+    {
+      "threshold": 0.85,
+      "precision": 0.6504,
+      "recall": 0.4765,
+      "f1": 0.5501,
+      "alarms_per_day": 15.8
+    },
+    {
+      "threshold": 0.9,
+      "precision": 0.7131,
+      "recall": 0.4122,
+      "f1": 0.5224,
+      "alarms_per_day": 12.4
+    },
+    {
+      "threshold": 0.95,
+      "precision": 0.8133,
+      "recall": 0.2923,
+      "f1": 0.43,
+      "alarms_per_day": 7.7
+    }
+  ],
+  "hyperparameter_search": {
+    "enabled": true,
+    "best_params": {
+      "max_depth": 8,
+      "learning_rate": 0.020654313871382377,
+      "subsample": 0.7057687490996676,
+      "colsample_bytree": 0.523870359194842,
+      "min_child_weight": 14,
+      "gamma": 2.5241262496897305,
+      "reg_alpha": 6.840299732664124,
+      "reg_lambda": 6.583613972524816
+    },
+    "best_macro_pr_auc": 0.5999753840064402,
+    "n_completed": 75
+  },
+  "inference": {
+    "feature_cols": [
+      "total_cpu",
+      "peak_cpu",
+      "total_mem",
+      "peak_mem",
+      "disk_io",
+      "n_tasks",
+      "cpu_per_task",
+      "cpu_lag_1",
+      "cpu_lag_12",
+      "cpu_lag_24",
+      "cpu_ewma_6",
+      "cpu_ewma_24",
+      "cpu_delta_1",
+      "cpu_delta_2",
+      "cpu_rolling_std_6",
+      "task_dominance",
+      "cpu_vs_p95",
+      "cpu_vs_p95_delta",
+      "cpu_vs_p95_slope_3",
+      "cpu_vs_p95_slope_6",
+      "time_to_p95_3",
+      "peak_cpu_vs_p95",
+      "spike_severe_now",
+      "cpu_vs_p99",
+      "peak_cpu_vs_p99",
+      "band_position",
+      "band_width",
+      "spike_severe_in_last_1",
+      "spike_severe_in_last_3",
+      "spike_severe_in_last_6",
+      "spike_now",
+      "spike_in_last_1",
+      "spike_in_last_3",
+      "spike_in_last_6",
+      "time_since_last_spike",
+      "cpu_spike_rate_24",
+      "cluster_cpu_p90",
+      "machine_rank_in_cluster",
+      "hour_sin",
+      "hour_cos"
+    ]
+  }
+}

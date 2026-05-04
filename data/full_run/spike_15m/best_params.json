@@ -1,0 +1,16 @@
+{
+  "params": {
+    "max_depth": 8,
+    "learning_rate": 0.020654313871382377,
+    "subsample": 0.7057687490996676,
+    "colsample_bytree": 0.523870359194842,
+    "min_child_weight": 14,
+    "gamma": 2.5241262496897305,
+    "reg_alpha": 6.840299732664124,
+    "reg_lambda": 6.583613972524816
+  },
+  "best_macro_pr_auc": 0.5999753840064402,
+  "n_trials": 75,
+  "n_completed": 75,
+  "resumed_from": 0
+}

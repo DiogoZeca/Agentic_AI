@@ -21,29 +21,35 @@ build/
 # ─── Pytest ──────────────────────────────────────────────────────────────────
 .pytest_cache/
 
-# ─── Input data (re-download with: python data/download_cluster_data.py)
-data/*.csv
+# ─── Input data (8 GB — re-download with: python data/download_cluster_data.py)
+data/cluster_cpu_data.csv
 
-# ─── Training artifacts (re-create with: python training/train.py)
-data/full_run/
-data/*.txt
+# ─── Large training intermediates (not needed for inference)
+# Only these two files are excluded from data/full_run/ — all model artifacts
+# in data/full_run/spike*/ (spike_model.json, calibrators.pkl, etc.) ARE tracked.
+data/full_run/cluster_agg.parquet
+data/full_run/cluster_features.parquet
 
-# ─── Experiment ablation artifacts (large model weights, regeneratable) ──────
+# ─── Experiment ablation artifacts (large, regeneratable) ────────────────────
 data/experiments/
 
-# ─── Binary data and model artifact files ────────────────────────────────────
+# ─── Parquet files: ignore globally except the inference thresholds ───────────
+# spike_thresholds.parquet (180 KB) holds per-machine p95/p99 and is required
+# for inference — any domain-specific override goes via --domain-dir instead.
 *.parquet
-*.pkl
+!data/full_run/spike/spike_thresholds.parquet
 
-# ─── Databases (Optuna SQLite) ───────────────────────────────────────────────
+# ─── Pickle files: ignore globally except the isotonic calibrators ────────────
+# calibrators.pkl (32 KB) is required for 60m probability calibration.
+*.pkl
+!data/full_run/spike/calibrators.pkl
+
+# ─── Databases (Optuna SQLite — not needed for inference) ────────────────────
 *.db
 
 # ─── Process logs ────────────────────────────────────────────────────────────
 nohup.out
 *.log
-
-# ─── Research docs (not part of the deployable project) ─────────────────────
-docs/
 
 # ─── Claude Code local settings ──────────────────────────────────────────────
 .claude/
@@ -61,7 +67,7 @@ docs/
 Thumbs.db
 
 # ─── Editor state ────────────────────────────────────────────────────────────
-.vscode/settings.json
+.vscode/
 .idea/
 *.swp
 *.swo
