@@ -53,6 +53,7 @@ nohup.out
 
 # ─── Claude Code local settings ──────────────────────────────────────────────
 .claude/
+CLAUDE.md
 
 # ─── Environment / secrets ───────────────────────────────────────────────────
 .env
