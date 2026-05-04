@@ -269,8 +269,15 @@ def _load_model(model_dir: Path) -> dict:
     calibrators = None
     cal_path    = model_dir / "calibrators.pkl"
     if cal_path.exists():
-        with open(cal_path, "rb") as f:
-            calibrators = pickle.load(f)
+        try:
+            with open(cal_path, "rb") as f:
+                calibrators = pickle.load(f)
+        except Exception as exc:
+            log.warning(
+                "calibrators.pkl could not be loaded (%s) — using raw probabilities. "
+                "Ensure scikit-learn>=1.7.0 is installed.",
+                exc,
+            )
 
     return {
         "booster"         : booster,

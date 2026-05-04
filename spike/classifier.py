@@ -830,9 +830,13 @@ def train(
     df["severity_in_60m"] = df["severity_in_60m"].astype("int8")
 
     # Time-based three-way split — never random to prevent future-data leakage.
-    bucket_max = int(df["bucket"].max())
-    train_max  = int(bucket_max * train_ratio)
-    val_max    = int(bucket_max * (train_ratio + val_ratio))
+    # Use b_min as the origin so the split ratios are correct regardless of
+    # whether bucket values start near 0 (Google 2011) or at a large Unix-epoch
+    # value (modern domain data like Zabbix).
+    b_min      = int(df["bucket"].min())
+    b_max      = int(df["bucket"].max())
+    train_max  = b_min + int((b_max - b_min) * train_ratio)
+    val_max    = b_min + int((b_max - b_min) * (train_ratio + val_ratio))
 
     train_df = df[df["bucket"] <= train_max].reset_index(drop=True)
     val_df   = df[(df["bucket"] > train_max) & (df["bucket"] <= val_max)].reset_index(drop=True)

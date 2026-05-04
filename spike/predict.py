@@ -51,10 +51,10 @@ Output (JSON)
 Usage
 -----
   # Predictions to stdout; logs to stderr
-  python spike/predict.py --input window.csv --model-dir data/full_run/models/spike/
+  python spike/predict.py --input window.csv --model-dir data/full_run/spike/
 
   # Also write to a file (atomic write — safe if process is killed mid-run)
-  python spike/predict.py --input window.csv --model-dir data/full_run/models/spike/ \\
+  python spike/predict.py --input window.csv --model-dir data/full_run/spike/ \\
       --output predictions.json
 
 Exit codes
@@ -309,9 +309,16 @@ def _load_artifacts(
     calibrators_60m = None
     cal_path = model_dir / "calibrators.pkl"
     if cal_path.exists():
-        with open(cal_path, "rb") as _f:
-            calibrators_60m = pickle.load(_f)
-        log.info("  Calibrators     : loaded (%d classes)", len(calibrators_60m))
+        try:
+            with open(cal_path, "rb") as _f:
+                calibrators_60m = pickle.load(_f)
+            log.info("  Calibrators     : loaded (%d classes)", len(calibrators_60m))
+        except Exception as exc:
+            log.warning(
+                "  Calibrators     : failed to load (%s) — falling back to raw softmax "
+                "probabilities. Ensure scikit-learn>=%s is installed.",
+                exc, "1.7.0",
+            )
     else:
         log.info("  Calibrators     : not found — using raw softmax probabilities")
 

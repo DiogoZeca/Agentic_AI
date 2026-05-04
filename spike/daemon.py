@@ -30,19 +30,19 @@ Usage
     # File mode (operator writes cpu_window.csv every 5 min via their own script)
     python spike/daemon.py \\
         --input      cpu_window.csv \\
-        --model-dir  /path/to/models/spike \\
+        --model-dir  data/full_run/spike \\
         --output     predictions.json \\
         --interval   300
 
     # Fetch-command mode (operator provides a data-collection script)
     python spike/daemon.py \\
         --fetch-cmd  "python my_data_script.py" \\
-        --model-dir  /path/to/models/spike \\
+        --model-dir  data/full_run/spike \\
         --output     predictions.json \\
         --interval   300
 
     # One-shot (run once and exit — useful for cron / testing)
-    python spike/daemon.py --input cpu_window.csv --model-dir /path/to/models/spike \\
+    python spike/daemon.py --input cpu_window.csv --model-dir data/full_run/spike \\
         --output predictions.json --interval 0
 
 Timing

@@ -11,7 +11,7 @@ Endpoints
 
 Example request (POST /predict):
   {
-    "model_dir": "/app/data/full_run/models/spike",
+    "model_dir": "/app/data/full_run/spike",
     "rows": [
       {"machine_id": 1, "bucket": 100, "time_us": 30000000000,
        "total_cpu": 0.42, "peak_cpu": 0.61, "total_mem": 1.2,
@@ -78,7 +78,7 @@ async def lifespan(app: FastAPI):
     """Load artefacts on startup; release on shutdown."""
     global _artifacts
     import os
-    model_dir = os.environ.get("MODEL_DIR", "/app/data/full_run/models/spike")
+    model_dir = os.environ.get("MODEL_DIR", "/app/data/full_run/spike")
     log.info("Loading artefacts from %s …", model_dir)
     # Let exceptions propagate — Starlette sends lifespan.startup.failed to
     # uvicorn, which sets should_exit=True and terminates with a non-zero exit

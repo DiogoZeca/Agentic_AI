@@ -32,7 +32,7 @@ CLI:
     python -m spike.drift_monitor \\
         --reference   data/full_run/cluster_features.parquet \\
         --live        /path/to/live/cluster_agg.csv \\
-        --model-dir   data/full_run/models/spike \\
+        --model-dir   data/full_run/spike \\
         --output      drift_report.json \\
         [--ref-sample-frac 0.10] \\
         [--min-bins-count  5] \\
@@ -421,7 +421,7 @@ def main(argv: list[str] | None = None) -> None:
                    help="Path to live cluster_agg in CSV or Parquet format")
     p.add_argument("--model-dir",
                    required=True,
-                   help="Path to models/spike/ directory (used to read model version)")
+                   help="Path to spike model directory, e.g. data/full_run/spike (used to read model version)")
     p.add_argument("--output",
                    default="drift_report.json",
                    help="Output path for drift_report.json (default: ./drift_report.json)")
