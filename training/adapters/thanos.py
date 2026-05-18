@@ -65,7 +65,7 @@ _Q_PEAK_CPU = (
     '  sum(rate(node_cpu_seconds_total{mode!="idle"}[1m])) by (nodename)'
     "[5m:1m])"
 )
-_Q_TOTAL_MEM = "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes"
+_Q_TOTAL_MEM = "(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes"
 _Q_DISK_IO   = "max(rate(node_disk_io_time_seconds_total[5m])) by (nodename)"
 _Q_LOAD1     = "node_load1"  # 1-min load average — proxy for n_tasks
 
