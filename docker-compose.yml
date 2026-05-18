@@ -37,7 +37,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - MODEL_DIR=/app/data/full_run/models/spike
+      - MODEL_DIR=/app/data/full_run/spike
     volumes:
       # Model artifacts mounted read-only — update model without rebuilding image
       - ./data/full_run:/app/data/full_run:ro

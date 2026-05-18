@@ -27,15 +27,17 @@ XGBoost vs. best rule-based baseline (persistence): **+0.094 to +0.115 PR-AUC** 
 
 ### Zero-Shot Transfer — Zabbix HPC Cluster
 
-25 of 40 features show MAJOR distribution shift (PSI > 0.25) between the two domains. The model transfers because spike-history and machine-relative features dominate predictions and are domain-invariant.
+25 of 40 features show MAJOR distribution shift (PSI > 0.25) between the two domains. The model transfers because spike-history and machine-relative features dominate predictions and are domain-invariant. Results below are for the current 40-feature production model after domain recalibration (alarm threshold re-selection on Zabbix val split — no weight retraining).
 
-| Model | Zabbix PR-AUC | Zabbix ROC-AUC |
-|-------|---------------|----------------|
-| 60m severity | **0.848** | 0.922 |
-| 15m binary | **0.957** | 0.966 |
-| 30m binary | **0.957** | 0.960 |
-| 45m binary | **0.957** | 0.955 |
-| OVR severe | **0.926** | 0.955 |
+| Model | Zabbix PR-AUC | Zabbix ROC-AUC | Retention vs Google |
+|-------|---------------|----------------|---------------------|
+| 60m severity (recal) | **0.800** | 0.900 | 146% |
+| 15m binary | **0.956** | 0.966 | 166% |
+| 30m binary | **0.957** | 0.960 | 170% |
+| 45m binary | **0.956** | 0.954 | 170% |
+| OVR severe (cascade) | **0.891** | 0.928 | 263% |
+
+All five models exceed 100% retention — they perform better on Zabbix than on Google despite seeing zero Zabbix data during training.
 
 ---
 
@@ -55,7 +57,7 @@ Agentic_AI/
 ├── spike/                          Inference package (pip install -e .)
 │   ├── predict.py                  One-shot inference: CSV → JSON
 │   ├── daemon.py                   Continuous polling loop (--interval N seconds)
-│   ├── api.py                      FastAPI service (POST /predict)
+│   ├── api.py                      FastAPI service (POST /predict, POST /summary)
 │   ├── bootstrap_thresholds.py     Domain threshold bootstrap (new-domain deployment)
 │   ├── drift_monitor.py            PSI feature drift detection
 │   ├── feature_engineer.py         40-feature engineering (shared by train and inference)
@@ -63,6 +65,13 @@ Agentic_AI/
 │   ├── psi.py                      Population Stability Index utilities
 │   ├── version.py                  Model artefact versioning
 │   └── Dockerfile                  Inference API image (CPU-only)
+│
+├── k8s/                            Kubernetes manifests (OSM k3s deployment)
+│   ├── namespace.yaml              spike namespace
+│   ├── pvc.yaml                    500Mi PVC for model artefacts (local-path)
+│   ├── populate-pvc.yaml           One-shot pod to load artefacts into the PVC
+│   ├── deployment.yaml             API deployment (imagePullPolicy: Never)
+│   └── service.yaml                ClusterIP service on port 8000
 │
 ├── training/
 │   ├── train.py                    3-step training pipeline (preprocess → features → train)

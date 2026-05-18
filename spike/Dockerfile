@@ -10,7 +10,7 @@
 #
 #   Environment variable:
 #     MODEL_DIR  path inside the container to the spike model artefacts
-#                (default: /app/data/full_run/models/spike)
+#                (default: /app/data/full_run/spike)
 # ──────────────────────────────────────────────────────────────────────────────
 
 FROM python:3.12-slim
@@ -27,15 +27,18 @@ WORKDIR /app
 # Layer-cache dependencies separately from source code.
 # Rebuilds only trigger a pip re-install when requirements change.
 COPY spike/requirements-inference.txt .
-RUN pip install --no-cache-dir -r requirements-inference.txt
+# Install xgboost without deps first to skip the 300MB nvidia-nccl-cu12 GPU library
+RUN pip install --no-cache-dir numpy>=1.24.0 scipy \
+ && pip install --no-cache-dir --no-deps "xgboost>=3.2.0,<4.0.0" \
+ && pip install --no-cache-dir -r requirements-inference.txt
 
 # Install the spike package in editable mode
 COPY pyproject.toml .
 COPY spike/ ./spike/
 RUN pip install --no-cache-dir -e .
 
-# Artifact mount point — bind-mounted from host at runtime (see docker-compose.yml)
-RUN mkdir -p data/full_run/models/spike \
+# Artifact mount point — bind-mounted or PVC-mounted at runtime
+RUN mkdir -p data/full_run/spike \
  && chown -R appuser:appuser /app
 
 USER appuser

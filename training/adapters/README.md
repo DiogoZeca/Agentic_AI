@@ -50,6 +50,7 @@ are correctly phase-aligned.
 |---|---|---|
 | `google_cluster.py` | Google Cluster Traces 2011 CSV | Step 1 of training pipeline |
 | `zabbix.py` | Zabbix 7.x API | Batch fetch, 89-day history |
+| `thanos.py` | Thanos / Prometheus query_range API | Live inference — OSM cluster via node-exporter → OTEL → Thanos |
 
 ## Writing your own adapter
 

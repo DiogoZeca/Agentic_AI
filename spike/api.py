@@ -7,11 +7,15 @@ Endpoints
 ---------
   GET  /health   — liveness probe (always 200 if process is alive)
   GET  /ready    — readiness probe (200 only when artefacts are loaded)
-  POST /predict  — run inference on a rolling window of CPU observations
+  POST /predict  — full per-machine inference (probabilities, imminence, SHAP)
+  POST /summary  — scheduler-facing summary: spike counts per horizon + per-node status
 
-Example request (POST /predict):
+Both /predict and /summary share the same EWMA and debounce state. Use one
+endpoint consistently per deployment cycle — calling both in the same cycle
+will double-update the per-machine smoothing and consecutive-alarm counters.
+
+Example request (POST /predict or POST /summary):
   {
-    "model_dir": "/app/data/full_run/spike",
     "rows": [
       {"machine_id": 1, "bucket": 100, "time_us": 30000000000,
        "total_cpu": 0.42, "peak_cpu": 0.61, "total_mem": 1.2,
@@ -196,6 +200,115 @@ def _apply_alarm_debounce(
     return result
 
 
+# ── Summary builder ───────────────────────────────────────────────────────────
+
+_SEVERITY_LABELS: dict[int, str] = {0: "no_spike", 1: "moderate", 2: "severe"}
+
+
+def _build_summary_response(result: dict) -> dict:
+    """Aggregate a full predict_with_artifacts result into the scheduler summary format.
+
+    summary.spikes_in_Xm  = machines predicted to spike within X minutes.
+    summary.nodes_requiring_action = machines with recommended_action in
+                                     {preempt_now, migrate_jobs} — direct
+                                     cluster-level signal for the scheduler.
+
+    per_node fields for scheduler integration:
+      spike_60m        — 60m severity model verdict (sustained spike risk)
+      spike_imminent   — True if any binary horizon model (15m/30m/45m) alarmed
+      alarm_source     — which model drove recommended_action
+      scheduler_score  — 0-100; higher = safer; maps directly to K8s Score plugin
+      recommended_action — what the scheduler should do with this node
+
+    Cold-start machines are excluded from summary counts but present in per_node.
+    """
+    counts: dict[str, int] = {
+        "spikes_in_15m": 0,
+        "spikes_in_30m": 0,
+        "spikes_in_45m": 0,
+        "spikes_in_60m": 0,
+    }
+    per_node = []
+
+    for pred in result["predictions"]:
+        imm    = pred.get("imminence") or {}
+        status = pred.get("status", "")
+
+        if status != "cold_start":
+            if imm.get("15m", {}).get("is_spike"):
+                counts["spikes_in_15m"] += 1
+            if imm.get("30m", {}).get("is_spike"):
+                counts["spikes_in_30m"] += 1
+            if imm.get("45m", {}).get("is_spike"):
+                counts["spikes_in_45m"] += 1
+            if pred.get("is_spike"):
+                counts["spikes_in_60m"] += 1
+
+        # Earliest alarming horizon — determines scheduler lead time.
+        horizon: str | None = None
+        if status != "cold_start":
+            for h in ("15m", "30m", "45m"):
+                if imm.get(h, {}).get("is_spike"):
+                    horizon = h
+                    break
+            if horizon is None and pred.get("is_spike"):
+                horizon = "60m"
+
+        # spike_imminent: any short-horizon binary model alarmed.
+        spike_imminent: bool | None = None
+        if status != "cold_start":
+            spike_imminent = any(
+                imm.get(h, {}).get("is_spike") for h in ("15m", "30m", "45m")
+            )
+
+        # alarm_source: which model drove recommended_action — removes ambiguity
+        # when spike_60m and spike_imminent disagree.
+        if status == "cold_start":
+            alarm_source: str | None = None
+        elif horizon in ("15m", "30m", "45m"):
+            alarm_source = f"binary_{horizon}"
+        elif pred.get("is_spike"):
+            alarm_source = "60m_severity"
+        else:
+            alarm_source = "none"
+
+        # scheduler_score: 0-100 (100 = safest). Plugs directly into the K8s
+        # Score plugin — no transformation required by the integrator.
+        p_smoothed = pred.get("p_spike_smoothed")
+        scheduler_score: int | None = (
+            round(100 * (1.0 - p_smoothed)) if p_smoothed is not None else None
+        )
+
+        sev_cls = pred.get("severity_class")
+        per_node.append({
+            "machine_id":         pred["machine_id"],
+            "status":             status,
+            "spike_60m":          pred.get("is_spike"),
+            "spike_imminent":     spike_imminent,
+            "severity":           _SEVERITY_LABELS.get(sev_cls) if sev_cls is not None else None,
+            "alarm_source":       alarm_source,
+            "scheduler_score":    scheduler_score,
+            "horizon":            horizon,
+            "recommended_action": pred.get("recommended_action"),
+            "p_spike_smoothed":   pred.get("p_spike_smoothed"),
+            "consecutive_alarms": pred.get("consecutive_alarms"),
+        })
+
+    counts["nodes_requiring_action"] = sum(
+        1 for n in per_node
+        if n.get("recommended_action") in ("preempt_now", "migrate_jobs")
+    )
+
+    return {
+        "summary":             counts,
+        "per_node":            per_node,
+        "predicted_at":        result.get("predicted_at"),
+        "machines_total":      result.get("machines_total"),
+        "machines_predicted":  result.get("machines_predicted"),
+        "machines_cold_start": result.get("machines_cold_start"),
+    }
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
@@ -278,3 +391,34 @@ def predict(request: PredictRequest) -> dict[str, Any]:
     # jsonable_encoder converts numpy types (int64, float32, bool_) to Python
     # primitives — FastAPI does not do this automatically for nested dicts.
     return jsonable_encoder(result)
+
+
+@app.post("/summary", tags=["inference"])
+def summary(request: PredictRequest) -> dict[str, Any]:
+    """Scheduler-facing spike summary.
+
+    Runs the same inference pipeline as /predict and returns:
+      - summary: spike count per horizon (0 = no alarms — best score)
+      - per_node: per-machine status, severity, and earliest alarming horizon
+
+    The scheduler uses summary.spikes_in_Xm as a cluster health score and
+    per_node to decide which specific machines to migrate or defer work from.
+
+    Send the last 24 buckets (120 min) per machine.
+    Cold-start machines are excluded from summary counts but present in per_node.
+    """
+    if _artifacts is None:
+        raise HTTPException(status_code=503, detail="Artefacts not yet loaded.")
+
+    try:
+        input_df = request.to_dataframe()
+        result   = predict_with_artifacts(input_df, _artifacts)
+        result   = _apply_ewma_smoothing(result, _ewma_scores, _EWMA_ALPHA)
+        result   = _apply_alarm_debounce(result, _consecutive_alarms, _ALARM_MIN_CONSECUTIVE)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        log.exception("Inference error")
+        raise HTTPException(status_code=500, detail=f"Inference failed: {exc}")
+
+    return jsonable_encoder(_build_summary_response(result))

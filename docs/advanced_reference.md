@@ -544,15 +544,18 @@ The combined string is deterministic: identical artefacts always produce the sam
 
 ### Overview
 
-`spike/api.py` exposes three HTTP endpoints via FastAPI:
+`spike/api.py` exposes four HTTP endpoints via FastAPI:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Liveness probe — always 200 while the process is running |
 | `/ready` | GET | Readiness probe — 503 until artefacts are loaded |
-| `/predict` | POST | Run inference on a rolling window of CPU observations |
+| `/predict` | POST | Full per-machine inference (probabilities, imminence, SHAP top features) |
+| `/summary` | POST | Scheduler-facing summary: spike counts per horizon + per-node status |
 
 Artefacts are loaded once at startup (FastAPI lifespan context) and held in memory. Inference calls `predict_with_artifacts()` directly — no disk reads per request.
+
+Both `/predict` and `/summary` share the same per-machine EWMA and debounce state. Use one endpoint consistently per deployment cycle — calling both in the same cycle double-updates the smoothing and consecutive-alarm counters.
 
 ### Environment variables
 
@@ -619,6 +622,52 @@ curl -X POST http://localhost:8000/predict \
   }'
 ```
 
+### Kubernetes deployment (OSM k3s)
+
+The API ships with five K8s manifests in `k8s/`:
+
+| Manifest | Purpose |
+|----------|---------|
+| `k8s/namespace.yaml` | Creates the `spike` namespace |
+| `k8s/pvc.yaml` | 500 Mi `local-path` PVC for model artifacts |
+| `k8s/populate-pvc.yaml` | Temporary loader pod for `kubectl cp` of artifacts |
+| `k8s/deployment.yaml` | 1-replica Deployment, `imagePullPolicy: Never`, PVC at `/app/data/full_run` |
+| `k8s/service.yaml` | ClusterIP service on port 8000 |
+| `k8s/ingress.yaml` | nginx Ingress — external DNS via nip.io (`ingressClassName: nginx`) |
+
+**Image strategy:** No container registry is used. Build the image on the data VM and import it directly into k3s containerd:
+
+```bash
+# On data VM
+docker build -f spike/Dockerfile -t spike-api:latest .
+docker save spike-api:latest | gzip > /tmp/spike-api.tar.gz
+scp /tmp/spike-api.tar.gz atnoguser@10.255.42.75:~/
+
+# On OSM VM
+sudo k3s ctr images import ~/spike-api.tar.gz
+```
+
+**Access:**
+
+| Caller | URL |
+|--------|-----|
+| Pods inside the cluster | `http://spike-api.spike.svc.cluster.local:8000` |
+| VIMs / external VMs | `http://spike-api.10.255.42.75.nip.io` (nginx Ingress, port 80) |
+
+```bash
+# From any VIM or external host
+curl http://spike-api.10.255.42.75.nip.io/health
+curl http://spike-api.10.255.42.75.nip.io/ready
+
+curl -X POST http://spike-api.10.255.42.75.nip.io/summary \
+  -H "Content-Type: application/json" \
+  -d '{"rows": [{"machine_id": 1, "bucket": 100, "time_us": 30000000000,
+       "total_cpu": 0.42, "peak_cpu": 0.61, "total_mem": 1.2,
+       "peak_mem": 2.1, "disk_io": 0.0, "n_tasks": 4}]}'
+```
+
+See `session_anchor.md` in the repo root for the full step-by-step deployment runbook.
+
 ### `/ready` response
 
 ```json
@@ -642,6 +691,139 @@ The API response includes two fields not present in `predict.py` / `daemon.py` o
 |-------|---------------|
 | `p_spike_smoothed` | EWMA-smoothed `p_spike = p_moderate + p_severe`. `null` for cold-start machines |
 | `consecutive_alarms` | Number of consecutive cycles this machine has been in alarm state. Used by debounce. `0` for cold-start machines |
+
+### `/summary` — scheduler-facing endpoint
+
+`POST /summary` accepts the same request body as `/predict` and runs the same inference pipeline (including EWMA smoothing and alarm debounce). It returns a compact response optimised for scheduler consumption:
+
+```json
+{
+  "summary": {
+    "spikes_in_15m": 2,
+    "spikes_in_30m": 2,
+    "spikes_in_45m": 2,
+    "spikes_in_60m": 0,
+    "nodes_requiring_action": 2
+  },
+  "per_node": [
+    {
+      "machine_id": 3,
+      "status": "success",
+      "spike_60m": false,
+      "spike_imminent": true,
+      "severity": "no_spike",
+      "alarm_source": "binary_15m",
+      "scheduler_score": 48,
+      "horizon": "15m",
+      "recommended_action": "preempt_now",
+      "p_spike_smoothed": 0.519,
+      "consecutive_alarms": 1
+    }
+  ],
+  "predicted_at": "2026-05-15T10:28:21+00:00",
+  "machines_total": 11,
+  "machines_predicted": 11,
+  "machines_cold_start": 0
+}
+```
+
+**`summary` fields:**
+
+| Field | Meaning |
+|-------|---------|
+| `spikes_in_Xm` | Machines predicted to spike within X minutes (independent per horizon, not cumulative). Cold-start machines excluded. `0` = no alarms |
+| `nodes_requiring_action` | Machines with `recommended_action` of `preempt_now` or `migrate_jobs`. Cluster-level signal — no need to iterate `per_node` for a quick check |
+
+**`per_node` fields:**
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `machine_id` | int | Node identifier |
+| `status` | str | `success` or `cold_start` (too few history buckets to predict) |
+| `spike_60m` | bool\|null | 60m severity model verdict — sustained spike risk over the next hour. `null` for cold-start |
+| `spike_imminent` | bool\|null | `true` if any short-horizon binary model (15m/30m/45m) alarmed. More sensitive than `spike_60m` for near-term bursts. `null` for cold-start |
+| `severity` | str\|null | `no_spike`, `moderate`, or `severe` (from 60m model). `null` for cold-start |
+| `alarm_source` | str\|null | Which model drove `recommended_action`: `none`, `binary_15m`, `binary_30m`, `binary_45m`, or `60m_severity`. Use this when `spike_60m` and `spike_imminent` disagree. `null` for cold-start |
+| `scheduler_score` | int\|null | **0–100. Higher = safer.** Computed as `round(100 × (1 − p_spike_smoothed))`. Plugs directly into a Kubernetes Score plugin — no transformation required. `null` for cold-start |
+| `horizon` | str\|null | Earliest alarming horizon: `15m`, `30m`, `45m`, or `60m`. The scheduler's lead time before the predicted spike. `null` if no alarm |
+| `recommended_action` | str\|null | What the scheduler should do (see table below). `null` for cold-start |
+| `p_spike_smoothed` | float\|null | Raw EWMA-smoothed spike probability (0.0–1.0). Useful for dashboards and custom scoring formulas. `null` for cold-start |
+| `consecutive_alarms` | int | Consecutive spiking prediction cycles (debounce counter). `0` = first alarm or no alarm |
+
+**`recommended_action` decision table:**
+
+| Value | Meaning | Suggested scheduler behaviour |
+|-------|---------|-------------------------------|
+| `normal` | No spike predicted | Schedule freely |
+| `monitor` | Mild risk, below alarm threshold | Continue scheduling; watch next cycle |
+| `migrate_jobs` | Moderate sustained risk (60m model) | Drain long-running jobs; avoid new placements |
+| `preempt_now` | Imminent spike (binary 15m/30m/45m) | Stop scheduling to this node immediately; migrate if possible |
+
+**Key distinction:** `spike_60m` and `spike_imminent` answer different questions and can disagree:
+- `spike_imminent: true` + `spike_60m: false` → short burst expected, no sustained overload. Act quickly (`preempt_now`) but expect recovery within the hour.
+- `spike_60m: true` + `spike_imminent: false` → sustained overload building slowly. Drain gradually (`migrate_jobs`).
+- Both true → highest urgency. Act immediately and plan for extended unavailability.
+
+Use `alarm_source` to understand which model drove the action when the two signals disagree.
+
+```bash
+# Send a summary request
+curl -X POST http://localhost:8000/summary \
+  -H "Content-Type: application/json" \
+  -d '{
+    "rows": [
+      {"machine_id": 1, "bucket": 100, "time_us": 30000000000,
+       "total_cpu": 0.42, "peak_cpu": 0.61, "total_mem": 1.2,
+       "peak_mem": 2.1, "disk_io": 0.0, "n_tasks": 4}
+    ]
+  }'
+```
+
+### Kubernetes scheduler integration
+
+The `/summary` endpoint is designed to integrate with the [Kubernetes Scheduling Framework](https://kubernetes.io/docs/concepts/scheduling-eviction/scheduling-framework/). The recommended pattern uses two extension points:
+
+**PreScore** — called once per scheduling cycle with all candidate nodes. Call `/summary` here and stash the result in `CycleState`:
+
+```go
+func (pl *SpikePlugin) PreScore(ctx context.Context, state *framework.CycleState,
+    pod *v1.Pod, nodes []*v1.Node) *framework.Status {
+
+    rows := buildClusterAgg(nodes)           // fetch last 120 min of metrics
+    resp, err := postSummary(spikeAPIURL, rows)
+    if err != nil {
+        return framework.NewStatus(framework.Success) // fail open — don't block scheduling
+    }
+    // Index by machine_id for O(1) per-node lookup in Score
+    byNode := map[int]NodeResult{}
+    for _, n := range resp.PerNode {
+        byNode[n.MachineID] = n
+    }
+    state.Write(stateKey, &SpikeState{ByNode: byNode})
+    return framework.NewStatus(framework.Success)
+}
+```
+
+**Score** — called once per node, reads from `CycleState` (no additional API calls):
+
+```go
+func (pl *SpikePlugin) Score(ctx context.Context, state *framework.CycleState,
+    pod *v1.Pod, nodeName string) (int64, *framework.Status) {
+
+    s, err := state.Read(stateKey)
+    if err != nil {
+        return 50, framework.NewStatus(framework.Success) // neutral fallback
+    }
+    spikeState := s.(*SpikeState)
+    nodeResult, ok := spikeState.ByNode[machineIDFor(nodeName)]
+    if !ok || nodeResult.SchedulerScore == nil {
+        return 50, framework.NewStatus(framework.Success) // cold-start: neutral
+    }
+    return int64(*nodeResult.SchedulerScore), framework.NewStatus(framework.Success)
+}
+```
+
+`scheduler_score` is already in the 0–100 range the framework expects. The Score plugin returns it directly — no formula needed. Nodes with `scheduler_score: 100` are preferred; nodes with `scheduler_score: 0` are avoided.
 
 ---
 

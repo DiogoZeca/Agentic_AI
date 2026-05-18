@@ -1,0 +1,29 @@
+# One-shot pod used to load model artifacts into the PVC.
+# Apply this pod, kubectl cp artifacts into it, then delete it.
+# The spike-api image is reused (already imported into k3s — no extra pull needed).
+#
+# Usage:
+#   kubectl apply -f k8s/populate-pvc.yaml
+#   kubectl wait --for=condition=Ready pod/spike-pvc-loader -n spike --timeout=60s
+#   kubectl cp /tmp/spike-artifacts/. spike-pvc-loader:/data/ -n spike
+#   kubectl exec -n spike spike-pvc-loader -- ls /data/   # verify
+#   kubectl delete pod spike-pvc-loader -n spike
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spike-pvc-loader
+  namespace: spike
+spec:
+  restartPolicy: Never
+  containers:
+    - name: loader
+      image: spike-api:latest
+      imagePullPolicy: Never
+      command: ["sleep", "3600"]
+      volumeMounts:
+        - name: model-artifacts
+          mountPath: /data
+  volumes:
+    - name: model-artifacts
+      persistentVolumeClaim:
+        claimName: spike-model-pvc

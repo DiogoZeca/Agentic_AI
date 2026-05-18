@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spike-api
+  namespace: spike
+  labels:
+    app: spike-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spike-api
+  template:
+    metadata:
+      labels:
+        app: spike-api
+    spec:
+      containers:
+        - name: spike-api
+          image: spike-api:latest
+          # Image is imported directly into k3s containerd — no registry pull.
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8000
+          env:
+            - name: MODEL_DIR
+              value: /app/data/full_run/spike
+            - name: EWMA_ALPHA
+              value: "0.5"
+            - name: ALARM_MIN_CONSECUTIVE
+              value: "2"
+          # /health: always 200 if the process is alive.
+          # /ready:  503 until all XGBoost models are loaded from the PVC.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          volumeMounts:
+            # Mount at full_run/ (not spike/) — the inference code also loads sibling
+            # model directories (spike_15m/, spike_30m/, spike_45m/, spike_severe_ovr/)
+            # which sit alongside spike/ under full_run/.
+            - name: model-artifacts
+              mountPath: /app/data/full_run
+              readOnly: true
+      volumes:
+        - name: model-artifacts
+          persistentVolumeClaim:
+            claimName: spike-model-pvc
