@@ -641,7 +641,7 @@ The API ships with five K8s manifests in `k8s/`:
 # On data VM
 docker build -f spike/Dockerfile -t spike-api:latest .
 docker save spike-api:latest | gzip > /tmp/spike-api.tar.gz
-scp /tmp/spike-api.tar.gz atnoguser@10.255.42.75:~/
+scp /tmp/spike-api.tar.gz atnoguser@<CLUSTER_IP>:~/
 
 # On OSM VM
 sudo k3s ctr images import ~/spike-api.tar.gz
@@ -652,14 +652,14 @@ sudo k3s ctr images import ~/spike-api.tar.gz
 | Caller | URL |
 |--------|-----|
 | Pods inside the cluster | `http://spike-api.spike.svc.cluster.local:8000` |
-| VIMs / external VMs | `http://spike-api.10.255.42.75.nip.io` (nginx Ingress, port 80) |
+| VIMs / external VMs | `http://spike-api.<CLUSTER_IP>.nip.io` (nginx Ingress, port 80) |
 
 ```bash
 # From any VIM or external host
-curl http://spike-api.10.255.42.75.nip.io/health
-curl http://spike-api.10.255.42.75.nip.io/ready
+curl http://spike-api.<CLUSTER_IP>.nip.io/health
+curl http://spike-api.<CLUSTER_IP>.nip.io/ready
 
-curl -X POST http://spike-api.10.255.42.75.nip.io/summary \
+curl -X POST http://spike-api.<CLUSTER_IP>.nip.io/summary \
   -H "Content-Type: application/json" \
   -d '{"rows": [{"machine_id": 1, "bucket": 100, "time_us": 30000000000,
        "total_cpu": 0.42, "peak_cpu": 0.61, "total_mem": 1.2,

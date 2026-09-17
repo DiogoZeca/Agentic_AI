@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| **Summary endpoint** | `POST http://spike-api.10.255.42.75.nip.io/summary` |
-| **Health check** | `GET http://spike-api.10.255.42.75.nip.io/health` |
+| **Summary endpoint** | `POST http://spike-api.<CLUSTER_IP>.nip.io/summary` |
+| **Health check** | `GET http://spike-api.<CLUSTER_IP>.nip.io/health` |
 | **Update frequency** | Every 5 minutes (cron job on OSM VM — automatic) |
 
 ---
@@ -113,9 +113,9 @@ All counts: **0 = everything is fine**. Non-zero means act.
 
 ```bash
 python3 ~/spike/thanos.py \
-  --thanos-url http://thanos-query.10.255.42.75.nip.io \
+  --thanos-url http://thanos-query.<CLUSTER_IP>.nip.io \
   --mode post \
-  --api-url http://spike-api.10.255.42.75.nip.io/summary 2>/dev/null
+  --api-url http://spike-api.<CLUSTER_IP>.nip.io/summary 2>/dev/null
 ```
 
 `nodes_requiring_action: 0` = everything fine. `scheduler_score` per node: 0–100, higher = safer.

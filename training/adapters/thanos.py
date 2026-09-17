@@ -25,7 +25,7 @@ Usage
     python training/adapters/thanos.py \\
         --thanos-url http://localhost:19091 \\
         --mode post \\
-        --api-url http://spike-api.10.255.42.75.nip.io/summary
+        --api-url http://spike-api.<CLUSTER_IP>.nip.io/summary
 
     # Inside the cluster (no port-forward needed):
     python training/adapters/thanos.py \\

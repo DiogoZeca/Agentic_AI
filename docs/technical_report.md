@@ -59,6 +59,17 @@ baseline load profiles without per-machine retraining.
 - **Split:** Chronological — train 60% / val 20% / test 20% (no shuffle anywhere)
 - **CPU units:** Fraction of one core (duration-weighted mean within bucket)
 
+**Spike pattern diversity:** The 12,555 machines exhibit meaningfully different load
+profiles — each machine has its own p95/p99 threshold, so a "spike" on a heavy machine
+looks nothing like one on a lightly loaded machine. The training set contains machines
+that spike frequently, machines that almost never spike, and machines with a wide range
+of spike shapes: gradual builds, sudden bursts, sustained high load. Severity also varies
+from marginal p95 exceedances (moderate) to deep p99 violations (severe). The model
+is not pattern-matching a single template — it generalises across intra-day load cycles
+and machine heterogeneity. What it does *not* capture is multi-week or seasonal
+cyclicality: with only 7 days of data, `dow_sin`/`dow_cos` features were dropped
+(~23 samples per day label — confirmed temporal confound; see Section 7).
+
 **Known limitation:** 7 days of data from a single 2011 Borg cell is a structural
 ceiling. Near-identical performance across the 15m/30m/45m horizons (0.012 gap on
 test) is a direct consequence — not a model failure. Google 2019 (8 cells, 31 days)

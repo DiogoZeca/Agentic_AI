@@ -11,10 +11,10 @@ Deploy the spike prediction REST API into the OSM k3s cluster so the scheduler c
 
 | Component | Details |
 |-----------|---------|
-| OSM K8s cluster | k3s v1.29.3 · single node (`osm`) · 10.255.42.75 |
+| OSM K8s cluster | k3s v1.29.3 · single node (`osm`) · <CLUSTER_IP> |
 | Storage | `local-path` provisioner (default) · `WaitForFirstConsumer` |
 | Container registry | None — image imported directly into k3s containerd |
-| Docker VM | Same as OSM VM — Docker v29.1.3 runs directly on 10.255.42.75 |
+| Docker VM | Same as OSM VM — Docker v29.1.3 runs directly on <CLUSTER_IP> |
 | Target namespace | `spike` ✅ created |
 | Ingress controller | nginx (not Traefik — corrected during deploy) |
 
@@ -24,10 +24,10 @@ Deploy the spike prediction REST API into the OSM k3s cluster so the scheduler c
 
 | Purpose | URL |
 |---------|-----|
-| API health | `http://spike-api.10.255.42.75.nip.io/health` |
-| API ready | `http://spike-api.10.255.42.75.nip.io/ready` |
-| Scheduler summary | `POST http://spike-api.10.255.42.75.nip.io/summary` |
-| Thanos metrics | `http://thanos-query.10.255.42.75.nip.io` (nginx Ingress — no port-forward needed) |
+| API health | `http://spike-api.<CLUSTER_IP>.nip.io/health` |
+| API ready | `http://spike-api.<CLUSTER_IP>.nip.io/ready` |
+| Scheduler summary | `POST http://spike-api.<CLUSTER_IP>.nip.io/summary` |
+| Thanos metrics | `http://thanos-query.<CLUSTER_IP>.nip.io` (nginx Ingress — no port-forward needed) |
 
 ---
 
@@ -81,7 +81,7 @@ Deploy the spike prediction REST API into the OSM k3s cluster so the scheduler c
 
 ---
 
-## VM directory layout (OSM VM: 10.255.42.75)
+## VM directory layout (OSM VM: <CLUSTER_IP>)
 
 ```
 ~/spike/
@@ -97,9 +97,9 @@ Deploy the spike prediction REST API into the OSM k3s cluster so the scheduler c
 
 ```
 */5 * * * * python3 /home/atnoguser/spike/thanos.py \
-    --thanos-url http://thanos-query.10.255.42.75.nip.io \
+    --thanos-url http://thanos-query.<CLUSTER_IP>.nip.io \
     --mode post \
-    --api-url http://spike-api.10.255.42.75.nip.io/summary \
+    --api-url http://spike-api.<CLUSTER_IP>.nip.io/summary \
     >> /home/atnoguser/spike/thanos.log 2>&1
 ```
 
@@ -111,15 +111,15 @@ Check logs: `tail -f ~/spike/thanos.log`
 
 ```bash
 # 1. Transfer changed file(s)
-scp spike/api.py atnoguser@10.255.42.75:~/spike/build/spike/api.py
+scp spike/api.py atnoguser@<CLUSTER_IP>:~/spike/build/spike/api.py
 
 # 2. Rebuild (cached layers make this fast)
-ssh atnoguser@10.255.42.75 "cd ~/spike/build && sudo docker build -f spike/Dockerfile -t spike-api:latest ."
+ssh atnoguser@<CLUSTER_IP> "cd ~/spike/build && sudo docker build -f spike/Dockerfile -t spike-api:latest ."
 
 # 3. Re-import + rollout restart
-ssh atnoguser@10.255.42.75 "sudo docker save spike-api:latest | sudo k3s ctr images import -"
-ssh atnoguser@10.255.42.75 "kubectl rollout restart deployment/spike-api -n spike"
-ssh atnoguser@10.255.42.75 "kubectl rollout status deployment/spike-api -n spike"
+ssh atnoguser@<CLUSTER_IP> "sudo docker save spike-api:latest | sudo k3s ctr images import -"
+ssh atnoguser@<CLUSTER_IP> "kubectl rollout restart deployment/spike-api -n spike"
+ssh atnoguser@<CLUSTER_IP> "kubectl rollout status deployment/spike-api -n spike"
 ```
 
 ---
@@ -143,7 +143,7 @@ PVC mounted at `/app/data/full_run` (read-only).
 - nginx ingress controller (not Traefik) — `ingressClassName: nginx`
 - Deleted stale `ingress-nginx-admission` validating webhook (was blocking apply, safe to remove)
 - No container registry — image imported via `k3s ctr images import` + `imagePullPolicy: Never`
-- Thanos accessed via nginx Ingress (`thanos-query.10.255.42.75.nip.io`) — no port-forward needed
+- Thanos accessed via nginx Ingress (`thanos-query.<CLUSTER_IP>.nip.io`) — no port-forward needed
 - Grid reindex in thanos.py: CPU/disk → zero-fill, memory → forward-fill (handles sparse OSM data)
 - `scheduler_score` (0-100) maps directly to K8s Score plugin — no formula needed by integrator
 - `spike_60m` vs `spike_imminent` disambiguates 60m severity model vs binary horizon models

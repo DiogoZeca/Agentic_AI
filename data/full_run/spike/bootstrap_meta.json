@@ -1,0 +1,17 @@
+{
+  "bootstrapped_at": "2026-06-01T13:33:43.486643+00:00",
+  "source_path": "/home/diogozeca/osm_history.csv",
+  "min_buckets_per_machine": 2016,
+  "quantile_p95": 0.95,
+  "quantile_p99": 0.99,
+  "n_rows_input": 4032,
+  "bucket_range": [
+    5930321,
+    5934352
+  ],
+  "n_machines_total": 1,
+  "n_machines_with_per_machine": 1,
+  "n_machines_with_global_fallback": 0,
+  "global_p95": 2.8371364899999993,
+  "global_p99": 4.19940637
+}
