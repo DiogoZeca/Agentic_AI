@@ -3,6 +3,11 @@
 **Version:** Production baseline (K=2, 40 features, 2026-04-26)
 **Status:** Deployed, cross-domain validated on Zabbix HPC cluster
 
+**See also:** `docs/theory.md` for the statistical/ML theory behind these design choices
+(loss functions, calibration mechanics, PSI math, metrics glossary, anticipated review
+questions). This document is the empirical record — what was tried and what happened; theory.md
+explains why the winning approach works the way it does.
+
 ---
 
 ## Table of Contents

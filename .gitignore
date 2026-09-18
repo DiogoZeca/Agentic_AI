@@ -73,3 +73,7 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# ─── Internal ops artifacts (real hostnames/usernames — not for public repo) ─
+session_anchor.md
+data/zabbix_eval/

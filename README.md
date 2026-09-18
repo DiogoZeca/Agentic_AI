@@ -52,6 +52,7 @@ Agentic_AI/
 ├── docs/
 │   ├── ops_runbook.md              Step-by-step guide for new-domain operators
 │   ├── technical_report.md         Full experimental results, all ablations, design rationale
+│   ├── theory.md                   ML theory: loss functions, calibration, PSI, metrics glossary
 │   └── advanced_reference.md       Complete CLI reference, drift monitoring, SLO, API deployment
 │
 ├── spike/                          Inference package (pip install -e .)
@@ -160,5 +161,6 @@ CLI flag reference and deeper explanations: `docs/advanced_reference.md`
 |------|----------|----------|
 | `docs/ops_runbook.md` | New-domain operators | Install → smoke test → bootstrap → evaluate → deploy → monitor |
 | `docs/technical_report.md` | Researchers / reviewers | All experimental results, ablations, design decisions, rejected approaches |
+| `docs/theory.md` | Researchers / reviewers | Statistical/ML theory: loss functions, calibration, PSI math, metrics glossary, limitations |
 | `docs/advanced_reference.md` | System integrators | Complete CLI reference, drift monitoring, SLO metrics, FastAPI deployment |
 | `CLAUDE.md` | Developers | Pipeline architecture, feature list, leakage guards, training constraints |
