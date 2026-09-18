@@ -701,10 +701,10 @@ We apply a single alarm threshold across all machines. Production schedulers at
 Google/Meta scale use per-entity adaptive thresholds. We have per-machine p95/p99
 for feature normalisation but the alarm threshold is global.
 
-**Impact:** Machines with inherently bursty or noisy CPU profiles (e.g. Zabbix nodes
-`atnog-bkpConfigs` with 94.6% idle fraction) may require different thresholds than
-always-loaded servers. Operators can mitigate this with the `--alarm-threshold` flag
-but cannot set per-machine values at runtime.
+**Impact:** Machines with inherently bursty or noisy CPU profiles (e.g. a backup-config
+node in the Zabbix evaluation cluster with 94.6% idle fraction) may require different
+thresholds than always-loaded servers. Operators can mitigate this with the
+`--alarm-threshold` flag but cannot set per-machine values at runtime.
 
 **Future work:** Per-machine adaptive thresholds, possibly learned from the validation
 set per machine.

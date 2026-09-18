@@ -53,7 +53,7 @@ import urllib3
 #  CREDENTIALS  —  fill in before running, do not commit to git
 # ══════════════════════════════════════════════════════════════════════════════
 
-ZABBIX_URL       = "http://atnog-mon.av.it.pt/zabbix/api_jsonrpc.php"
+ZABBIX_URL       = ""      # e.g. "https://YOUR_ZABBIX_HOST/zabbix/api_jsonrpc.php"
 ZABBIX_API_TOKEN = ""      # Option A: API token (Users → API tokens)
 ZABBIX_USER      = "" # Option B: username (leave empty if using token)
 ZABBIX_PASS      = ""      # Option B: password

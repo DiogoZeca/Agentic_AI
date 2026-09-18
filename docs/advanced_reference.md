@@ -641,7 +641,7 @@ The API ships with five K8s manifests in `k8s/`:
 # On data VM
 docker build -f spike/Dockerfile -t spike-api:latest .
 docker save spike-api:latest | gzip > /tmp/spike-api.tar.gz
-scp /tmp/spike-api.tar.gz atnoguser@<CLUSTER_IP>:~/
+scp /tmp/spike-api.tar.gz <deploy-user>@<CLUSTER_IP>:~/
 
 # On OSM VM
 sudo k3s ctr images import ~/spike-api.tar.gz

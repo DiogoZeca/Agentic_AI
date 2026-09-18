@@ -77,3 +77,8 @@ Thumbs.db
 # ─── Internal ops artifacts (real hostnames/usernames — not for public repo) ─
 session_anchor.md
 data/zabbix_eval/
+
+# ─── bootstrap_thresholds.py output metadata — operator-specific, regeneratable,
+# not part of the shipped production model (spike_thresholds.parquet is the
+# artifact that actually matters for inference, and it stays tracked above).
+bootstrap_meta.json

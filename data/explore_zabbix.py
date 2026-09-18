@@ -45,7 +45,7 @@ import urllib3
 #    or    https://YOUR_HOST/api_jsonrpc.php
 # ══════════════════════════════════════════════════════════════════════════════
 
-ZABBIX_URL       = "http://atnog-mon.av.it.pt/zabbix/api_jsonrpc.php"
+ZABBIX_URL       = ""          # e.g. "https://YOUR_ZABBIX_HOST/zabbix/api_jsonrpc.php"
 ZABBIX_API_TOKEN = ""          # preferred: paste API token from Users → API tokens
 ZABBIX_USER      = ""          # fallback: username (leave empty if using token)
 ZABBIX_PASS      = ""          # fallback: password  (leave empty if using token)
